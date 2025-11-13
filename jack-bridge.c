@@ -1,0 +1,152 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <alsa/asoundlib.h>
+#include <jack/jack.h>
+#include <pthread.h>
+
+#define SAMPLE_RATE 44100
+#define BUFFER_SIZE 1024  // Number of frames per process call
+
+// Global variables
+jack_client_t *jack_client = NULL;
+jack_port_t *jack_port_left = NULL, *jack_port_right = NULL;
+snd_pcm_t *alsa_handle = NULL;
+float *alsa_buffer_left = NULL, *alsa_buffer_right = NULL;
+float *interleaved_buffer = NULL;  // Add this global buffer
+
+
+// JACK process callback
+int process(jack_nframes_t nframes, void *arg) {
+    // Read stereo interleaved audio data from ALSA
+    int frames_read = snd_pcm_readi(alsa_handle, interleaved_buffer, nframes);
+    if (frames_read < 0) {
+        fprintf(stderr, "Error reading ALSA: %s\n", snd_strerror(frames_read));
+        return -1;
+    }
+
+    // Copy the left and right channels to the JACK output buffers
+    float *out_left = jack_port_get_buffer(jack_port_left, nframes);
+    float *out_right = jack_port_get_buffer(jack_port_right, nframes);
+
+    int i;
+    for (i = 0; i < nframes; i++) {
+        out_left[i] = interleaved_buffer[i * 2];       // Left channel (even indices)
+        out_right[i] = interleaved_buffer[i * 2 + 1];  // Right channel (odd indices)
+    }
+    
+    return 0;
+}
+
+// Initialize ALSA loopback device
+int init_alsa() {
+    int err;
+        
+    // Allocate buffers
+    alsa_buffer_left = (float *) malloc(sizeof(float) * BUFFER_SIZE);
+    alsa_buffer_right = (float *) malloc(sizeof(float) * BUFFER_SIZE);
+    interleaved_buffer = (float *) malloc(sizeof(float) * BUFFER_SIZE * 2);
+
+    // Open the ALSA loopback device for capture
+    err = snd_pcm_open(&alsa_handle, "hw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, 0);
+    if (err < 0) {
+        fprintf(stderr, "Error opening ALSA device: %s\n", snd_strerror(err));
+        return -1;
+    }
+
+    // Set the ALSA capture parameters
+    err = snd_pcm_set_params(alsa_handle,
+                             SND_PCM_FORMAT_FLOAT,
+                             SND_PCM_ACCESS_RW_INTERLEAVED,
+                             2,
+                             SAMPLE_RATE,
+                             1,
+                             500000);
+    if (err < 0) {
+        fprintf(stderr, "Error setting ALSA parameters: %s\n", snd_strerror(err));
+        return -1;
+    }
+
+    return 0;
+}
+
+// Initialize JACK client
+int init_jack() {
+    const char *client_name = "alsa_to_jack";
+    jack_options_t options = JackNoStartServer;
+    jack_status_t status;
+
+    // Open JACK client
+    jack_client = jack_client_open(client_name, options, &status);
+    if (!jack_client) {
+        fprintf(stderr, "Failed to open JACK client: %s\n");
+        return -1;
+    }
+
+    // Register two output ports (left and right channels)
+    jack_port_left = jack_port_register(jack_client, "left", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    jack_port_right = jack_port_register(jack_client, "right", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    if (!jack_port_left || !jack_port_right) {
+        fprintf(stderr, "Failed to register JACK ports\n");
+        return -1;
+    }
+
+    // Set the process callback
+    if (jack_set_process_callback(jack_client, process, NULL)) {
+        fprintf(stderr, "Failed to set JACK process callback\n");
+        return -1;
+    }
+
+    // Activate the JACK client
+    if (jack_activate(jack_client)) {
+        fprintf(stderr, "Failed to activate JACK client\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+// Cleanup function to close ALSA and JACK
+void cleanup() {
+    if (alsa_handle) {
+        snd_pcm_close(alsa_handle);
+    }
+    if (jack_client) {
+        jack_client_close(jack_client);
+    }
+    if (alsa_buffer_left) {
+        free(alsa_buffer_left);
+    }
+    if (alsa_buffer_right) {
+        free(alsa_buffer_right);
+    }
+     if (interleaved_buffer) {
+        free(interleaved_buffer);
+    }
+}
+
+int main() {
+    // Initialize ALSA
+    if (init_alsa() < 0) {
+        cleanup();
+        return 1;
+    }
+
+    // Initialize JACK
+    if (init_jack() < 0) {
+        cleanup();
+        return 1;
+    }
+
+    printf("JACK client running...\n");
+
+    // Run the JACK processing loop
+    while (1) {
+        sleep(1); // Keep the process alive
+    }
+
+    // Cleanup before exiting
+    cleanup();
+    return 0;
+}
