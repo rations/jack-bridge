@@ -6,7 +6,7 @@
 #include <jack/jack.h>
 #include <pthread.h>
 
-#define SAMPLE_RATE 44100
+#define SAMPLE_RATE 48000
 #define BUFFER_SIZE 1024  // Number of frames per process call
 
 // Global variables
@@ -19,21 +19,43 @@ float *interleaved_buffer = NULL;  // Add this global buffer
 
 // JACK process callback
 int process(jack_nframes_t nframes, void *arg) {
-    // Read stereo interleaved audio data from ALSA
-    int frames_read = snd_pcm_readi(alsa_handle, interleaved_buffer, nframes);
-    if (frames_read < 0) {
-        fprintf(stderr, "Error reading ALSA: %s\n", snd_strerror(frames_read));
-        return -1;
-    }
-
-    // Copy the left and right channels to the JACK output buffers
+    // Get JACK output ports
     float *out_left = jack_port_get_buffer(jack_port_left, nframes);
     float *out_right = jack_port_get_buffer(jack_port_right, nframes);
 
+    // Try to read audio data from ALSA loopback capture (stereo)
+    int frames_read = snd_pcm_readi(alsa_handle, interleaved_buffer, nframes);
+    
+    // Handle ALSA errors and non-blocking cases
+    if (frames_read == -EAGAIN) {
+        // No data available yet (non-blocking), output silence
+        memset(out_left, 0, nframes * sizeof(float));
+        memset(out_right, 0, nframes * sizeof(float));
+        return 0;
+    } else if (frames_read == -EPIPE) {
+        // Underrun, recover and output silence
+        snd_pcm_prepare(alsa_handle);
+        memset(out_left, 0, nframes * sizeof(float));
+        memset(out_right, 0, nframes * sizeof(float));
+        return 0;
+    } else if (frames_read < 0) {
+        // Other error
+        memset(out_left, 0, nframes * sizeof(float));
+        memset(out_right, 0, nframes * sizeof(float));
+        return 0;
+    }
+
+    // De-interleave stereo audio from ALSA to JACK
     int i;
-    for (i = 0; i < nframes; i++) {
-        out_left[i] = interleaved_buffer[i * 2];       // Left channel (even indices)
-        out_right[i] = interleaved_buffer[i * 2 + 1];  // Right channel (odd indices)
+    for (i = 0; i < frames_read; i++) {
+        out_left[i] = interleaved_buffer[i * 2];
+        out_right[i] = interleaved_buffer[i * 2 + 1];
+    }
+    
+    // Zero out remaining frames if not all were read
+    for (; i < nframes; i++) {
+        out_left[i] = 0.0f;
+        out_right[i] = 0.0f;
     }
     
     return 0;
@@ -42,29 +64,41 @@ int process(jack_nframes_t nframes, void *arg) {
 // Initialize ALSA loopback device
 int init_alsa() {
     int err;
+    snd_pcm_hw_params_t *hw_params;
         
     // Allocate buffers
     alsa_buffer_left = (float *) malloc(sizeof(float) * BUFFER_SIZE);
     alsa_buffer_right = (float *) malloc(sizeof(float) * BUFFER_SIZE);
     interleaved_buffer = (float *) malloc(sizeof(float) * BUFFER_SIZE * 2);
 
-    // Open the ALSA loopback device for capture
-    err = snd_pcm_open(&alsa_handle, "hw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, 0);
+    // Open the ALSA loopback device for capture (device 1, subdevice 0) in non-blocking mode
+    err = snd_pcm_open(&alsa_handle, "hw:Loopback,1,0", SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
     if (err < 0) {
         fprintf(stderr, "Error opening ALSA device: %s\n", snd_strerror(err));
         return -1;
     }
 
-    // Set the ALSA capture parameters
-    err = snd_pcm_set_params(alsa_handle,
-                             SND_PCM_FORMAT_FLOAT,
-                             SND_PCM_ACCESS_RW_INTERLEAVED,
-                             2,
-                             SAMPLE_RATE,
-                             1,
-                             500000);
+    // Allocate hardware parameters structure
+    snd_pcm_hw_params_alloca(&hw_params);
+    snd_pcm_hw_params_any(alsa_handle, hw_params);
+
+    // Set parameters
+    snd_pcm_hw_params_set_access(alsa_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(alsa_handle, hw_params, SND_PCM_FORMAT_FLOAT);
+    snd_pcm_hw_params_set_channels(alsa_handle, hw_params, 2);
+    snd_pcm_hw_params_set_rate(alsa_handle, hw_params, SAMPLE_RATE, 0);
+    
+    // Write the parameters to the device
+    err = snd_pcm_hw_params(alsa_handle, hw_params);
     if (err < 0) {
-        fprintf(stderr, "Error setting ALSA parameters: %s\n", snd_strerror(err));
+        fprintf(stderr, "Error setting ALSA hardware parameters: %s\n", snd_strerror(err));
+        return -1;
+    }
+
+    // Prepare the PCM device
+    err = snd_pcm_prepare(alsa_handle);
+    if (err < 0) {
+        fprintf(stderr, "Error preparing ALSA device: %s\n", snd_strerror(err));
         return -1;
     }
 
@@ -80,7 +114,7 @@ int init_jack() {
     // Open JACK client
     jack_client = jack_client_open(client_name, options, &status);
     if (!jack_client) {
-        fprintf(stderr, "Failed to open JACK client: %s\n");
+        fprintf(stderr, "Failed to open JACK client\n");
         return -1;
     }
 

@@ -1,0 +1,11 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          snd-aloop-load
+# Required-Start:
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Description:       Load ALSA loopback module
+### END INIT INFO
+
+modprobe snd_aloop
