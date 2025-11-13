@@ -1,0 +1,148 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          jackd-rt
+# Required-Start:    $local_fs $remote_fs
+# Required-Stop:
+# Default-Start:     S 2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start JACK (classic jackd) at boot with realtime tuning
+# Description:       Starts jackd as a regular user (detected) using ALSA device auto-detection.
+### END INIT INFO
+
+# contrib/init.d/jackd-rt - SysV init script for jackd (classic) with auto-detection.
+# Template is non-hardcoded; overrides may be placed in /etc/default/jackd-rt
+
+. /lib/lsb/init-functions
+
+# Defaults (can be overridden by /etc/default/jackd-rt)
+: ${JACKD_USER:=""}
+: ${JACKD_DEVICE:=""}
+: ${JACKD_SR:=48000}
+: ${JACKD_PERIOD:=256}
+: ${JACKD_NPERIODS:=3}
+: ${JACKD_PRIORITY:=70}
+: ${JACKD_ARGS:=""}
+: ${JACKD_DAEMON:=/usr/bin/jackd}
+: ${DETECT_SCRIPT:=/usr/lib/jack-bridge/detect-alsa-device.sh}
+: ${DETECT_USER_SCRIPT:=/usr/lib/jack-bridge/detect-user.sh}
+
+# Helper: choose a user to run under. Preference:
+# 1) JACKD_USER from /etc/default/jackd-rt
+# 2) first logged-in desktop user (UID>=1000 in audio group)
+# 3) fallback to 'root' (not ideal)
+detect_user() {
+    if [ -n "$JACKD_USER" ]; then
+        echo "$JACKD_USER"
+        return
+    fi
+    if [ -x "$DETECT_USER_SCRIPT" ]; then
+        eval "$DETECT_USER_SCRIPT"
+        return
+    fi
+    # attempt sensible default
+    # first user in /etc/passwd with UID>=1000 and member of audio group
+    for user in $(cut -d: -f1 /etc/passwd); do
+        uid=$(id -u "$user" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+            groups=$(id -nG "$user" 2>/dev/null || true)
+            case " $groups " in
+                *" audio "*) echo "$user"; return;;
+            esac
+        fi
+    done
+    # fallback to first user UID>=1000 even if not in audio
+    for user in $(cut -d: -f1 /etc/passwd); do
+        uid=$(id -u "$user" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+            echo "$user"
+            return
+        fi
+    done
+    echo "root"
+}
+
+# Helper: detect ALSA device using plugin script or fallback
+detect_device() {
+    if [ -n "$JACKD_DEVICE" ]; then
+        echo "$JACKD_DEVICE"
+        return
+    fi
+    if [ -x "$DETECT_SCRIPT" ]; then
+        # script prints device like hw:0 or hw:CARD
+        eval "$DETECT_SCRIPT"
+        return
+    fi
+    # Fallback: try hw:0
+    echo "hw:0"
+}
+
+start() {
+    log_daemon_msg "Starting JACK (jackd) with realtime settings" "jackd-rt"
+    USERNAME=$(detect_user)
+    DEVICE=$(detect_device)
+
+    # Build jackd args
+    ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+
+    # Ensure user exists
+    if ! id "$USERNAME" >/dev/null 2>&1; then
+        log_failure_msg "User $USERNAME does not exist"
+        return 1
+    fi
+
+    # Ensure jackd binary exists
+    if [ ! -x "$JACKD_DAEMON" ]; then
+        log_failure_msg "jackd not found at $JACKD_DAEMON"
+        return 1
+    fi
+
+    # Start as detected user using start-stop-daemon
+    start-stop-daemon --start --background --make-pidfile --pidfile /var/run/jackd-rt.pid \
+        --chuid "$USERNAME" --startas /bin/sh -- -c "exec ${JACKD_DAEMON} ${ARGS}" \
+        || { log_failure_msg "Failed to start jackd"; return 1; }
+
+    log_end_msg 0
+    return 0
+}
+
+stop() {
+    log_daemon_msg "Stopping JACK (jackd)" "jackd-rt"
+    start-stop-daemon --stop --pidfile /var/run/jackd-rt.pid --retry 5 || true
+    rm -f /var/run/jackd-rt.pid 2>/dev/null || true
+    log_end_msg 0
+}
+
+status() {
+    if [ -f /var/run/jackd-rt.pid ]; then
+        pid=$(cat /var/run/jackd-rt.pid 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            echo "jackd running (pid $pid)"
+            return 0
+        fi
+    fi
+    echo "jackd not running"
+    return 1
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|force-reload)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0

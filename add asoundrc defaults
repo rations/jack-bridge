@@ -1,5 +1,0 @@
-sudo cat > /etc/asound.conf << 'EOF'
-defaults.pcm.card 0
-defaults.pcm.device 0
-defaults.ctl.card 0
-EOF
