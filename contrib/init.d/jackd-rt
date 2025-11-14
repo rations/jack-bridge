@@ -14,6 +14,11 @@
 
 . /lib/lsb/init-functions
 
+# Load overrides if present
+if [ -r /etc/default/jackd-rt ]; then
+    . /etc/default/jackd-rt
+fi
+
 # Defaults (can be overridden by /etc/default/jackd-rt)
 : ${JACKD_USER:=""}
 : ${JACKD_DEVICE:=""}
@@ -101,21 +106,30 @@ start() {
     touch "$JACKD_LOG" 2>/dev/null || true
     chown "$USERNAME":"$USERNAME" "$JACKD_LOG" 2>/dev/null || true
 
-    # Build shell command to set limits inside the user's shell and exec jackd with logging
-    CMD="ulimit -l unlimited 2>/dev/null || true; ulimit -r ${JACKD_PRIORITY} 2>/dev/null || true; exec ${JACKD_DAEMON} ${ARGS} >>\"$JACKD_LOG\" 2>&1"
+    # Build command: start a login shell for $USERNAME via su so PAM limits apply, then exec jackd with logging
+    CMD="exec su -l \"$USERNAME\" -s /bin/sh -c 'exec ${JACKD_DAEMON} ${ARGS} >>\"$JACKD_LOG\" 2>&1'"
 
-    # Start as detected user using start-stop-daemon
+    # Start jackd as login user via start-stop-daemon (no --chuid; PID tracks exec chain)
     start-stop-daemon --start --background --make-pidfile --pidfile /var/run/jackd-rt.pid \
-        --chuid "$USERNAME" --startas /bin/sh -- -c "$CMD" \
+        --startas /bin/sh -- -c "$CMD" \
         || { log_failure_msg "Failed to start jackd"; return 1; }
 
-    # Brief health check: if jackd exited quickly, show recent log
-    sleep 1
-    if ! { [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; }; then
-        log_warning_msg "jackd appears to have exited early; last 30 lines of $JACKD_LOG:"
-        tail -n 30 "$JACKD_LOG" 2>/dev/null || true
-        log_end_msg 1
-        return 1
+    # Health check: prefer jack_wait, fallback to pid check
+    if command -v jack_wait >/dev/null 2>&1; then
+        if ! jack_wait -w -t 8 >/dev/null 2>&1; then
+            log_warning_msg "jackd did not become ready in time; last 30 lines of $JACKD_LOG:"
+            tail -n 30 "$JACKD_LOG" 2>/dev/null || true
+            log_end_msg 1
+            return 1
+        fi
+    else
+        sleep 1
+        if ! { [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; }; then
+            log_warning_msg "jackd appears to have exited early; last 30 lines of $JACKD_LOG:"
+            tail -n 30 "$JACKD_LOG" 2>/dev/null || true
+            log_end_msg 1
+            return 1
+        fi
     fi
 
     log_end_msg 0

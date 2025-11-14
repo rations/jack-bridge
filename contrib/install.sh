@@ -156,6 +156,122 @@ else
     echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
 fi
 
+# Option: start and verify service now (JACK server should be up without user action)
+printf "Start and verify jackd-rt service now? [Y/n] "
+read start_now
+start_now=${start_now:-Y}
+case "$(printf '%s' "$start_now" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|'')
+        echo "Starting jackd-rt service..."
+        if command -v invoke-rc.d >/dev/null 2>&1; then
+            if ! invoke-rc.d jackd-rt start; then
+                echo "Warning: invoke-rc.d failed; trying 'service jackd-rt start'..."
+                service jackd-rt start || true
+            fi
+        else
+            service jackd-rt start || true
+        fi
+
+        # Wait for JACK readiness
+        if command -v jack_wait >/dev/null 2>&1; then
+            if ! jack_wait -w -t 8 >/dev/null 2>&1; then
+                echo "Warning: JACK did not become ready in time; last 30 lines of /var/log/jackd-rt.log:"
+                tail -n 30 /var/log/jackd-rt.log 2>/dev/null || true
+            else
+                echo "JACK is up."
+            fi
+        else
+            sleep 1
+            if ! { [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; }; then
+                echo "Warning: jackd may not be running; last 30 lines of /var/log/jackd-rt.log:"
+                tail -n 30 /var/log/jackd-rt.log 2>/dev/null || true
+            else
+                pid=$(cat /var/run/jackd-rt.pid 2>/dev/null || true)
+                echo "JACK appears to be running (pid $pid)."
+            fi
+        fi
+        ;;
+    *)
+        echo "Skipping immediate service start. JACK will start automatically at next boot."
+        ;;
+esac
+
+# Optional: disable PulseAudio autospawn (non-destructive; does not purge packages)
+printf "Disable PulseAudio autospawn system-wide (create /etc/pulse/client.conf.d/01-no-autospawn.conf)? [y/N] "
+read pa_disable
+pa_disable=${pa_disable:-N}
+case "$(printf '%s' "$pa_disable" | tr '[:upper:]' '[:lower:]')" in
+    y|yes)
+        mkdir -p /etc/pulse/client.conf.d
+        cat > /etc/pulse/client.conf.d/01-no-autospawn.conf <<'PAEOF'
+# Created by jack-bridge contrib installer
+autospawn = no
+daemon-binary = /bin/true
+PAEOF
+        chmod 644 /etc/pulse/client.conf.d/01-no-autospawn.conf || true
+        echo "Created /etc/pulse/client.conf.d/01-no-autospawn.conf"
+        ;;
+    *)
+        echo "Keeping PulseAudio autospawn behavior unchanged."
+        ;;
+esac
+
+# Guidance for PipeWire (no changes performed automatically)
+echo "Note: If PipeWire is installed, you may disable its PulseAudio compatibility without purging by disabling user/session autostarts."
+echo "      On systemd-based user sessions: systemctl --user mask --now pipewire-pulse.service pipewire.service pipewire.socket"
+echo "      On non-systemd sessions, disable any XDG autostart entries for pipewire/pipewire-pulse."
+
+# Optional: install qjackctl autostart entry (GUI convenience; server already runs at boot)
+printf "Install qjackctl autostart for desktop sessions (launch minimized on login)? [y/N] "
+read qjc_auto
+qjc_auto=${qjc_auto:-N}
+case "$(printf '%s' "$qjc_auto" | tr '[:upper:]' '[:lower:]')" in
+    y|yes)
+        XDG_AUTOSTART_DIR="/etc/xdg/autostart"
+        mkdir -p "$XDG_AUTOSTART_DIR"
+        cat > "${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=QjackCtl (Auto)
+Comment=Launch QjackCtl minimized; JACK is already started by system service
+TryExec=/usr/bin/qjackctl
+Exec=/usr/bin/qjackctl --start-minimized
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
+OnlyShowIn=XFCE;LXDE;LXQt;MATE;GNOME;KDE;
+EOF
+        chmod 644 "${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop" || true
+        echo "Installed ${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop"
+        ;;
+    *)
+        echo "Skipping qjackctl autostart entry."
+        ;;
+esac
+
+# Optional: add desktop users (UID>=1000) to 'audio' group
+printf "Add desktop users (UID>=1000) to the 'audio' group now? [y/N] "
+read add_audio
+add_audio=${add_audio:-N}
+case "$(printf '%s' "$add_audio" | tr '[:upper:]' '[:lower:]')" in
+    y|yes)
+        for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
+            if id -nG "$u" 2>/dev/null | grep -qw audio; then
+                echo "User '$u' already in audio group."
+            else
+                if usermod -aG audio "$u" 2>/dev/null; then
+                    echo "Added '$u' to audio group."
+                else
+                    echo "Warning: failed to add '$u' to audio group."
+                fi
+            fi
+        done
+        echo "Note: Users may need to log out and back in for new group membership to take effect in their sessions."
+        ;;
+    *)
+        echo "Leaving 'audio' group membership unchanged."
+        ;;
+esac
+
 # Detect legacy snd-aloop init script presence and suggest removal (do NOT remove automatically)
 LEGACY_INIT="/etc/init.d/snd-aloop-load"
 if [ -f "$LEGACY_INIT" ]; then
@@ -180,14 +296,17 @@ if [ -f "$LEGACY_INIT" ]; then
 fi
 
 echo ""
-echo "Installation complete. Next steps for administrators:"
-echo " - Ensure users who will run JACK are in the 'audio' group."
-echo " - Confirm /etc/security/limits.d/audio.conf provides rtprio and memlock settings for @audio group."
-echo " - If you want system-wide ALSA->JACK behavior, ensure /etc/asound.conf is present (we installed a template if none existed)."
-echo " - Start the service: sudo service jackd-rt start"
-echo " - To run browsers under apulse wrappers: use 'apulse-firefox' or 'apulse-chromium'."
+echo "Installation complete."
+echo " - JACK server is configured to start automatically at boot via 'jackd-rt' SysV service."
+echo " - If you chose to start it now, it should already be running."
+echo " - ALSA apps will route to JACK via /etc/asound.conf by default."
+echo " - For PulseAudio-only apps, use the apulse wrappers: 'apulse-firefox' or 'apulse-chromium'."
+echo " - Ensure desktop users are in the 'audio' group and that /etc/security/limits.d/audio.conf grants rtprio/memlock."
+echo ""
+echo "Quick validation (optional):"
+echo "   aplay -D default /usr/share/sounds/alsa/Front_Center.wav"
+echo "If there is no sound, inspect: tail -n 50 /var/log/jackd-rt.log"
 echo ""
 echo "For troubleshooting, see contrib/TROUBLESHOOTING.md."
-echo ""
-echo "Note: This installer makes reasonable defaults but is intentionally non-destructive."
+echo "This installer applies reasonable defaults and is intentionally non-destructive."
 exit 0
