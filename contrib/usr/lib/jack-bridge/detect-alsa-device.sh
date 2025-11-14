@@ -1,91 +1,83 @@
 #!/bin/sh
-# detect-alsa-device.sh
-# POSIX shell script that attempts to find a sane full-duplex ALSA device.
-# Prints a device string suitable for jackd (e.g. hw:0 or hw:CARD=USB).
-# Exit status 0 on success, non-zero on failure.
+# contrib/usr/lib/jack-bridge/detect-alsa-device.sh
+# Strict POSIX sh, no here-docs into functions, no eval. Works under /bin/sh (dash).
+# Prints a device like "hw:CARD=Name" or "hw:0" on stdout and exits 0.
 
-# Strategy:
-# 1) Look for a card that appears in both aplay -l and arecord -l (playback+capture).
-# 2) Prefer non-loopback cards (skip 'Loopback' in name).
-# 3) If none found, fall back to hw:0
-# 4) Print concise device identifier: hw:CARD=<name> if available, else hw:<index>
+set -eu
 
 aplay_cmd=$(command -v aplay 2>/dev/null || true)
 arecord_cmd=$(command -v arecord 2>/dev/null || true)
 
-# If tools missing, fallback to hw:0
-if [ -z "$aplay_cmd" ] || [ -z "$arecord_cmd" ]; then
+# Fallback if tools missing
+if [ -z "${aplay_cmd}" ] || [ -z "${arecord_cmd}" ]; then
     echo "hw:0"
     exit 0
 fi
 
-# Parse card listings
-aplay_list=$($aplay_cmd -l 2>/dev/null)
-arecord_list=$($arecord_cmd -l 2>/dev/null)
+# Capture listings
+aplay_out=$("${aplay_cmd}" -l 2>/dev/null || true)
+arecord_out=$("${arecord_cmd}" -l 2>/dev/null || true)
 
-# helper to get card indices/names into lines "index:name"
-parse_cards() {
-    echo "$1" | awk -F'[:[]' '/^card [0-9]+:/ { idx=$2; sub(/^ /,"",idx); name=$3; gsub(/^[ \t]+|[ \t]+$/,"",name); print idx ":" name }'
-}
+# Extract lines "card N: NAME" -> "N|NAME" for playback/capture
+aplay_cards=$(printf '%s\n' "$aplay_out"   | sed -n 's/^card \([0-9][0-9]*\): \([^[]*\).*/\1|\2/p')
+arecord_cards=$(printf '%s\n' "$arecord_out" | sed -n 's/^card \([0-9][0-9]*\): \([^[]*\).*/\1|\2/p')
 
-aplay_cards=$(parse_cards "$aplay_list")
-arecord_cards=$(parse_cards "$arecord_list")
+FOUND_IDX=""
+FOUND_NAME=""
 
-best_card=""
-for aline in $(printf "%s\n" "$aplay_cards"); do
-    idx=$(printf "%s\n" "$aline" | cut -d: -f1)
-    name=$(printf "%s\n" "$aline" | cut -d: -f2-)
-    # skip Loopback devices
+# Iterate playback cards, prefer non-loopback present in capture list
+printf '%s\n' "$aplay_cards" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    idx=${line%%|*}
+    name=${line#*|}
+    # trim spaces around name
+    name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     case "$name" in
-        *Loopback*|*Loop Back*) continue ;;
+        *Loopback*|*Loop\ Back*) continue ;;
     esac
-    match_found=0
-    for rline in $(printf "%s\n" "$arecord_cards"); do
-        ridx=$(printf "%s\n" "$rline" | cut -d: -f1)
-        rname=$(printf "%s\n" "$rline" | cut -d: -f2-)
-        if [ "$idx" = "$ridx" ] || [ "$name" = "$rname" ]; then
-            match_found=1
-            break
-        fi
-    done
-    if [ "$match_found" -eq 1 ]; then
-        best_card="$idx:$name"
-        break
-    fi
-done
-
-# If none matched by index/name, try any non-loopback from aplay
-if [ -z "$best_card" ]; then
-    for aline in $(printf "%s\n" "$aplay_cards"); do
-        idx=$(printf "%s\n" "$aline" | cut -d: -f1)
-        name=$(printf "%s\n" "$aline" | cut -d: -f2-)
-        case "$name" in
-            *Loopback*|*Loop Back*) continue ;;
-        esac
-        best_card="$idx:$name"
-        break
-    done
-fi
-
-# If still empty, fallback to hw:0
-if [ -z "$best_card" ]; then
-    echo "hw:0"
-    exit 0
-fi
-
-card_idx=$(printf "%s\n" "$best_card" | cut -d: -f1)
-card_name=$(printf "%s\n" "$best_card" | cut -d: -f2-)
-
-# sanitize card_name to safe token
-sanitized=$(printf "%s\n" "$card_name" | sed 's/[^A-Za-z0-9_/-]/_/g' | cut -c1-32)
-if [ -n "$sanitized" ]; then
-    # Verify that the sanitized name exists in aplay output (best-effort)
-    if echo "$aplay_list" | grep -qi "$sanitized"; then
-        echo "hw:CARD=$sanitized"
+    # check same index in capture
+    if printf '%s\n' "$arecord_cards" | grep -q "^${idx}|"; then
+        printf '%s|%s\n' "$idx" "$name"
         exit 0
     fi
+    # check same name (case-insensitive, fixed string)
+    if printf '%s\n' "$arecord_cards" | grep -Fiq "|${name}"; then
+        printf '%s|%s\n' "$idx" "$name"
+        exit 0
+    fi
+done > /tmp/jb_detect_choice.$$ 2>/dev/null || true
+
+if [ -s /tmp/jb_detect_choice.$$ ]; then
+    choice=$(cat /tmp/jb_detect_choice.$$ 2>/dev/null || true)
+    rm -f /tmp/jb_detect_choice.$$ 2>/dev/null || true
+    FOUND_IDX=${choice%%|*}
+    FOUND_NAME=${choice#*|}
+else
+    rm -f /tmp/jb_detect_choice.$$ 2>/dev/null || true
+    # Fallback to first non-loopback from playback list
+    first=$(printf '%s\n' "$aplay_cards" | sed -n '/Loopback/!{/Loop Back/!p;}' | sed -n '1p')
+    if [ -n "$first" ]; then
+        FOUND_IDX=${first%%|*}
+        FOUND_NAME=${first#*|}
+        FOUND_NAME=$(printf '%s' "$FOUND_NAME" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fi
 fi
 
-# Fallback to numeric index
-echo "hw:$card_idx"
+# Final fallback
+if [ -z "${FOUND_IDX}" ]; then
+    echo "hw:0"
+    exit 0
+fi
+
+# Sanitize name for CARD= usage
+SANITIZED=$(printf '%s' "$FOUND_NAME" | sed 's/[^A-Za-z0-9_-]/_/g' | cut -c1-32)
+
+# Prefer CARD=name if name appears in playback list (case-insensitive)
+if [ -n "$SANITIZED" ] && printf '%s\n' "$aplay_out" | grep -Fiq "$SANITIZED"; then
+    echo "hw:CARD=$SANITIZED"
+    exit 0
+fi
+
+# Else numeric index
+echo "hw:$FOUND_IDX"
 exit 0
