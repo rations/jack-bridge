@@ -14,16 +14,17 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-REQUIRED_PACKAGES="jackd2 alsa-utils alsa-plugins apulse"
-OPTIONAL_PACKAGES="qjackctl"
+REQUIRED_PACKAGES="jackd2 alsa-utils alsa-plugins apulse qjackctl"
 
 echo "Installing jack-bridge contrib files (non-destructive)..."
 
 # Prompt admin to install packages (allow password entry via sudo)
-if command -v apt-get >/dev/null 2>&1; then
-    echo "Detected apt-get. The following packages are recommended/required:"
+if command -v apt >/dev/null 2>&1; then
+    echo "Detected apt. The following packages are recommended/required:"
     echo "  Required: $REQUIRED_PACKAGES"
-    echo "  Optional: $OPTIONAL_PACKAGES"
+    if [ -n "$OPTIONAL_PACKAGES" ]; then
+        echo "  Optional: $OPTIONAL_PACKAGES"
+    fi
     printf "Install required packages now? [Y/n] "
     # read is interactive; default to Y
     read install_resp
@@ -31,12 +32,12 @@ if command -v apt-get >/dev/null 2>&1; then
     case "$(printf '%s' "$install_resp" | tr '[:upper:]' '[:lower:]')" in
         y|yes|'')
             echo "Installing required packages (this will prompt for your sudo password)..."
-            if ! sudo apt-get update; then
-                echo "Warning: apt-get update failed; continuing to install may still work."
+            if ! sudo apt update; then
+                echo "Warning: apt update failed; continuing to install may still work."
             fi
-            if ! sudo apt-get install -y $REQUIRED_PACKAGES; then
+            if ! sudo apt install -y $REQUIRED_PACKAGES; then
                 echo "Package installation failed or was interrupted. Please install required packages manually:"
-                echo "  sudo apt-get install -y $REQUIRED_PACKAGES"
+                echo "  sudo apt install -y $REQUIRED_PACKAGES"
                 echo "Continuing installation of config files (admin must resolve missing packages before use)."
             fi
             ;;
@@ -45,7 +46,7 @@ if command -v apt-get >/dev/null 2>&1; then
             ;;
     esac
 else
-    echo "apt-get not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
+    echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
 fi
 
 # Install /etc/asound.conf template (won't overwrite unless --force)

@@ -26,8 +26,7 @@ Design principles
 Quick install (admin steps)
 ---------------------------
 1) Ensure required system packages are installed:
-   - sudo apt-get install jackd2 alsa-utils alsa-plugins apulse
-   - Optional: qjackctl (for monitoring only)
+   - sudo apt install jackd2 alsa-utils alsa-plugins apulse qjackctl
 2) Run the installer as root:
    - sudo sh contrib/install.sh
    The installer copies templates into /etc, installs init script into /etc/init.d, helper into /usr/lib/jack-bridge, and apulse wrappers into /usr/bin. It registers the init script via update-rc.d when available.
