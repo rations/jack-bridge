@@ -2,7 +2,7 @@
 # This file provides optional overrides for the init script.
 # Do NOT hardcode a username or device here for packages that will be distributed;
 # packagers/admins may customize this file if they want system-wide overrides.
-
+ 
 # Example overrides (uncomment and edit to override auto-detection):
 # JACKD_USER="alice"            # user to run jackd as (recommended: a real desktop user, UID>=1000)
 # JACKD_DEVICE="hw:0"           # ALSA device to use (e.g. hw:0, hw:CARD=USB)
@@ -11,5 +11,7 @@
 # JACKD_NPERIODS=3              # number of periods
 # JACKD_PRIORITY=70             # realtime priority to request
 # JACKD_ARGS=""                 # any extra args to pass to jackd
-
+# JACK_AUTOCONNECT=0            # 1 to enable autoconnect after jackd starts (uses /usr/lib/jack-bridge/jack-autoconnect)
+# JACK_AUTOCONNECT_LOOPBACK=0   # 1 to enable mic -> speaker loopback in autoconnect
+ 
 # If left empty, the init script will auto-detect a suitable user and device.
