@@ -1,0 +1,59 @@
+#!/bin/sh
+# contrib/usr/lib/jack-bridge/jack-watchdog
+# Lightweight watchdog: monitor jackd and restart the SysV service if it exits.
+# Runs as a background task started by the init script (only one instance expected).
+# Safe: checks for existing PID file and uses invoke-rc.d/service if available.
+
+WATCH_INTERVAL=5
+PIDFILE="/var/run/jackd-rt.pid"
+SERVICE_NAME="jackd-rt"
+LOGTAG="jack-watchdog"
+
+# Minimal logging helper
+log() {
+    printf '%s: %s\n' "$LOGTAG" "$1" >/dev/null 2>&1 || true
+}
+
+# Ensure only a single watchdog runs by using a lockfile in /var/run
+LOCKFILE="/var/run/jack-watchdog.lock"
+if [ -f "$LOCKFILE" ]; then
+    # If PID inside is alive, exit; else remove stale lock
+    lockpid=$(cat "$LOCKFILE" 2>/dev/null || true)
+    if [ -n "$lockpid" ] && kill -0 "$lockpid" >/dev/null 2>&1; then
+        exit 0
+    else
+        rm -f "$LOCKFILE" 2>/dev/null || true
+    fi
+fi
+
+# Write our PID to lockfile
+printf '%s' "$$" > "$LOCKFILE" 2>/dev/null || true
+# Ensure lockfile is removed on exit
+trap 'rm -f "$LOCKFILE" 2>/dev/null || true; exit 0' EXIT INT TERM
+
+while true; do
+    # If jackd pidfile exists and process alive, just sleep
+    if [ -s "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            sleep "$WATCH_INTERVAL"
+            continue
+        fi
+    fi
+
+    # jackd not running: attempt to restart via invoke-rc.d / service / init script
+    log "jackd not running; attempting restart of $SERVICE_NAME"
+    if command -v invoke-rc.d >/dev/null 2>&1; then
+        invoke-rc.d "$SERVICE_NAME" restart >/dev/null 2>&1 || true
+    elif command -v service >/dev/null 2>&1; then
+        service "$SERVICE_NAME" restart >/dev/null 2>&1 || true
+    else
+        # Fallback: direct init.d script
+        if [ -x "/etc/init.d/$SERVICE_NAME" ]; then
+            /etc/init.d/"$SERVICE_NAME" restart >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # Give it a moment before next check
+    sleep "$WATCH_INTERVAL"
+done

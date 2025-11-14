@@ -1,0 +1,36 @@
+#!/bin/sh
+# contrib/usr/lib/jack-bridge/jack-autoconnect
+# Idempotent auto-connect of ALSA pcm outputs to system playback ports.
+# Safe to call multiple times; suppress errors.
+# Attempts optional mic loopback if JACK_AUTOCONNECT_LOOPBACK=1 in /etc/default/jackd-rt
+
+: ${JACK_AUTOCONNECT_LOOPBACK:=0}
+
+# Allow override from /etc/default/jackd-rt if present
+if [ -r /etc/default/jackd-rt ]; then
+    . /etc/default/jackd-rt
+fi
+
+# small delay to let jack ports appear
+sleep 2
+
+# Helper: try connecting if both ports exist
+try_connect() {
+    from="$1"
+    to="$2"
+    if jack_lsp 2>/dev/null | grep -q "^${from}$" && jack_lsp 2>/dev/null | grep -q "^${to}$"; then
+        jack_connect "$from" "$to" 2>/dev/null || true
+    fi
+}
+
+# Common ALSA plugin ports (alsa_pcm:playback_N) -> system:playback_N
+try_connect "alsa_pcm:playback_1" "system:playback_1"
+try_connect "alsa_pcm:playback_2" "system:playback_2"
+
+# Optional mic monitoring
+if [ "x$JACK_AUTOCONNECT_LOOPBACK" = "x1" ]; then
+    try_connect "system:capture_1" "system:playback_1"
+    try_connect "system:capture_2" "system:playback_2"
+fi
+
+exit 0

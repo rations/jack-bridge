@@ -1,0 +1,199 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          jackd-rt
+# Required-Start:    $local_fs $remote_fs $alsa
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start JACK (classic jackd) at boot with realtime tuning
+# Description:       Starts jackd as a regular user (detected) using ALSA device auto-detection.
+### END INIT INFO
+
+# contrib/init.d/jackd-rt - SysV init script for jackd (classic) with auto-detection.
+# Template is non-hardcoded; overrides may be placed in /etc/default/jackd-rt
+
+. /lib/lsb/init-functions
+
+# Load overrides if present
+if [ -r /etc/default/jackd-rt ]; then
+    . /etc/default/jackd-rt
+fi
+
+# Defaults (can be overridden by /etc/default/jackd-rt)
+: ${JACKD_USER:=""}
+: ${JACKD_DEVICE:=""}
+: ${JACKD_SR:=48000}
+: ${JACKD_PERIOD:=256}
+: ${JACKD_NPERIODS:=3}
+: ${JACKD_PRIORITY:=70}
+: ${JACKD_ARGS:=""}
+: ${JACKD_DAEMON:=/usr/bin/jackd}
+: ${DETECT_SCRIPT:=/usr/lib/jack-bridge/detect-alsa-device.sh}
+: ${DETECT_USER_SCRIPT:=/usr/lib/jack-bridge/detect-user.sh}
+: ${JACKD_LOG:=/var/log/jackd-rt.log}
+
+# detect_user(): removed; detection is handled inline in start() for portability
+
+# detect_device(): removed; device detection is handled inline in start()
+
+start() {
+    log_daemon_msg "Starting JACK (jackd) with realtime settings" "jackd-rt"
+
+    # Wait up to 10s for ALSA devices to appear (helpful during boot where /dev/snd may be late)
+    WAIT_SECS=10
+    waited=0
+    while [ $waited -lt $WAIT_SECS ]; do
+        if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        waited=$((waited+1))
+    done
+
+    # Inline: detect user to run under (no eval, fixed /bin/sh for helpers)
+    USERNAME=""
+    if [ -n "$JACKD_USER" ]; then
+        USERNAME="$JACKD_USER"
+    elif [ -x "$DETECT_USER_SCRIPT" ]; then
+        USER_OUT="$(/bin/sh "$DETECT_USER_SCRIPT" 2>/dev/null || true)"
+        [ -n "$USER_OUT" ] && USERNAME="$USER_OUT"
+    fi
+    if [ -z "$USERNAME" ]; then
+        # first user with UID>=1000 and in audio group
+        for user in $(cut -d: -f1 /etc/passwd); do
+            uid=$(id -u "$user" 2>/dev/null || true)
+            if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+                groups=$(id -nG "$user" 2>/dev/null || true)
+                if printf '%s\n' " $groups " | grep -q ' audio '; then
+                    USERNAME="$user"; break
+                fi
+            fi
+        done
+    fi
+    if [ -z "$USERNAME" ]; then
+        # fallback to first UID>=1000 even if not in audio
+        for user in $(cut -d: -f1 /etc/passwd); do
+            uid=$(id -u "$user" 2>/dev/null || true)
+            if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+                USERNAME="$user"
+                break
+            fi
+        done
+    fi
+    [ -z "$USERNAME" ] && USERNAME="root"
+
+    # Inline: detect ALSA device
+    DEVICE=""
+    if [ -n "$JACKD_DEVICE" ]; then
+        DEVICE="$JACKD_DEVICE"
+    elif [ -x "$DETECT_SCRIPT" ]; then
+        DEVICE_OUT="$(/bin/sh "$DETECT_SCRIPT" 2>/dev/null || true)"
+        if [ -n "$DEVICE_OUT" ]; then
+            DEVICE="$DEVICE_OUT"
+        else
+            log_warning_msg "jackd-rt: detector returned empty; using hw:0"
+            DEVICE="hw:0"
+        fi
+    else
+        DEVICE="hw:0"
+    fi
+
+    # Build jackd args
+    ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+
+    # Ensure user exists
+    if ! id "$USERNAME" >/dev/null 2>&1; then
+        log_failure_msg "User $USERNAME does not exist"
+        return 1
+    fi
+
+    # Ensure jackd binary exists
+    if [ ! -x "$JACKD_DAEMON" ]; then
+        log_failure_msg "jackd not found at $JACKD_DAEMON"
+        return 1
+    fi
+
+    # Prepare log file and permissions
+    touch "$JACKD_LOG" 2>/dev/null || true
+    chown "$USERNAME":"$USERNAME" "$JACKD_LOG" 2>/dev/null || true
+
+    # Build command: start a login shell for $USERNAME via su so PAM limits apply, then exec jackd with logging
+    # Export JACK_NO_AUDIO_RESERVATION so jackd skips session bus reservation when run as a system service
+    CMD="exec su -l \"$USERNAME\" -s /bin/sh -c 'export JACK_NO_AUDIO_RESERVATION=1; exec ${JACKD_DAEMON} ${ARGS} >>\"$JACKD_LOG\" 2>&1'"
+
+    # Start jackd as login user via start-stop-daemon (no --chuid; PID tracks exec chain)
+    start-stop-daemon --start --background --make-pidfile --pidfile /var/run/jackd-rt.pid \
+        --startas /bin/sh -- -c "$CMD" \
+        || { log_failure_msg "Failed to start jackd"; return 1; }
+
+    # Health check: prefer jack_wait, fallback to pid check
+    if command -v jack_wait >/dev/null 2>&1; then
+        if ! jack_wait -w -t 8 >/dev/null 2>&1; then
+            log_warning_msg "jackd did not become ready in time; last 30 lines of $JACKD_LOG:"
+            tail -n 30 "$JACKD_LOG" 2>/dev/null || true
+            log_end_msg 1
+            return 1
+        fi
+
+        # Autoconnect (if present) and watchdog are started after jack_wait succeeds
+        if [ -x /usr/lib/jack-bridge/jack-autoconnect ]; then
+            /usr/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
+        fi
+        if [ -x /usr/lib/jack-bridge/jack-watchdog ]; then
+            /usr/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
+        fi
+    else
+        sleep 1
+        if ! { [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; }; then
+            log_warning_msg "jackd appears to have exited early; last 30 lines of $JACKD_LOG:"
+            tail -n 30 "$JACKD_LOG" 2>/dev/null || true
+            log_end_msg 1
+            return 1
+        fi
+    fi
+
+    log_end_msg 0
+    return 0
+}
+
+stop() {
+    log_daemon_msg "Stopping JACK (jackd)" "jackd-rt"
+    start-stop-daemon --stop --pidfile /var/run/jackd-rt.pid --retry 5 || true
+    rm -f /var/run/jackd-rt.pid 2>/dev/null || true
+    log_end_msg 0
+}
+
+status() {
+    if [ -f /var/run/jackd-rt.pid ]; then
+        pid=$(cat /var/run/jackd-rt.pid 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            echo "jackd running (pid $pid)"
+            return 0
+        fi
+    fi
+    echo "jackd not running"
+    return 1
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|force-reload)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0

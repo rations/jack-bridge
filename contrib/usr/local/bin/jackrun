@@ -1,0 +1,15 @@
+#!/bin/sh
+# contrib/usr/local/bin/jackrun
+# Wrapper to run an application under apulse if it does not link to libjack.
+cmd="$1"
+shift || true
+if [ -z "$cmd" ]; then
+    echo "Usage: jackrun <command> [args...]"
+    exit 2
+fi
+if ldd "$(command -v "$cmd" 2>/dev/null)" 2>/dev/null | grep -q libjack; then
+    exec "$cmd" "$@"
+else
+    echo "[jackrun] No JACK support detected → using apulse for: $cmd"
+    exec apulse "$cmd" "$@"
+fi
