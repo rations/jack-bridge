@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AlsaTune - sound settings
+Comment=Control sound in ALSA
+Exec=/usr/local/bin/mxeq
+Icon=audio-speakers
+Terminal=false
+Categories=AudioVideo;Audio;

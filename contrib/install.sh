@@ -14,7 +14,7 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl"
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0"
 
 echo "Installing jack-bridge contrib files (non-destructive)..."
 
@@ -33,15 +33,18 @@ else
     echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
 fi
 
-# Install /etc/asound.conf template (won't overwrite unless --force)
+# Install /etc/asound.conf template (force-install; back up existing file)
 ASOUND_DST="${ETC_DIR}/asound.conf"
+mkdir -p "$(dirname "$ASOUND_DST")"
 if [ -e "$ASOUND_DST" ]; then
-    echo "Note: $ASOUND_DST already exists; skipping (preserve existing). If you want to replace, move it and rerun with --force."
-else
-    mkdir -p "$(dirname "$ASOUND_DST")"
-    cp -p contrib/etc/asound.conf "$ASOUND_DST"
-    echo "Installed $ASOUND_DST"
+    # Back up existing file with timestamp before replacing
+    BACKUP="${ASOUND_DST}.$(date +%Y%m%d%H%M%S).bak"
+    cp -p "$ASOUND_DST" "$BACKUP" || true
+    echo "Backed up existing $ASOUND_DST to $BACKUP"
 fi
+# Force copy the updated template (overwrite)
+cp -pf contrib/etc/asound.conf "$ASOUND_DST"
+echo "Installed (or replaced) $ASOUND_DST"
 
 # Install init script
 mkdir -p "$INIT_DIR"
@@ -85,6 +88,24 @@ if [ -f "contrib/usr/lib/jack-bridge/jack-watchdog" ]; then
     cp -p contrib/usr/lib/jack-bridge/jack-watchdog "${USR_LIB_DIR}/jack-watchdog"
     chmod 755 "${USR_LIB_DIR}/jack-watchdog"
     echo "Installed jack-watchdog to ${USR_LIB_DIR}/jack-watchdog"
+fi
+
+# Install bundled AlsaTune GUI from repo contrib/ paths
+# The mxeq binary and desktop file are expected to be committed into the repo at:
+#   contrib/bin/mxeq
+#   contrib/mxeq.desktop
+# This makes the installer self-contained for end users.
+if [ -f "contrib/bin/mxeq" ]; then
+    echo "Installing bundled AlsaTune GUI to /usr/local/bin and desktop entries..."
+    mkdir -p /usr/local/bin
+    install -m 0755 contrib/bin/mxeq /usr/local/bin/mxeq || true
+    if [ -f "contrib/mxeq.desktop" ]; then
+        mkdir -p /usr/share/applications
+        install -m 0644 contrib/mxeq.desktop /usr/share/applications/mxeq.desktop || true
+    fi
+    echo "Installed AlsaTune (mxeq) launcher."
+else
+    echo "No bundled AlsaTune found in contrib/; skipping GUI installation."
 fi
 
 # Install simple apulse wrappers
@@ -146,15 +167,16 @@ echo "Installed desktop launcher $CHROMIUM_DESKTOP"
 # can launch browsers without extra steps. Administrators who want full replacement
 # can create symlinks or update system desktop files.
 
-# Install realtime limits template (do not overwrite existing file)
+# Install realtime limits template (force-install; back up existing file)
 LIMITS_DST="${ETC_DIR}/security/limits.d/audio.conf"
+mkdir -p "$(dirname "$LIMITS_DST")"
 if [ -e "$LIMITS_DST" ]; then
-    echo "Note: $LIMITS_DST already exists; skipping (preserve existing). If you want to replace, move it and rerun with --force."
-else
-    mkdir -p "$(dirname "$LIMITS_DST")"
-    cp -p contrib/etc/security/limits.d/audio.conf "$LIMITS_DST"
-    echo "Installed realtime limits template to $LIMITS_DST"
+    BACKUP="${LIMITS_DST}.$(date +%Y%m%d%H%M%S).bak"
+    cp -p "$LIMITS_DST" "$BACKUP" || true
+    echo "Backed up existing $LIMITS_DST to $BACKUP"
 fi
+cp -pf contrib/etc/security/limits.d/audio.conf "$LIMITS_DST"
+echo "Installed (or replaced) realtime limits template to $LIMITS_DST"
 
 # Register init script with update-rc.d if available
 if command -v update-rc.d >/dev/null 2>&1; then
