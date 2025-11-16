@@ -6,38 +6,50 @@ Important: it is recommended to remove PulseAudio and/or PipeWire before running
 
 ## What this does
 
-- Installs and configures a system-wide JACK + ALSA setup so applications using ALSA can be routed through JACK.
-- Uses ALSA for device access and volume control (no PulseAudio/PipeWire).
-- Uses the following packages (these will be installed by the installer):
-  - jackd
-  - alsa-utils
-  - libasound2-plugins
-  - apulse
-  - qjackctl
+Installs and configures a system-wide JACK + ALSA setup so applications using ALSA can be routed through JACK.
 
-## Volume control
+Uses ALSA for device access and volume control (no PulseAudio/PipeWire).
 
-Volume is controlled with ALSA. Open a terminal and run: alsamixer
+Uses the following packages (these will be installed by the installer):
+   jackd
+   alsa-utils
+   libasound2-plugins
+   apulse
+   qjackctl
+   libasound2-plugin-equal
+   swh-plugins
+    libgtk-3-0
 
-Press Enter after typing the command to open the mixer UI to adjust volume
+## Volume control (GUI included)
 
-Still in the works GUI for volume control so the terminal isn't required
+Volume and a system-wide equalizer are provided by the bundled GUI "AlsaTune" (AlsaTune is installed to /usr/local/bin/mxeq and a desktop launcher is added as "AlsaTune - sound settings"). After running the installer and rebooting the system, users will not need to use the terminal for volume or EQ — simply launch "AlsaTune - sound settings" from your desktop menu to:
+
+Adjust mixer channels with sliders (no terminal required).
+Adjust the 10-band equalizer in real time.
+Save and apply EQ presets per-user.
+
+Notes:
+This setup routes ALSA applications through the ALSA equalizer plugin and then into JACK so EQ controls in the GUI affect ALSA apps without changing native JACK clients.
+
+Ensure PulseAudio / PipeWire are not running (the installer attempts to disable PulseAudio autospawn). A reboot is recommended after installation to ensure JACK and ALSA device routing are active.
 
 ## Installation
 
 Clone the repo, make the install script executable, and run it:
 
-1. Clone the repo:
-   
-   gitclone https://github.com/rations/jack-bridge.git
+Clone the repo:
 
-2. Make the installer executable:
+gitclone https://github.com/rations/jack-bridge.git
 
-   sudo chmod +x ./contrib/install.sh
+Make the installer executable:
 
-3. Run the installer:
+sudo chmod +x ./contrib/install.sh
 
-   sudo ./contrib/install.sh
+Run the installer:
+
+sudo ./contrib/install.sh
+
+sudo reboot
 
 The installer will install the packages listed above and configure system files under `/etc` and helper scripts under `/usr/local/bin` as provided in the `contrib/` directory.
 
@@ -49,5 +61,17 @@ sudo ./contrib/uninstall.sh
 
 ## Notes and thanks
 
-- This setup intentionally avoids systemd user units, PulseAudio, and PipeWire — it is meant for systems where a lightweight, JACK-first audio stack is desired.
-- Big thanks to JACK and ALSA — this script relies on the JACK audio server and ALSA userland to provide system-wide audio functionality.
+This setup intentionally avoids systemd user units, PulseAudio, and PipeWire — it is meant for systems where a lightweight, JACK-first audio stack is desired.
+
+Big thanks to JACK, ALSA and AlsaTune — this script relies on the JACK audio server,
+ALSA userland to provide system-wide audio functionality and AlsaTune by mrgreenjeans for the GUI https://sourceforge.net/projects/vuu-do/files/Miscellaneous/apps/AlsaTune/
+
+More in the works
+
+Add support to the install.sh script for other GNU/Linux distros
+
+Bluetooth support
+
+Record audio from GUI 
+
+
