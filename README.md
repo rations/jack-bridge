@@ -1,10 +1,10 @@
-# Jack Bridge - System-wide ALSA + JACK Audio Script With No Systemd, Pulseaudio or Pipewire
+Jack Bridge - System-wide ALSA + JACK Audio Script With No Systemd, Pulseaudio or Pipewire
 
 This repository contains a script that sets up system-wide audio on Linux debian based systems using JACK and ALSA — without systemd, PulseAudio, or PipeWire. It is designed for users who want a minimal audio stack driven by JACK and ALSA.
 
 Important: it is recommended to remove PulseAudio and/or PipeWire before running this script to avoid conflicts.
 
-## What this does
+What this does
 
 Installs and configures a system-wide JACK + ALSA setup so applications using ALSA can be routed through JACK.
 
@@ -20,9 +20,9 @@ Uses the following packages (these will be installed by the installer):
    swh-plugins
     libgtk-3-0
 
-## Volume control (GUI included)
+Volume control (GUI included) 
 
-Volume and a system-wide equalizer are provided by the bundled GUI "AlsaTune" (AlsaTune is installed to /usr/local/bin/mxeq and a desktop launcher is added as "AlsaTune - sound settings"). After running the installer and rebooting the system, users will not need to use the terminal for volume or EQ — simply launch "AlsaTune - sound settings" from your desktop menu to:
+Volume, record in mono or stereo 41000Hz or 48000Hz and a system-wide equalizer are provided by the bundled GUI "AlsaTune" (AlsaTune is installed to /usr/local/bin/mxeq and a desktop launcher is added as "AlsaTune - sound settings"). After running the installer and rebooting the system, users will not need to use the terminal for volume or EQ — simply launch "AlsaTune - sound settings" from your desktop menu to:
 
 Adjust mixer channels with sliders (no terminal required).
 Adjust the 10-band equalizer in real time.
@@ -33,7 +33,7 @@ This setup routes ALSA applications through the ALSA equalizer plugin and then i
 
 Ensure PulseAudio / PipeWire are not running (the installer attempts to disable PulseAudio autospawn). A reboot is recommended after installation to ensure JACK and ALSA device routing are active.
 
-## Installation
+Installation
 
 Clone the repo, make the install script executable, and run it:
 
@@ -51,15 +51,15 @@ sudo ./contrib/install.sh
 
 sudo reboot
 
-The installer will install the packages listed above and configure system files under `/etc` and helper scripts under `/usr/local/bin` as provided in the `contrib/` directory.
+The installer will install the packages listed above and configure system files under /etc and helper scripts under /usr/local/bin as provided in the contrib/ directory.
 
-## Uninstall
+Uninstall
 
 To remove what the installer added, run the provided uninstaller:
 
 sudo ./contrib/uninstall.sh
 
-## Notes and thanks
+Notes and thanks
 
 This setup intentionally avoids systemd user units, PulseAudio, and PipeWire — it is meant for systems where a lightweight, JACK-first audio stack is desired.
 
@@ -70,8 +70,6 @@ More in the works
 
 Add support to the install.sh script for other GNU/Linux distros
 
-Bluetooth support
-
-Record audio from GUI 
+Bluetooth support 
 
 

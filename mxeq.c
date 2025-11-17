@@ -3,6 +3,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <glib/gstdio.h> // For g_mkdir_with_parents and file operations
+#include <signal.h>
+#include <time.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <sys/types.h>
 
 typedef struct {
     snd_mixer_t *mixer;
@@ -334,7 +339,257 @@ static void cleanup_alsa(MixerData *mixer_data, EQData *eq_data) {
         g_free(eq_data->bands);
     }
 }
+ 
+/* Recorder support: enhanced UX, safe child lifecycle, XDG Music path handling */
 
+typedef struct {
+    GtkWidget *status_label;
+    GtkWidget *filename_entry;
+    GtkWidget *channel_combo;   /* Mono / Stereo */
+    GtkWidget *rate_combo;      /* 44100 / 48000 */
+    GtkWidget *record_btn;
+    GtkWidget *stop_btn;
+} RecorderUI;
+
+/* Globals to manage recording state */
+static GPid record_pid = 0;
+static guint record_timer_id = 0;
+static time_t record_start_time = 0;
+static RecorderUI *rec_ui = NULL;
+
+/* Helper: ensure filename has .wav suffix (returns newly allocated string) */
+static char *ensure_wav_extension(const char *name) {
+    if (g_str_has_suffix(name, ".wav"))
+        return g_strdup(name);
+    return g_strdup_printf("%s.wav", name);
+}
+
+/* Helper: sanitize a basename by removing any path separators.
+   Returns newly allocated string. */
+static char *sanitize_basename(const char *name) {
+    gchar *basename = g_path_get_basename(name);
+    return g_strdup(basename);
+}
+
+/* Resolve user's Music directory via XDG; fallback to ~/Music.
+   Returns newly allocated string path to directory (no trailing slash). */
+static char *resolve_music_dir(void) {
+    const char *xdg = g_get_user_special_dir(G_USER_DIRECTORY_MUSIC);
+    if (xdg && strlen(xdg) > 0) {
+        return g_strdup(xdg);
+    }
+    const char *home = g_get_home_dir();
+    char *fallback = g_build_filename(home, "Music", NULL);
+    return fallback;
+}
+
+/* Format default filename like AlsaTune-YYYYmmdd-HHMMSS.wav (newly allocated) */
+static char *format_default_filename(void) {
+    time_t t = time(NULL);
+    struct tm tm = *localtime(&t);
+    char buf[64];
+    strftime(buf, sizeof(buf), "AlsaTune-%Y%m%d-%H%M%S.wav", &tm);
+    return g_strdup(buf);
+}
+
+/* Timer callback to update recording duration label */
+static gboolean update_timer(gpointer user_data) {
+    if (!rec_ui) return FALSE;
+    time_t now = time(NULL);
+    int seconds = (int)(now - record_start_time);
+    int min = seconds / 60;
+    int sec = seconds % 60;
+    gchar *msg = g_strdup_printf("Recording… %02d:%02d", min, sec);
+    gtk_label_set_text(GTK_LABEL(rec_ui->status_label), msg);
+    g_free(msg);
+    return TRUE;
+}
+
+/* Idle callback used to reset UI from non-main thread context */
+static gboolean reset_ui_idle(gpointer user_data) {
+    if (!rec_ui) return FALSE;
+    gtk_widget_set_sensitive(rec_ui->record_btn, TRUE);
+    gtk_widget_set_sensitive(rec_ui->stop_btn, FALSE);
+    gtk_label_set_text(GTK_LABEL(rec_ui->status_label), "Idle");
+    return FALSE; /* remove source */
+}
+
+/* Child watch callback: called when arecord exits; status is child exit status */
+static void on_record_child_exit(GPid pid, gint status, gpointer user_data) {
+    /* Reap child */
+    g_spawn_close_pid(pid);
+    record_pid = 0;
+
+    /* Stop timer if running */
+    if (record_timer_id) {
+        g_source_remove(record_timer_id);
+        record_timer_id = 0;
+    }
+
+    /* Schedule UI reset on main loop */
+    g_idle_add(reset_ui_idle, NULL);
+}
+
+/* Start recording: builds path, spawns arecord asynchronously, adds child watch, updates UI */
+static void start_recording(GtkWidget *button, gpointer user_data) {
+    if (record_pid != 0) {
+        /* Already recording */
+        return;
+    }
+    if (!rec_ui) return;
+
+    const char *user_text = gtk_entry_get_text(GTK_ENTRY(rec_ui->filename_entry));
+    if (!user_text || strlen(user_text) == 0) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL,
+            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Please enter a filename.");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
+
+    char *base = sanitize_basename(user_text);
+    char *fname = ensure_wav_extension(base);
+    g_free(base);
+
+    char *music_dir = resolve_music_dir();
+    g_mkdir_with_parents(music_dir, 0755);
+
+    char *full_path = g_build_filename(music_dir, fname, NULL);
+    g_free(music_dir);
+    g_free(fname);
+
+    /* Determine channels */
+    int channels = 2; /* default stereo */
+    const gchar *chan = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(rec_ui->channel_combo));
+    if (chan) {
+        if (g_strcmp0(chan, "Mono") == 0) channels = 1;
+        g_free((gchar*)chan);
+    }
+
+    /* Determine sample rate */
+    int rate = 48000;
+    const gchar *rate_text = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(rec_ui->rate_combo));
+    if (rate_text) {
+        if (g_strcmp0(rate_text, "44100") == 0) rate = 44100;
+        else rate = 48000;
+        g_free((gchar*)rate_text);
+    }
+
+    /* Build argv for arecord */
+    gchar *channels_s = g_strdup_printf("%d", channels);
+    gchar *rate_s = g_strdup_printf("%d", rate);
+
+    gchar *argv[] = {
+        "arecord",
+        "-r", rate_s,
+        "-c", channels_s,
+        "-f", "S16_LE",
+        full_path,
+        NULL
+    };
+
+    GError *err = NULL;
+    gboolean ok = g_spawn_async(
+        NULL,
+        argv,
+        NULL,
+        G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
+        NULL, NULL,
+        &record_pid,
+        &err
+    );
+
+    g_free(channels_s);
+    g_free(rate_s);
+
+    if (!ok) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL,
+            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to start arecord: %s", err ? err->message : "unknown");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        if (err) g_error_free(err);
+        g_free(full_path);
+        return;
+    }
+
+    g_print("Recording started. PID=%d -> %s\n", record_pid, full_path);
+    g_free(full_path);
+
+    /* UI updates */
+    gtk_widget_set_sensitive(rec_ui->record_btn, FALSE);
+    gtk_widget_set_sensitive(rec_ui->stop_btn, TRUE);
+    gtk_label_set_text(GTK_LABEL(rec_ui->status_label), "Recording… 00:00");
+
+    record_start_time = time(NULL);
+    record_timer_id = g_timeout_add_seconds(1, update_timer, NULL);
+
+    /* Add child watch to reap and update UI when process exits */
+    g_child_watch_add(record_pid, on_record_child_exit, NULL);
+}
+
+/* Stop recording: send SIGINT to arecord (if running) and rely on child-watch to finalize */
+static void stop_recording(GtkWidget *button, gpointer user_data) {
+    if (record_pid == 0) return;
+    g_print("Stopping recording (PID %d)\n", record_pid);
+    if (kill(record_pid, SIGINT) != 0) {
+        /* If kill fails, try sending SIGTERM */
+        kill(record_pid, SIGTERM);
+    }
+    /* Do not close pid here; wait for child watch to reap */
+}
+
+/* Build recorder UI and attach into provided main_box (caller retains ownership of main_box) */
+static void create_recorder_ui(GtkWidget *main_box) {
+    /* Allocate RecorderUI */
+    rec_ui = g_new0(RecorderUI, 1);
+
+    GtkWidget *rec_frame = gtk_frame_new("Recorder");
+    gtk_box_pack_start(GTK_BOX(main_box), rec_frame, FALSE, FALSE, 5);
+
+    GtkWidget *rec_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_add(GTK_CONTAINER(rec_frame), rec_vbox);
+
+    rec_ui->status_label = gtk_label_new("Idle");
+    gtk_box_pack_start(GTK_BOX(rec_vbox), rec_ui->status_label, FALSE, FALSE, 0);
+
+    GtkWidget *rec_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(rec_vbox), rec_box, FALSE, FALSE, 0);
+
+    /* Filename entry */
+    rec_ui->filename_entry = gtk_entry_new();
+    char *default_name = format_default_filename();
+    gtk_entry_set_text(GTK_ENTRY(rec_ui->filename_entry), default_name);
+    g_free(default_name);
+    gtk_entry_set_placeholder_text(GTK_ENTRY(rec_ui->filename_entry), "recording.wav");
+    gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->filename_entry, TRUE, TRUE, 5);
+
+    /* Channel combo */
+    rec_ui->channel_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(rec_ui->channel_combo), "Mono");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(rec_ui->channel_combo), "Stereo");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(rec_ui->channel_combo), 1); // Stereo default
+    gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->channel_combo, FALSE, FALSE, 5);
+
+    /* Rate combo */
+    rec_ui->rate_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(rec_ui->rate_combo), "44100");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(rec_ui->rate_combo), "48000");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(rec_ui->rate_combo), 1); // 48000 default
+    gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->rate_combo, FALSE, FALSE, 5);
+
+    /* Buttons */
+    rec_ui->record_btn = gtk_button_new_with_label("Record");
+    rec_ui->stop_btn = gtk_button_new_with_label("Stop");
+    gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->record_btn, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->stop_btn, FALSE, FALSE, 5);
+
+    gtk_widget_set_sensitive(rec_ui->stop_btn, FALSE); // initially disabled
+
+    g_signal_connect(rec_ui->record_btn, "clicked", G_CALLBACK(start_recording), NULL);
+    g_signal_connect(rec_ui->stop_btn, "clicked", G_CALLBACK(stop_recording), NULL);
+}
+
+/* Main function starts here */
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
@@ -507,6 +762,9 @@ int main(int argc, char *argv[]) {
 
     // Load existing presets into combo box
     load_presets(GTK_COMBO_BOX_TEXT(preset_combo));
+    
+    /* Create recorder UI and pack at bottom of main_box (non-destructive) */
+    create_recorder_ui(main_box);
 
     gtk_widget_show_all(window);
     gtk_main();
