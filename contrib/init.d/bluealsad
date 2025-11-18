@@ -1,0 +1,136 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          bluealsad
+# Required-Start:    $local_fs $remote_fs dbus bluetoothd
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start BlueALSA daemon (bluealsad) at boot
+# Description:       Starts bluealsad as a dedicated system user and ensures runtime directories and D-Bus policy are present.
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+# Load overrides if present
+if [ -r /etc/default/bluealsad ]; then
+    . /etc/default/bluealsad
+fi
+
+: ${BLUEALSAD_USER:=bluealsa}
+: ${BLUEALSAD_BIN:=/usr/sbin/bluealsad}
+: ${BLUEALSAD_ARGS:="-p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs"}
+: ${BLUEALSAD_PIDFILE:=/var/run/bluealsad.pid}
+: ${BLUEALSAD_LOG:=/var/log/bluealsad.log}
+: ${BLUEALSA_LIBDIR:=/var/lib/bluealsa}
+: ${DBUS_CONF:=/usr/share/dbus-1/system.d/org.bluealsa.conf}
+
+ensure_user() {
+    if ! id "$BLUEALSAD_USER" >/dev/null 2>&1; then
+        log_warning_msg "User $BLUEALSAD_USER does not exist; creating system user (nologin)"
+        if command -v useradd >/dev/null 2>&1; then
+            useradd --system --no-create-home --shell /usr/sbin/nologin --user-group "$BLUEALSAD_USER" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+start() {
+    log_daemon_msg "Starting BlueALSA daemon" "bluealsad"
+
+    # Basic checks
+    if [ ! -x "$BLUEALSAD_BIN" ]; then
+        log_failure_msg "bluealsad binary not found at $BLUEALSAD_BIN"
+        return 1
+    fi
+
+    # Ensure DBus available
+    if ! pidof dbus-daemon >/dev/null 2>&1; then
+        log_failure_msg "dbus-daemon not running; cannot start bluealsad"
+        return 1
+    fi
+
+    # Ensure bluetoothd running (it may be started by another init script)
+    if ! pidof bluetoothd >/dev/null 2>&1; then
+        log_warning_msg "bluetoothd not running; bluealsad may fail to operate until bluetoothd starts"
+    fi
+
+    # Ensure runtime dir exists and ownership
+    if [ ! -d "$BLUEALSA_LIBDIR" ]; then
+        mkdir -p "$BLUEALSA_LIBDIR" 2>/dev/null || true
+    fi
+    chown "$BLUEALSAD_USER":"$BLUEALSAD_USER" "$BLUEALSA_LIBDIR" 2>/dev/null || true
+    chmod 0700 "$BLUEALSA_LIBDIR" 2>/dev/null || true
+
+    # Ensure D-Bus policy exists (best-effort check)
+    if [ -n "$DBUS_CONF" ] && [ ! -f "$DBUS_CONF" ]; then
+        log_warning_msg "D-Bus policy $DBUS_CONF not present; review BlueALSA installation"
+    fi
+
+    # Ensure user exists
+    ensure_user
+
+    # Prepare log file
+    touch "$BLUEALSAD_LOG" 2>/dev/null || true
+    chown "$BLUEALSAD_USER":"$BLUEALSAD_USER" "$BLUEALSAD_LOG" 2>/dev/null || true
+
+    # Build command
+    CMD="exec start-stop-daemon --start --background --make-pidfile --pidfile \"$BLUEALSAD_PIDFILE\" \
+        --chuid \"$BLUEALSAD_USER\" --startas \"$BLUEALSAD_BIN\" -- $BLUEALSAD_ARGS >>\"$BLUEALSAD_LOG\" 2>&1"
+
+    # Start bluealsad as the service user
+    sh -c "$CMD" || { log_failure_msg "Failed to start bluealsad"; return 1; }
+
+    # Wait briefly for registration on system bus
+    sleep 1
+    # Optionally check D-Bus registration (best-effort)
+    if command -v busctl >/dev/null 2>&1; then
+        if ! busctl --system list | grep -q org.bluealsa; then
+            # not fatal; bluealsad may register later
+            log_warning_msg "org.bluealsa D-Bus service not visible yet"
+        fi
+    fi
+
+    log_end_msg 0
+    return 0
+}
+
+stop() {
+    log_daemon_msg "Stopping BlueALSA daemon" "bluealsad"
+    start-stop-daemon --stop --pidfile "$BLUEALSAD_PIDFILE" --retry 5 || true
+    rm -f "$BLUEALSAD_PIDFILE" 2>/dev/null || true
+    log_end_msg 0
+}
+
+status() {
+    if [ -f "$BLUEALSAD_PIDFILE" ]; then
+        pid=$(cat "$BLUEALSAD_PIDFILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            echo "bluealsad running (pid $pid)"
+            return 0
+        fi
+    fi
+    echo "bluealsad not running"
+    return 1
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|force-reload)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0
