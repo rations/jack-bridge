@@ -147,7 +147,6 @@ static void agent_method_call(GDBusConnection *connection,
 /* Export the agent object on the given connection */
 static gboolean export_agent_object(GDBusConnection *conn, GError **error) {
     GDBusNodeInfo *introspection = NULL;
-    GDBusInterfaceInfo *iface = NULL;
     GError *err = NULL;
 
     introspection = g_dbus_node_info_new_for_xml(agent_introspection_xml, &err);

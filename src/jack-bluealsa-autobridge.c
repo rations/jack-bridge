@@ -93,6 +93,8 @@ static void install_signal_handlers(void);
 static void write_pid_file(const char *path);
 static void remove_pid_file(const char *path);
 static void reopen_log(void);
+/* Forward-declare spawn_bridge used before its definition to avoid implicit declaration */
+static pid_t spawn_bridge(const char *name, char *const argv[]);
 
 /* Logging helpers */
 static void jb_log(const char *fmt, ...) {
@@ -447,7 +449,7 @@ static void install_signal_handlers(void) {
 }
 
 /* Example helper to form bluealsa device argument for exec command */
-static gchar *format_bluealsa_device_arg(const char *mac, const char *profile) {
+static G_GNUC_UNUSED gchar *format_bluealsa_device_arg(const char *mac, const char *profile) {
     return g_strdup_printf("bluealsa:DEV=%s,PROFILE=%s", mac, profile);
 }
 
@@ -727,7 +729,6 @@ static void on_bluealsa_pcm_added(const char *object_path) {
     if (query_pcm_properties(object_path, &props_wrapped, &err)) {
         /* props_wrapped has signature (a{sv}) */
         GVariantIter *iter = NULL;
-        GVariant *dict = NULL;
         g_variant_get(props_wrapped, "(a{sv})", &iter);
         gchar *key = NULL;
         GVariant *val = NULL;
@@ -827,11 +828,10 @@ static void interfaces_added_cb(GDBusConnection *connection,
                                 const gchar *signal_name,
                                 GVariant *parameters,
                                 gpointer user_data) {
-    (void)connection; (void)sender_name; (void)interface_name; (void)user_data;
+    (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)user_data; (void)signal_name;
     /* parameters: object_path, dict of interfaces -> dict of properties */
     gchar *added_path = NULL;
     GVariantIter *interfaces = NULL;
-    const gchar *p = NULL;
 
     /* Unpack: (so we accept both ObjectManager.InterfacesAdded signature and generic signals)
        The ObjectManager.InterfacesAdded signature is (oa{sa{sv}}) */
@@ -867,7 +867,7 @@ static void interfaces_removed_cb(GDBusConnection *connection,
                                   const gchar *signal_name,
                                   GVariant *parameters,
                                   gpointer user_data) {
-    (void)connection; (void)sender_name; (void)interface_name; (void)user_data;
+    (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)user_data; (void)signal_name;
     /* parameters: object_path, array of interface names */
     gchar *removed_path = NULL;
     GVariantIter *ifaces = NULL;
@@ -890,6 +890,7 @@ static void interfaces_removed_cb(GDBusConnection *connection,
 
 /* Reload configuration on SIGHUP */
 static gboolean handle_reload(gpointer user_data) {
+    (void)user_data;
     GError *err = NULL;
     jb_config_t new_cfg;
     load_default_config(&new_cfg);
@@ -919,6 +920,7 @@ static gboolean child_reaper_cb(gpointer user_data) {
 
 /* Subscribe to BlueALSA/DBus ObjectManager signals */
 static gboolean subscribe_to_bluealsa_signals(GError **error) {
+    (void)error;
     /* Subscribe to org.freedesktop.DBus.ObjectManager InterfacesAdded and InterfacesRemoved
        on the system bus; bluealsa typically registers objects under /org/bluealsa/... */
     interfaces_added_sub = g_dbus_connection_signal_subscribe(system_bus,
@@ -985,6 +987,7 @@ static gboolean init_services(GError **error) {
 }
 
 int main(int argc, char **argv) {
+    (void)argc; (void)argv;
     GError *err = NULL;
     /* children hash: key=pid pointer, value child_t*, use child_free to free child entries */
     children = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, child_free);

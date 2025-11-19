@@ -1,70 +1,90 @@
 #!/bin/sh
 ### BEGIN INIT INFO
 # Provides:          jack-bluealsa-autobridge
-# Required-Start:    $local_fs $remote_fs dbus jackd-rt
+# Required-Start:    $local_fs $remote_fs dbus bluetooth bluealsad jackd-rt
 # Required-Stop:
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: Start jack-bluealsa-autobridge (BlueALSA <-> JACK autobridge)
-# Description:       Starts the jack-bluealsa-autobridge daemon after JACK is up. Ensures config and runtime dirs exist.
+# Short-Description: Autobridge BlueALSA PCMs into JACK via alsa_in/alsa_out
+# Description:       Starts jack-bluealsa-autobridge after JACK and BlueALSA are ready.
 ### END INIT INFO
 
 . /lib/lsb/init-functions
 
-# Load overrides if present
-if [ -r /etc/default/jack-bluealsa-autobridge ]; then
-    . /etc/default/jack-bluealsa-autobridge
+# Load overrides for user detection from jackd-rt defaults (optional)
+if [ -r /etc/default/jackd-rt ]; then
+    . /etc/default/jackd-rt
 fi
 
-: ${AUTOBRIDGE_BIN:=/usr/local/bin/jack-bluealsa-autobridge}
-: ${AUTOBRIDGE_USER:=jack}
-: ${AUTOBRIDGE_PID:=/var/run/jack-bluealsa-autobridge.pid}
-: ${AUTOBRIDGE_LOG:=/var/log/jack-bluealsa-autobridge.log}
-: ${AUTOBRIDGE_CONF:=/etc/jack-bridge/bluetooth.conf}
+DAEMON="/usr/local/bin/jack-bluealsa-autobridge"
+PIDFILE="/var/run/jack-bluealsa-autobridge.pid"
+LOGFILE="/var/log/jack-bluealsa-autobridge.log"
 
 start() {
     log_daemon_msg "Starting jack-bluealsa-autobridge" "jack-bluealsa-autobridge"
 
-    if [ ! -x "$AUTOBRIDGE_BIN" ]; then
-        log_failure_msg "autobridge binary not found at $AUTOBRIDGE_BIN"
+    if [ ! -x "$DAEMON" ]; then
+        log_failure_msg "Binary not found: $DAEMON"
+        log_end_msg 1
         return 1
     fi
 
-    # Ensure dbus available
-    if ! pidof dbus-daemon >/dev/null 2>&1; then
-        log_failure_msg "dbus-daemon not running; cannot start autobridge"
-        return 1
-    fi
-
-    # Ensure JACK is running (use jackd-rt pidfile if present)
-    if [ -f /var/run/jackd-rt.pid ]; then
-        pid=$(cat /var/run/jackd-rt.pid 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
-            :
-        else
-            log_warning_msg "jackd-rt not running; autobridge will retry when started"
-        fi
+    # Detect user to run under (match jackd-rt logic)
+    USERNAME=""
+    if [ -n "$JACKD_USER" ]; then
+        USERNAME="$JACKD_USER"
     else
-        # Not fatal: user may run JACK manually; still start autobridge but warn
-        log_warning_msg "jackd-rt pidfile not present; ensure JACK is running for autobridge to operate"
+        # first user with UID>=1000 and in audio group
+        for u in $(cut -d: -f1 /etc/passwd); do
+            uid=$(id -u "$u" 2>/dev/null || true)
+            if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+                groups=$(id -nG "$u" 2>/dev/null || true)
+                if printf '%s\n' " $groups " | grep -q ' audio '; then
+                    USERNAME="$u"; break
+                fi
+            fi
+        done
+    fi
+    if [ -z "$USERNAME" ]; then
+        # fallback to first UID>=1000
+        for u in $(cut -d: -f1 /etc/passwd); do
+            uid=$(id -u "$u" 2>/dev/null || true)
+            if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+                USERNAME="$u"; break
+            fi
+        done
+    fi
+    [ -z "$USERNAME" ] && USERNAME="root"
+
+    # Wait for JACK to be ready
+    if command -v jack_wait >/dev/null 2>&1; then
+        jack_wait -w -t 15 >/dev/null 2>&1 || true
+    else
+        sleep 2
     fi
 
-    # Ensure config file exists
-    if [ ! -f "$AUTOBRIDGE_CONF" ]; then
-        log_warning_msg "Autobridge config $AUTOBRIDGE_CONF not found; creating from defaults"
-        if [ -d "$(dirname "$AUTOBRIDGE_CONF")" ]; then
-            cp /etc/jack-bridge/bluetooth.conf "${AUTOBRIDGE_CONF}" 2>/dev/null || true
+    # Wait for BlueALSA D-Bus service org.bluealsa (up to 15s)
+    i=0
+    while [ $i -lt 15 ]; do
+        if command -v gdbus >/dev/null 2>&1; then
+            if gdbus call --system --dest org.freedesktop.DBus \
+                --object-path /org/freedesktop/DBus \
+                --method org.freedesktop.DBus.NameHasOwner org.bluealsa 2>/dev/null | grep -q true; then
+                break
+            fi
         fi
-    fi
+        sleep 1
+        i=$((i+1))
+    done
 
-    # Prepare log file and permissions
-    touch "$AUTOBRIDGE_LOG" 2>/dev/null || true
-    chown "$AUTOBRIDGE_USER":"$AUTOBRIDGE_USER" "$AUTOBRIDGE_LOG" 2>/dev/null || true
+    touch "$LOGFILE" 2>/dev/null || true
+    chown "$USERNAME":"$USERNAME" "$LOGFILE" 2>/dev/null || true
 
-    # Start the autobridge as the runtime user
-    start-stop-daemon --start --background --make-pidfile --pidfile "$AUTOBRIDGE_PID" \
-        --chuid "$AUTOBRIDGE_USER" --startas "$AUTOBRIDGE_BIN" -- >>"$AUTOBRIDGE_LOG" 2>&1 \
-        || { log_failure_msg "Failed to start autobridge"; return 1; }
+    CMD="exec su -l \"$USERNAME\" -s /bin/sh -c 'exec \"$DAEMON\" >>\"$LOGFILE\" 2>&1'"
+
+    start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" \
+        --startas /bin/sh -- -c "$CMD" \
+        || { log_failure_msg "Failed to start jack-bluealsa-autobridge"; log_end_msg 1; return 1; }
 
     log_end_msg 0
     return 0
@@ -72,14 +92,14 @@ start() {
 
 stop() {
     log_daemon_msg "Stopping jack-bluealsa-autobridge" "jack-bluealsa-autobridge"
-    start-stop-daemon --stop --pidfile "$AUTOBRIDGE_PID" --retry 5 || true
-    rm -f "$AUTOBRIDGE_PID" 2>/dev/null || true
+    start-stop-daemon --stop --pidfile "$PIDFILE" --retry 5 || true
+    rm -f "$PIDFILE" 2>/dev/null || true
     log_end_msg 0
 }
 
 status() {
-    if [ -f "$AUTOBRIDGE_PID" ]; then
-        pid=$(cat "$AUTOBRIDGE_PID" 2>/dev/null)
+    if [ -f "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null)
         if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
             echo "jack-bluealsa-autobridge running (pid $pid)"
             return 0

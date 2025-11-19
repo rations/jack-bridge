@@ -51,7 +51,12 @@ extern int gui_bt_stop_discovery(const char *adapter_path);
 extern int gui_bt_pair_device(const char *device_path_or_mac);
 extern int gui_bt_trust_device(const char *device_path_or_mac, int trusted);
 extern int gui_bt_connect_device(const char *device_path_or_mac);
-extern int gui_bt_remove_device(const char *device_path_or_mac);
+/* Renamed D-Bus removal helper to avoid collision with UI removal */
+extern int bluez_remove_device(const char *device_path_or_mac);
+/* Explicit binding for the Bluetooth device list store */
+extern int gui_bt_set_device_store_widget(GtkWidget *treeview, GtkListStore *store);
+extern void gui_bt_register_discovery_listeners(void);
+extern void gui_bt_populate_existing_devices(void);
 
 /* Safe wrappers return 0 on success, -1 on failure and show a GTK dialog when appropriate */
 static int bt_wrapper_start_discovery(GtkWindow *parent) {
@@ -90,11 +95,86 @@ static int bt_wrapper_connect(GtkWindow *parent, const char *objpath) {
     return 0;
 }
 static int bt_wrapper_remove(GtkWindow *parent, const char *objpath) {
-    if (gui_bt_remove_device(objpath) != 0) {
+    if (bluez_remove_device(objpath) != 0) {
         show_bt_error_dialog(parent, "RemoveDevice failed");
         return -1;
     }
     return 0;
+}
+
+/* Bluetooth helper callbacks at file scope (valid C, referenced by GCallback in main UI) */
+static gpointer tree_get_selected_obj(GtkTreeView *tv) {
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(tv);
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    if (gtk_tree_selection_get_selected(sel, &model, &iter)) {
+        gchar *obj = NULL;
+        gtk_tree_model_get(model, &iter, 1, &obj, -1);
+        return obj; /* caller must g_free */
+    }
+    return NULL;
+}
+
+static void on_scan_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
+    /* Toggle buttons only on success (async D-Bus call already initiated inside wrapper) */
+    GtkWidget *stop_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(b), "peer_stop_btn"));
+    if (bt_wrapper_start_discovery(parent) == 0) {
+        if (stop_btn) gtk_widget_set_sensitive(stop_btn, TRUE);
+        gtk_widget_set_sensitive(GTK_WIDGET(b), FALSE);
+    }
+}
+
+static void on_stop_scan_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
+    /* Toggle buttons only on success */
+    GtkWidget *scan_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(b), "peer_scan_btn"));
+    if (bt_wrapper_stop_discovery(parent) == 0) {
+        if (scan_btn) gtk_widget_set_sensitive(scan_btn, TRUE);
+        gtk_widget_set_sensitive(GTK_WIDGET(b), FALSE);
+    }
+}
+
+static void on_pair_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
+    gchar *obj = tree_get_selected_obj(tv);
+    GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
+    if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
+    bt_wrapper_pair(parent, obj);
+    g_free(obj);
+}
+
+static void on_trust_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
+    gchar *obj = tree_get_selected_obj(tv);
+    GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
+    if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
+    bt_wrapper_trust(parent, obj);
+    g_free(obj);
+}
+
+static void on_connect_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
+    gchar *obj = tree_get_selected_obj(tv);
+    GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
+    if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
+    bt_wrapper_connect(parent, obj);
+    g_free(obj);
+}
+
+static void on_remove_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
+    gchar *obj = tree_get_selected_obj(tv);
+    GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
+    if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
+    bt_wrapper_remove(parent, obj);
+    g_free(obj);
 }
 // Callback to save preset to ~/.local/share/mxeq/presets.csv
 static void save_preset(GtkWidget *button, gpointer user_data) {
@@ -455,6 +535,7 @@ static char *format_default_filename(void) {
 
 /* Timer callback to update recording duration label */
 static gboolean update_timer(gpointer user_data) {
+    (void)user_data;
     if (!rec_ui) return FALSE;
     time_t now = time(NULL);
     int seconds = (int)(now - record_start_time);
@@ -468,6 +549,7 @@ static gboolean update_timer(gpointer user_data) {
 
 /* Idle callback used to reset UI from non-main thread context */
 static gboolean reset_ui_idle(gpointer user_data) {
+    (void)user_data;
     if (!rec_ui) return FALSE;
     gtk_widget_set_sensitive(rec_ui->record_btn, TRUE);
     gtk_widget_set_sensitive(rec_ui->stop_btn, FALSE);
@@ -477,6 +559,8 @@ static gboolean reset_ui_idle(gpointer user_data) {
 
 /* Child watch callback: called when arecord exits; status is child exit status */
 static void on_record_child_exit(GPid pid, gint status, gpointer user_data) {
+    (void)status;
+    (void)user_data;
     /* Reap child */
     g_spawn_close_pid(pid);
     record_pid = 0;
@@ -493,6 +577,8 @@ static void on_record_child_exit(GPid pid, gint status, gpointer user_data) {
 
 /* Start recording: builds path, spawns arecord asynchronously, adds child watch, updates UI */
 static void start_recording(GtkWidget *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
     if (record_pid != 0) {
         /* Already recording */
         return;
@@ -590,6 +676,8 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
 
 /* Stop recording: send SIGINT to arecord (if running) and rely on child-watch to finalize */
 static void stop_recording(GtkWidget *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
     if (record_pid == 0) return;
     g_print("Stopping recording (PID %d)\n", record_pid);
     if (kill(record_pid, SIGINT) != 0) {
@@ -644,10 +732,108 @@ static void create_recorder_ui(GtkWidget *main_box) {
     gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->record_btn, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->stop_btn, FALSE, FALSE, 5);
 
+/* Removed nested Bluetooth callbacks: moved to file scope above */
     gtk_widget_set_sensitive(rec_ui->stop_btn, FALSE); // initially disabled
 
     g_signal_connect(rec_ui->record_btn, "clicked", G_CALLBACK(start_recording), NULL);
     g_signal_connect(rec_ui->stop_btn, "clicked", G_CALLBACK(stop_recording), NULL);
+}
+
+/* Build Bluetooth panel once and bind to GUI BT helpers */
+static void on_bt_selection_changed(GtkTreeSelection *sel, gpointer user_data) {
+    (void)user_data;
+    GtkTreeView *tv = gtk_tree_selection_get_tree_view(sel);
+    gboolean has = gtk_tree_selection_get_selected(sel, NULL, NULL);
+    GtkWidget *pair_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "pair_btn"));
+    GtkWidget *trust_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "trust_btn"));
+    GtkWidget *connect_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "connect_btn"));
+    GtkWidget *remove_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "remove_btn"));
+    if (pair_btn) gtk_widget_set_sensitive(pair_btn, has);
+    if (trust_btn) gtk_widget_set_sensitive(trust_btn, has);
+    if (connect_btn) gtk_widget_set_sensitive(connect_btn, has);
+    if (remove_btn) gtk_widget_set_sensitive(remove_btn, has);
+}
+
+static void create_bt_panel(GtkWidget *main_box) {
+    GtkWidget *bt_expander = gtk_expander_new("BLUETOOTH");
+    gtk_expander_set_expanded(GTK_EXPANDER(bt_expander), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_box), bt_expander, FALSE, FALSE, 0);
+
+    GtkWidget *bt_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_add(GTK_CONTAINER(bt_expander), bt_vbox);
+
+    /* Discovery controls */
+    GtkWidget *bt_ctrl_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_pack_start(GTK_BOX(bt_vbox), bt_ctrl_row, FALSE, FALSE, 0);
+    GtkWidget *scan_btn = gtk_button_new_with_label("Scan");
+    GtkWidget *stop_btn = gtk_button_new_with_label("Stop");
+    gtk_box_pack_start(GTK_BOX(bt_ctrl_row), scan_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bt_ctrl_row), stop_btn, FALSE, FALSE, 0);
+    /* Initial state: allow Scan; Stop disabled until discovery starts */
+    gtk_widget_set_sensitive(stop_btn, FALSE);
+    /* Cross-reference buttons for easy toggling inside callbacks */
+    g_object_set_data(G_OBJECT(scan_btn), "peer_stop_btn", stop_btn);
+    g_object_set_data(G_OBJECT(stop_btn),  "peer_scan_btn", scan_btn);
+
+    /* Device list model and view */
+    GtkListStore *store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING); /* display, object */
+    GtkWidget *tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("Discovered Devices", renderer, "text", 0, NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(tree), col);
+
+    /* Scrolled window wrapper to constrain height (~140px) */
+    GtkWidget *scroller = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scroller, -1, 140);
+    gtk_container_add(GTK_CONTAINER(scroller), tree);
+    gtk_box_pack_start(GTK_BOX(bt_vbox), scroller, FALSE, FALSE, 0);
+
+    /* Action buttons */
+    GtkWidget *bt_action_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_pack_start(GTK_BOX(bt_vbox), bt_action_row, FALSE, FALSE, 0);
+    GtkWidget *pair_btn = gtk_button_new_with_label("Pair");
+    GtkWidget *trust_btn = gtk_button_new_with_label("Trust");
+    GtkWidget *connect_btn = gtk_button_new_with_label("Connect");
+    GtkWidget *remove_btn = gtk_button_new_with_label("Remove");
+    gtk_box_pack_start(GTK_BOX(bt_action_row), pair_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bt_action_row), trust_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bt_action_row), remove_btn, FALSE, FALSE, 0);
+
+    /* Disable action buttons until a device is selected */
+    gtk_widget_set_sensitive(pair_btn, FALSE);
+    gtk_widget_set_sensitive(trust_btn, FALSE);
+    gtk_widget_set_sensitive(connect_btn, FALSE);
+    gtk_widget_set_sensitive(remove_btn, FALSE);
+
+    /* Bind device store to GUI BT helpers, register listeners, and populate existing devices */
+    gui_bt_set_device_store_widget(tree, store);
+    gui_bt_register_discovery_listeners();
+    gui_bt_populate_existing_devices();
+
+    /* Provide access for callbacks to the selected row and selection-driven sensitivity */
+    g_object_set_data(G_OBJECT(pair_btn), "device_tree", tree);
+    g_object_set_data(G_OBJECT(trust_btn), "device_tree", tree);
+    g_object_set_data(G_OBJECT(connect_btn), "device_tree", tree);
+    g_object_set_data(G_OBJECT(remove_btn), "device_tree", tree);
+
+    /* Expose buttons via the tree so selection-changed can toggle sensitivity */
+    g_object_set_data(G_OBJECT(tree), "pair_btn", pair_btn);
+    g_object_set_data(G_OBJECT(tree), "trust_btn", trust_btn);
+    g_object_set_data(G_OBJECT(tree), "connect_btn", connect_btn);
+    g_object_set_data(G_OBJECT(tree), "remove_btn", remove_btn);
+
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(tree));
+    g_signal_connect(sel, "changed", G_CALLBACK(on_bt_selection_changed), NULL);
+
+    /* Connect signals */
+    g_signal_connect(scan_btn, "clicked", G_CALLBACK(on_scan_clicked), NULL);
+    g_signal_connect(stop_btn, "clicked", G_CALLBACK(on_stop_scan_clicked), NULL);
+    g_signal_connect(pair_btn, "clicked", G_CALLBACK(on_pair_clicked), NULL);
+    g_signal_connect(trust_btn, "clicked", G_CALLBACK(on_trust_clicked), NULL);
+    g_signal_connect(connect_btn, "clicked", G_CALLBACK(on_connect_clicked), NULL);
+    g_signal_connect(remove_btn, "clicked", G_CALLBACK(on_remove_clicked), NULL);
 }
 
 /* Main function starts here */
@@ -692,14 +878,18 @@ int main(int argc, char *argv[]) {
     // Create window
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "AlsaTune");
-    gtk_window_set_default_size(GTK_WINDOW(window), 640, 510); // Skinnier width, adjusted height
+    gtk_window_set_default_size(GTK_WINDOW(window), 640, 480); // Default 640x480 per UX; content wrapped in a scroller
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
-    // Main vertical box to hold both mixer and EQ sections
-    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5); // Reduced spacing
+    // Main vertical box wrapped in a global scroller to avoid clipping on small screens
+    GtkWidget *scroller_main = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller_main), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+
+    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4); // Tighter spacing
     gtk_container_set_border_width(GTK_CONTAINER(main_box), 5);
-    gtk_container_add(GTK_CONTAINER(window), main_box);
+    gtk_container_add(GTK_CONTAINER(scroller_main), main_box);
+    gtk_container_add(GTK_CONTAINER(window), scroller_main);
 
     // Mixer frame with border
     GtkWidget *mixer_frame = gtk_frame_new(NULL);
@@ -736,15 +926,19 @@ int main(int argc, char *argv[]) {
         gtk_box_pack_start(GTK_BOX(channel_box), padding, FALSE, FALSE, 5);
     }
 
-    // EQ frame with border
-    GtkWidget *eq_frame = gtk_frame_new(NULL);
-    gtk_box_pack_start(GTK_BOX(main_box), eq_frame, FALSE, FALSE, 0);
+    // EQ and Recording expander (expanded by default)
+    GtkWidget *eq_expander = gtk_expander_new("EQ and Recording");
+    gtk_expander_set_expanded(GTK_EXPANDER(eq_expander), TRUE);
+    gtk_box_pack_start(GTK_BOX(main_box), eq_expander, FALSE, FALSE, 0);
 
-    // EQ horizontal box
+    GtkWidget *eq_content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_add(GTK_CONTAINER(eq_expander), eq_content_vbox);
+
+    // EQ sliders row
     GtkWidget *eq_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_container_set_border_width(GTK_CONTAINER(eq_box), 2); // Reduced padding
     gtk_widget_set_size_request(eq_box, -1, 200);
-    gtk_container_add(GTK_CONTAINER(eq_frame), eq_box);
+    gtk_box_pack_start(GTK_BOX(eq_content_vbox), eq_box, FALSE, FALSE, 0);
 
     // Add sliders for each EQ band
     for (int i = 0; i < eq_data.num_bands; i++) {
@@ -771,135 +965,8 @@ int main(int argc, char *argv[]) {
         char *unit = strstr(short_label, " Hz");
         if (!unit) unit = strstr(short_label, " kHz");
         if (unit) *unit = '\0';
-        // Append correct unit based on frequency
+        /* Append correct unit based on frequency */
         if (strcmp(short_label, "1") == 0 || strcmp(short_label, "2") == 0 || strcmp(short_label, "4") == 0 || strcmp(short_label, "8") == 0 || strcmp(short_label, "16") == 0) {
-/* Bluetooth device management panel
-   - Uses the bt_wrapper_* helpers defined above which call into src/gui_bt.c.
-   - Creates a simple device list and action buttons wired to the wrappers.
-*/
-{
-    GtkWidget *bt_frame = gtk_frame_new("Bluetooth Devices");
-    gtk_box_pack_start(GTK_BOX(main_box), bt_frame, FALSE, FALSE, 5);
-
-    GtkWidget *bt_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_add(GTK_CONTAINER(bt_frame), bt_box);
-
-    /* Top row: discovery controls */
-    GtkWidget *bt_ctrl_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_box_pack_start(GTK_BOX(bt_box), bt_ctrl_row, FALSE, FALSE, 0);
-    GtkWidget *scan_btn = gtk_button_new_with_label("Scan");
-    GtkWidget *stop_scan_btn = gtk_button_new_with_label("Stop");
-    gtk_box_pack_start(GTK_BOX(bt_ctrl_row), scan_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(bt_ctrl_row), stop_scan_btn, FALSE, FALSE, 0);
-
-    /* Device list: a simple list store with one column (display + object path as ID) */
-    GtkListStore *store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING); /* display, object */
-    GtkWidget *tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
-    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("Discovered Devices", renderer, "text", 0, NULL);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(tree), col);
-    gtk_widget_set_size_request(tree, -1, 140);
-    gtk_box_pack_start(GTK_BOX(bt_box), tree, FALSE, FALSE, 0);
-
-    /* Action buttons for selected device */
-    GtkWidget *bt_action_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_box_pack_start(GTK_BOX(bt_box), bt_action_row, FALSE, FALSE, 0);
-    GtkWidget *pair_btn = gtk_button_new_with_label("Pair");
-    GtkWidget *trust_btn = gtk_button_new_with_label("Trust");
-    GtkWidget *connect_btn = gtk_button_new_with_label("Connect");
-    GtkWidget *remove_btn = gtk_button_new_with_label("Remove");
-    gtk_box_pack_start(GTK_BOX(bt_action_row), pair_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(bt_action_row), trust_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(bt_action_row), remove_btn, FALSE, FALSE, 0);
-
-    /* Store the model on the tree so external code (e.g., gui_bt.c) can populate it via DBus callbacks.
-       Placeholders here; actual population is performed by gui_bt implementation registering signals. */
-    g_object_set_data(G_OBJECT(tree), "device_store", store);
-
-    /* Connect simple callbacks that call the wrappers. They read selected object's object-path from the list store. */
-
-    /* Helper to get selected object's object path */
-    gpointer tree_get_selected_obj(GtkTreeView *tv) {
-        GtkTreeSelection *sel = gtk_tree_view_get_selection(tv);
-        GtkTreeIter iter;
-        GtkTreeModel *model;
-        if (gtk_tree_selection_get_selected(sel, &model, &iter)) {
-            gchar *obj = NULL;
-            gtk_tree_model_get(model, &iter, 1, &obj, -1);
-            return obj; /* caller must g_free */
-        }
-        return NULL;
-    }
-
-    /* Scan */
-    g_signal_connect(scan_btn, "clicked", G_CALLBACK(
-        +[](GtkButton *b, gpointer user_data) {
-            GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
-            bt_wrapper_start_discovery(parent);
-        }
-    ), NULL);
-
-    /* Stop scan */
-    g_signal_connect(stop_scan_btn, "clicked", G_CALLBACK(
-        +[](GtkButton *b, gpointer user_data) {
-            GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
-            bt_wrapper_stop_discovery(parent);
-        }
-    ), NULL);
-
-    /* Pair */
-    g_object_set_data(G_OBJECT(pair_btn), "device_tree", tree);
-    g_signal_connect(pair_btn, "clicked", G_CALLBACK(
-        +[](GtkButton *b, gpointer user_data) {
-            GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
-            gchar *obj = tree_get_selected_obj(tv);
-            GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
-            if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
-            bt_wrapper_pair(parent, obj);
-            g_free(obj);
-        }
-    ), NULL);
-
-    /* Trust */
-    g_object_set_data(G_OBJECT(trust_btn), "device_tree", tree);
-    g_signal_connect(trust_btn, "clicked", G_CALLBACK(
-        +[](GtkButton *b, gpointer user_data) {
-            GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
-            gchar *obj = tree_get_selected_obj(tv);
-            GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
-            if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
-            bt_wrapper_trust(parent, obj);
-            g_free(obj);
-        }
-    ), NULL);
-
-    /* Connect */
-    g_object_set_data(G_OBJECT(connect_btn), "device_tree", tree);
-    g_signal_connect(connect_btn, "clicked", G_CALLBACK(
-        +[](GtkButton *b, gpointer user_data) {
-            GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
-            gchar *obj = tree_get_selected_obj(tv);
-            GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
-            if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
-            bt_wrapper_connect(parent, obj);
-            g_free(obj);
-        }
-    ), NULL);
-
-    /* Remove */
-    g_object_set_data(G_OBJECT(remove_btn), "device_tree", tree);
-    g_signal_connect(remove_btn, "clicked", G_CALLBACK(
-        +[](GtkButton *b, gpointer user_data) {
-            GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(b), "device_tree"));
-            gchar *obj = tree_get_selected_obj(tv);
-            GtkWindow *parent = GTK_WINDOW(gtk_widget_get_toplevel(GTK_WIDGET(b)));
-            if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
-            bt_wrapper_remove(parent, obj);
-            g_free(obj);
-        }
-    ), NULL);
-}
             strcat(short_label, " kHz");
         } else {
             strcat(short_label, " Hz");
@@ -923,11 +990,11 @@ int main(int argc, char *argv[]) {
         gtk_box_pack_start(GTK_BOX(band_box), padding, FALSE, FALSE, 5);
     }
 
-    // Preset controls: entry, save button, and combo box in a grid
+    // Preset controls: entry, save button, and combo box in a grid (under EQ sliders)
     GtkWidget *preset_box = gtk_grid_new();
     gtk_grid_set_column_spacing(GTK_GRID(preset_box), 5);
     gtk_widget_set_halign(preset_box, GTK_ALIGN_CENTER);
-    gtk_box_pack_start(GTK_BOX(main_box), preset_box, FALSE, FALSE, 1); // Kept 1px margin
+    gtk_box_pack_start(GTK_BOX(eq_content_vbox), preset_box, FALSE, FALSE, 1); // Kept 1px margin
 
     GtkWidget *preset_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(preset_entry), "Enter name for new pre-set");
@@ -960,12 +1027,22 @@ int main(int argc, char *argv[]) {
 
     // Load existing presets into combo box
     load_presets(GTK_COMBO_BOX_TEXT(preset_combo));
-    
-    /* Create recorder UI and pack at bottom of main_box (non-destructive) */
-    create_recorder_ui(main_box);
+
+    // Recorder UI directly under presets inside EQ expander
+    create_recorder_ui(eq_content_vbox);
+
+    /* Bluetooth panel (collapsible) */
+    create_bt_panel(main_box);
 
     gtk_widget_show_all(window);
     gtk_main();
+
+    /* Unregister GUI discovery listeners and shutdown GUI Bluetooth helpers before exiting.
+       These calls are safe no-ops if gui_bt wasn't initialized. */
+    extern void gui_bt_unregister_discovery_listeners(void);
+    extern void gui_bt_shutdown(void);
+    gui_bt_unregister_discovery_listeners();
+    gui_bt_shutdown();
 
     cleanup_alsa(&mixer_data, &eq_data);
     return 0;

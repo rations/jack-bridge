@@ -1,0 +1,11 @@
+# jack-bridge: ignore local developer build outputs
+# Shipped binaries live in contrib/bin; ignore ONLY the top-level /bin and keep contrib/bin tracked
+/bin/
+!/contrib/bin/
+!/contrib/bin/**
+
+# Common local artifacts
+*.o
+*.obj
+*.swp
+*.log

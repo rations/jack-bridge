@@ -27,6 +27,12 @@ Summary of actions performed by contrib/setup-bluetooth.sh
      `/usr/share/dbus-1/system.d/org.bluealsa.conf` with mode `0644`. This policy allows the
      `bluealsa` user to own the `org.bluealsa` D-Bus name and permits members of the `audio`
      group to use the service.
+   - NOTE: `usr/share/dbus-1/system.d` is a D‑Bus system-bus policy directory (XML files)
+     used by the system D-Bus daemon to control which users/groups can own or talk to
+     particular D-Bus names. This is NOT related to systemd. The presence of this file
+     in the repository simply provides an optional, ready-made D-Bus policy that the
+     provisioning script can copy into the system D-Bus policy directory on systems
+     where you want the `bluealsa` user to be permitted to own `org.bluealsa`.
 
 5. Add target user to audio group
    - The script adds a target user (passed as an argument or auto-detected) to the `audio` group so
