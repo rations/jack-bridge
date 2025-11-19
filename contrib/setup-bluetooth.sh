@@ -64,6 +64,24 @@ else
     printf "No D-Bus policy found in repo path usr/share/dbus-1/system.d/org.bluealsa.conf - skipping copy\n"
 fi
 
+# Install polkit rule to authorize BlueZ Adapter/Device operations for audio/bluetooth groups (best-effort)
+if [ -f "contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules" ]; then
+    printf "Installing polkit rule to /etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules\n"
+    install -m 0644 contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules /etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules || true
+else
+    printf "No polkit rule found at contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules - skipping copy\n"
+fi
+
+# Best-effort reload of dbus and polkit to pick up new policies (no systemd dependency)
+if command -v service >/dev/null 2>&1; then
+    service dbus reload >/dev/null 2>&1 || true
+    service polkit restart >/dev/null 2>&1 || true
+fi
+# HUP polkitd if running (fallback)
+if pidof polkitd >/dev/null 2>&1; then
+    kill -HUP "$(pidof polkitd | awk '{print $1}')" >/dev/null 2>&1 || true
+fi
+
 # Add target user to audio group
 if [ -z "$TARGET_USER" ]; then
     # try to find first user in audio group with uid >=1000
@@ -82,11 +100,21 @@ if [ -n "$TARGET_USER" ]; then
         else
             printf "usermod not available; please add %s to audio group manually\n" "$TARGET_USER"
         fi
+        if getent group bluetooth >/dev/null 2>&1; then
+            printf "Adding %s to bluetooth group (if not already)\n" "$TARGET_USER"
+            if command -v usermod >/dev/null 2>&1; then
+                usermod -a -G bluetooth "$TARGET_USER" >/dev/null 2>&1 || true
+            else
+                printf "usermod not available; please add %s to bluetooth group manually\n" "$TARGET_USER"
+            fi
+        else
+            printf "Group 'bluetooth' not present; skipping bluetooth group add for %s\n" "$TARGET_USER"
+        fi
     else
-        printf "Target user %s does not exist; skipping audio group add\n" "$TARGET_USER"
+        printf "Target user %s does not exist; skipping group adds\n" "$TARGET_USER"
     fi
 else
-    printf "No target user determined; skipping audio group add\n"
+    printf "No target user determined; skipping group adds\n"
 fi
 
 # Create GUI C module stubs if missing

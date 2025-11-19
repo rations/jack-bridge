@@ -14,7 +14,7 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus"
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1"
 
 echo "Installing jack-bridge contrib files (non-destructive)..."
 
@@ -178,11 +178,16 @@ fi
 cp -pf contrib/etc/security/limits.d/audio.conf "$LIMITS_DST"
 echo "Installed (or replaced) realtime limits template to $LIMITS_DST"
 
-# Register init script with update-rc.d if available
+# Register init script with update-rc.d if available (explicit priorities for ordering)
+# Desired order: dbus -> bluetoothd -> bluealsad -> jackd-rt -> jack-bluealsa-autobridge
 if command -v update-rc.d >/dev/null 2>&1; then
-    echo "Registering jackd-rt init script with update-rc.d (defaults)..."
-    if ! sudo update-rc.d jackd-rt defaults; then
-        echo "Warning: update-rc.d returned a non-zero status. You may need to register the init script manually."
+    echo "Registering jackd-rt init script with explicit priorities..."
+    # jackd-rt after bluealsad (bluetoothd -> bluealsad -> jackd-rt)
+    # start 22 at runlevels 2 3 4 5; stop 78 at 0 1 6
+    sudo update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
+    if ! sudo update-rc.d jackd-rt start 22 2 3 4 5 . stop 78 0 1 6 .; then
+        echo "Warning: update-rc.d jackd-rt explicit registration failed; falling back to defaults"
+        sudo update-rc.d jackd-rt defaults || true
     fi
 else
     echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
@@ -235,6 +240,25 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
         fi
     fi
 done
+
+# Also add desktop users to 'bluetooth' group when present (required for some BlueZ setups)
+if getent group bluetooth >/dev/null; then
+    echo "Adding desktop users (UID>=1000) to the 'bluetooth' group (if present)..."
+    for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
+        if id -nG "$u" 2>/dev/null | grep -qw bluetooth; then
+            echo "User '$u' already in bluetooth group."
+        else
+            if usermod -aG bluetooth "$u" 2>/dev/null; then
+                echo "Added '$u' to bluetooth group."
+            else
+                echo "Warning: failed to add '$u' to bluetooth group. You may need to run: sudo usermod -aG bluetooth $u"
+            fi
+        fi
+    done
+else
+    echo "Group 'bluetooth' not present; skipping bluetooth group additions."
+fi
+
 echo "Ensuring BlueALSA runtime and autobridge integration (non-destructive)..."
 
 # Create dedicated bluealsa system user (nologin) if it does not exist
@@ -296,8 +320,10 @@ if [ -f "contrib/init.d/bluetoothd" ]; then
     sudo cp -p contrib/init.d/bluetoothd "${INIT_DIR}/bluetoothd"
     sudo chmod 755 "${INIT_DIR}/bluetoothd"
     if command -v update-rc.d >/dev/null 2>&1; then
-        echo "Registering bluetoothd init script with update-rc.d (defaults)..."
-        sudo update-rc.d bluetoothd defaults || true
+        echo "Registering bluetoothd init script with explicit priorities..."
+        # bluetoothd before bluealsad and jackd-rt
+        sudo update-rc.d -f bluetoothd remove >/dev/null 2>&1 || true
+        sudo update-rc.d bluetoothd start 20 2 3 4 5 . stop 80 0 1 6 . || true
     else
         echo "update-rc.d not available; please register ${INIT_DIR}/bluetoothd manually if desired."
     fi
@@ -314,8 +340,10 @@ if [ -f "contrib/init.d/bluealsad" ]; then
         echo "Installed defaults to ${DEFAULTS_DIR}/bluealsad"
     fi
     if command -v update-rc.d >/dev/null 2>&1; then
-        echo "Registering bluealsad init script with update-rc.d (defaults)..."
-        sudo update-rc.d bluealsad defaults || true
+        echo "Registering bluealsad init script with explicit priorities..."
+        # bluealsad after bluetoothd, before jackd-rt
+        sudo update-rc.d -f bluealsad remove >/dev/null 2>&1 || true
+        sudo update-rc.d bluealsad start 21 2 3 4 5 . stop 79 0 1 6 . || true
     fi
 fi
 
@@ -326,8 +354,10 @@ if [ -f "contrib/init.d/jack-bluealsa-autobridge" ]; then
     sudo chmod 755 "${INIT_DIR}/jack-bluealsa-autobridge"
     if command -v bluealsad >/dev/null 2>&1; then
         if command -v update-rc.d >/dev/null 2>&1; then
-            echo "Registering jack-bluealsa-autobridge init script with update-rc.d (defaults)..."
-            sudo update-rc.d jack-bluealsa-autobridge defaults || true
+            echo "Registering jack-bluealsa-autobridge init script with explicit priorities..."
+            # autobridge after jackd-rt
+            sudo update-rc.d -f jack-bluealsa-autobridge remove >/dev/null 2>&1 || true
+            sudo update-rc.d jack-bluealsa-autobridge start 23 2 3 4 5 . stop 77 0 1 6 . || true
         else
             echo "update-rc.d not available; please register ${INIT_DIR}/jack-bluealsa-autobridge manually if desired."
         fi
@@ -339,18 +369,37 @@ else
 fi
 
 
-# Install a D-Bus policy file for bluealsa if present in repo (non-destructive)
+# Install BlueALSA D-Bus policy (canonical)
+DBUS_POLICY_SRC="usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_POLICY_DST="/usr/share/dbus-1/system.d/org.bluealsa.conf"
-if [ -f "contrib/etc/dbus-org.bluealsa.conf" ] && [ ! -f "$DBUS_POLICY_DST" ]; then
-    echo "Installing org.bluealsa D-Bus policy to $DBUS_POLICY_DST"
+if [ -f "$DBUS_POLICY_SRC" ]; then
+    echo "Installing org.bluealsa D-Bus policy to $DBUS_POLICY_DST (from $DBUS_POLICY_SRC)"
     sudo mkdir -p "$(dirname "$DBUS_POLICY_DST")"
-    sudo install -m 0644 contrib/etc/dbus-org.bluealsa.conf "$DBUS_POLICY_DST" || true
-else
-    if [ -f "$DBUS_POLICY_DST" ]; then
-        echo "D-Bus policy $DBUS_POLICY_DST already exists; leaving as-is."
-    else
-        echo "No bundled D-Bus policy found; assume distro package provides one."
+    sudo install -m 0644 "$DBUS_POLICY_SRC" "$DBUS_POLICY_DST" || true
+    # best-effort reload of D-Bus to pick up policy changes
+    if command -v service >/dev/null 2>&1; then
+        sudo service dbus reload >/dev/null 2>&1 || true
     fi
+else
+    echo "No bundled canonical D-Bus policy found at $DBUS_POLICY_SRC; assuming distro provides one."
+fi
+
+# Install polkit rule to authorize BlueZ Adapter/Device operations for users in 'audio' or 'bluetooth'
+POLKIT_RULE_SRC="contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
+POLKIT_RULE_DST="/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
+if [ -f "$POLKIT_RULE_SRC" ]; then
+    echo "Installing polkit rule to $POLKIT_RULE_DST"
+    sudo mkdir -p "$(dirname "$POLKIT_RULE_DST")"
+    sudo install -m 0644 "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST" || true
+    # best-effort reload of polkit (no systemd dependency)
+    if pidof polkitd >/dev/null 2>&1; then
+        sudo kill -HUP "$(pidof polkitd | awk '{print $1}')" 2>/dev/null || true
+    fi
+    if command -v service >/dev/null 2>&1; then
+        sudo service polkit restart >/dev/null 2>&1 || true
+    fi
+else
+    echo "Polkit rule not found at $POLKIT_RULE_SRC; skipping (Pair/Connect may prompt/deny without it)."
 fi
 
 # Install jack-bridge Bluetooth config (non-destructive)

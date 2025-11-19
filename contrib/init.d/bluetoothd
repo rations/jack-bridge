@@ -17,7 +17,7 @@ if [ -r /etc/default/bluetoothd ]; then
 fi
 
 : ${BLUETOOTHD_BIN:=/usr/sbin/bluetoothd}
-: ${BLUETOOTHD_ARGS:="-E"}   # -E prevents bluetoothd from senting itself to background
+: ${BLUETOOTHD_ARGS:="-n -E"}   # -n: stay in foreground for start-stop-daemon; -E: enable experimental features (optional)
 : ${BLUETOOTHD_PIDFILE:=/var/run/bluetoothd.pid}
 : ${BLUETOOTHD_LOG:=/var/log/bluetoothd.log}
 : ${BLUETOOTHD_CONF:=/etc/bluetooth/main.conf}

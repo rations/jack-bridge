@@ -79,9 +79,9 @@ static void agent_method_call(GDBusConnection *connection,
     if (g_strcmp0(method_name, "RequestPinCode") == 0) {
         const gchar *device;
         g_variant_get(parameters, "(o)", &device);
-        g_info("bt_agent: RequestPinCode for device %s", device);
-        /* Non-interactive default: return empty pin */
-        GVariant *ret = g_variant_new("(s)", "");
+        g_info("bt_agent: RequestPinCode for device %s (returning default '0000')", device);
+        /* Non-interactive default: return legacy '0000' which works for many headsets */
+        GVariant *ret = g_variant_new("(s)", "0000");
         g_dbus_method_invocation_return_value(invocation, ret);
         return;
     }

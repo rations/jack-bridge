@@ -21,7 +21,7 @@
 
 . /lib/lsb/init-functions
 
-DAEMON="/usr/bin/bluealsad"
+DAEMON="/usr/local/bin/bluealsad"
 PIDFILE="/var/run/bluealsad.pid"
 
 # Defaults

@@ -64,6 +64,11 @@ typedef struct {
     gchar *pid_file;
     gchar *runtime_user;
     int max_bridges;
+
+    /* Optional feature flags (default enabled) */
+    int enable_a2dp_sink;    /* phone -> us (alsa_in) */
+    int enable_a2dp_source;  /* us -> headset (alsa_out) */
+    int enable_sco;          /* SCO/HFP/HSP */
 } jb_config_t;
 
 static jb_config_t config;
@@ -307,6 +312,11 @@ static void load_default_config(jb_config_t *cfg) {
     cfg->pid_file = g_strdup(DEFAULT_PID);
     cfg->runtime_user = g_strdup("jack");
     cfg->max_bridges = 8;
+
+    /* Default: enable all bridge types */
+    cfg->enable_a2dp_sink   = 1;
+    cfg->enable_a2dp_source = 1;
+    cfg->enable_sco         = 1;
 }
 
 static gchar *trim(gchar *s) {
@@ -354,12 +364,28 @@ static gboolean load_config_from_file(const char *path, jb_config_t *cfg, GError
         else if (g_strcmp0(k, "SCO_NPERIODS") == 0) cfg->sco_nperiods = atoi(v);
         else if (g_strcmp0(k, "SCO_CHANNELS") == 0) cfg->sco_channels = atoi(v);
 
+        /* aliases for GUI controls (backward compatible) */
+        else if (g_strcmp0(k, "BRIDGE_PERIOD") == 0) {
+            cfg->a2dp_period = atoi(v);
+            jb_log("Config alias: BRIDGE_PERIOD -> A2DP_PERIOD=%d", cfg->a2dp_period);
+        }
+        else if (g_strcmp0(k, "BRIDGE_NPERIODS") == 0) {
+            cfg->a2dp_nperiods = atoi(v);
+            jb_log("Config alias: BRIDGE_NPERIODS -> A2DP_NPERIODS=%d", cfg->a2dp_nperiods);
+        }
+
         else if (g_strcmp0(k, "SPAWN_DELAY") == 0) cfg->spawn_delay = atoi(v);
         else if (g_strcmp0(k, "CHILD_TERM_TIMEOUT") == 0) cfg->child_term_timeout = atoi(v);
         else if (g_strcmp0(k, "LOG_FILE") == 0) { g_free(cfg->log_file); cfg->log_file = g_strdup(v); }
         else if (g_strcmp0(k, "PID_FILE") == 0) { g_free(cfg->pid_file); cfg->pid_file = g_strdup(v); }
         else if (g_strcmp0(k, "RUNTIME_USER") == 0) { g_free(cfg->runtime_user); cfg->runtime_user = g_strdup(v); }
         else if (g_strcmp0(k, "MAX_BRIDGES") == 0) cfg->max_bridges = atoi(v);
+
+        /* optional feature flags */
+        else if (g_strcmp0(k, "ENABLE_A2DP_SINK") == 0)   cfg->enable_a2dp_sink   = atoi(v) ? 1 : 0;
+        else if (g_strcmp0(k, "ENABLE_A2DP_SOURCE") == 0) cfg->enable_a2dp_source = atoi(v) ? 1 : 0;
+        else if (g_strcmp0(k, "ENABLE_SCO") == 0)         cfg->enable_sco         = atoi(v) ? 1 : 0;
+
         /* unrecognized keys are ignored for now */
 
         g_free(k);
@@ -761,19 +787,35 @@ static void on_bluealsa_pcm_added(const char *object_path) {
          */
         if (profile && g_strrstr(profile, "a2dp")) {
             if (direction && g_strcmp0(direction, "source") == 0) {
-                spawn_a2dp_sink_for(mac);
+                if (config.enable_a2dp_sink) {
+                    spawn_a2dp_sink_for(mac);
+                } else {
+                    jb_log("Config disabled: ENABLE_A2DP_SINK=0 (skipping A2DP sink for %s)", mac);
+                }
                 used_specific_spawn = TRUE;
             } else if (direction && g_strcmp0(direction, "sink") == 0) {
-                spawn_a2dp_source_for(mac);
+                if (config.enable_a2dp_source) {
+                    spawn_a2dp_source_for(mac);
+                } else {
+                    jb_log("Config disabled: ENABLE_A2DP_SOURCE=0 (skipping A2DP source for %s)", mac);
+                }
                 used_specific_spawn = TRUE;
             } else {
                 /* If direction not provided, prefer sink (phone->us) */
-                spawn_a2dp_sink_for(mac);
+                if (config.enable_a2dp_sink) {
+                    spawn_a2dp_sink_for(mac);
+                } else {
+                    jb_log("Config disabled: ENABLE_A2DP_SINK=0 (skipping default A2DP sink for %s)", mac);
+                }
                 used_specific_spawn = TRUE;
             }
         } else if ((profile && (g_strrstr(profile, "sco") || g_strrstr(profile, "hfp") || g_strrstr(profile, "hsp"))) ||
                    (type && (g_strrstr(type, "sco") || g_strrstr(type, "hfp") || g_strrstr(type, "hsp")))) {
-            spawn_sco_for(mac);
+            if (config.enable_sco) {
+                spawn_sco_for(mac);
+            } else {
+                jb_log("Config disabled: ENABLE_SCO=0 (skipping SCO for %s)", mac);
+            }
             used_specific_spawn = TRUE;
         }
 
@@ -788,9 +830,17 @@ static void on_bluealsa_pcm_added(const char *object_path) {
     if (!used_specific_spawn) {
         /* Fallback heuristic: if object path contains 'sco' then SCO, else default to A2DP sink */
         if (strstr(object_path, "sco") || strstr(object_path, "SCO")) {
-            spawn_sco_for(mac);
+            if (config.enable_sco) {
+                spawn_sco_for(mac);
+            } else {
+                jb_log("Config disabled: ENABLE_SCO=0 (skipping fallback SCO for %s)", mac);
+            }
         } else {
-            spawn_a2dp_sink_for(mac);
+            if (config.enable_a2dp_sink) {
+                spawn_a2dp_sink_for(mac);
+            } else {
+                jb_log("Config disabled: ENABLE_A2DP_SINK=0 (skipping fallback A2DP sink for %s)", mac);
+            }
         }
     }
 
