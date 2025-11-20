@@ -50,6 +50,8 @@ static gchar *get_default_adapter_path(void);
 static void update_device_row_state(const char *object_path);
 static gboolean __gui_bt_update_device_idle(gpointer data);
 static gboolean __gui_bt_refresh_selection_idle(gpointer data);
+/* Forward decl so Start/Stop discovery can refresh Scan/Stop sensitivity immediately */
+static void refresh_adapter_state(void);
 
 /* Helper: convert MAC "AA:BB:CC:DD:EE:FF" to BlueZ object path using the default adapter */
 static gchar *mac_to_object_path(const char *mac) {
@@ -106,25 +108,26 @@ static gchar *get_default_adapter_path(void) {
     GVariantIter *outer = NULL;
     g_variant_get(managed, "(a{oa{sa{sv}}})", &outer);
     gchar *path = NULL;
-    GVariantIter *iface_map = NULL;
+    GVariant *ifaces = NULL;
     gchar *adapter_path = NULL;
  
-    while (g_variant_iter_next(outer, "{oa{sa{sv}}}", &path, &iface_map)) {
+    while (g_variant_iter_next(outer, "{o@a{sa{sv}}}", &path, &ifaces)) {
         gchar *iface_name = NULL;
-        /* props is a GVariant containing the a{sv} map; extract and unref safely */
         GVariant *props = NULL;
         gboolean is_adapter = FALSE;
-        while (g_variant_iter_next(iface_map, "{sa{sv}}", &iface_name, &props)) {
+        
+        GVariantIter iiter;
+        g_variant_iter_init(&iiter, ifaces);
+
+        while (g_variant_iter_next(&iiter, "{s@a{sv}}", &iface_name, &props)) {
             if (g_strcmp0(iface_name, "org.bluez.Adapter1") == 0) {
                 is_adapter = TRUE;
             }
-            /* props is a container variant (a{sv}); we don't need to iterate here
-             * — just drop the reference if it was set. */
             if (props) g_variant_unref(props);
             g_free(iface_name);
             if (is_adapter) break;
         }
-        if (iface_map) g_variant_iter_free(iface_map);
+
         if (is_adapter) {
             adapter_path = g_strdup(path);
             g_free(path);
@@ -260,7 +263,9 @@ void gui_bt_shutdown(void) {
     }
 }
 
-/* Start discovery on adapter (adapter_path or default adapter if NULL) - async, non-blocking */
+
+
+/* Start discovery on adapter (adapter_path or default adapter if NULL) - synchronous to surface errors */
 int gui_bt_start_discovery(const char *adapter_path) {
     GError *err = NULL;
     if (!ensure_system_bus(&err)) {
@@ -287,7 +292,8 @@ int gui_bt_start_discovery(const char *adapter_path) {
         fprintf(stderr, "gui_bt_start_discovery: SetDiscoveryFilter failed on %s (continuing)\n", adapter);
     }
 
-    g_dbus_connection_call(gui_system_bus,
+    /* Synchronous StartDiscovery so GUI can notify user on failure (polkit denial, etc.) */
+    GVariant *res = g_dbus_connection_call_sync(gui_system_bus,
                            "org.bluez",
                            adapter,
                            "org.bluez.Adapter1",
@@ -295,16 +301,25 @@ int gui_bt_start_discovery(const char *adapter_path) {
                            NULL,
                            NULL,
                            G_DBUS_CALL_FLAGS_NONE,
-                           -1,
+                           5000,
                            NULL,
-                           NULL,
-                           NULL);
+                           &err);
+    if (!res) {
+        fprintf(stderr, "gui_bt_start_discovery: StartDiscovery failed on %s: %s\n", adapter, err ? err->message : "(unknown)");
+        if (err) g_error_free(err);
+        g_free(adapter);
+        return -1;
+    }
+    g_variant_unref(res);
+
+    /* Update scan/stop button sensitivity from current Adapter state */
+    refresh_adapter_state();
 
     g_free(adapter);
     return 0;
 }
 
-/* Stop discovery on adapter (adapter_path or default adapter if NULL) - async, non-blocking */
+/* Stop discovery on adapter (adapter_path or default adapter if NULL) - synchronous */
 int gui_bt_stop_discovery(const char *adapter_path) {
     GError *err = NULL;
     if (!ensure_system_bus(&err)) {
@@ -318,7 +333,7 @@ int gui_bt_stop_discovery(const char *adapter_path) {
         return -1;
     }
 
-    g_dbus_connection_call(gui_system_bus,
+    GVariant *res = g_dbus_connection_call_sync(gui_system_bus,
                            "org.bluez",
                            adapter,
                            "org.bluez.Adapter1",
@@ -326,10 +341,19 @@ int gui_bt_stop_discovery(const char *adapter_path) {
                            NULL,
                            NULL,
                            G_DBUS_CALL_FLAGS_NONE,
-                           -1,
+                           5000,
                            NULL,
-                           NULL,
-                           NULL);
+                           &err);
+    if (!res) {
+        fprintf(stderr, "gui_bt_stop_discovery: StopDiscovery failed on %s: %s\n", adapter, err ? err->message : "(unknown)");
+        if (err) g_error_free(err);
+        g_free(adapter);
+        return -1;
+    }
+    g_variant_unref(res);
+
+    /* Update scan/stop button sensitivity from current Adapter state */
+    refresh_adapter_state();
 
     g_free(adapter);
     return 0;
@@ -1261,13 +1285,16 @@ void gui_bt_populate_existing_devices(void) {
     GVariantIter *outer = NULL;
     g_variant_get(managed, "(a{oa{sa{sv}}})", &outer);
     gchar *path = NULL;
-    GVariantIter *iface_map = NULL;
+    GVariant *ifaces = NULL;
 
-    while (g_variant_iter_next(outer, "{oa{sa{sv}}}", &path, &iface_map)) {
+    while (g_variant_iter_next(outer, "{o@a{sa{sv}}}", &path, &ifaces)) {
         gchar *iface_name = NULL;
-        /* props is a GVariant of type a{sv}, not an iterator */
         GVariant *props = NULL;
-        while (g_variant_iter_next(iface_map, "{sa{sv}}", &iface_name, &props)) {
+        
+        GVariantIter iiter;
+        g_variant_iter_init(&iiter, ifaces);
+
+        while (g_variant_iter_next(&iiter, "{s@a{sv}}", &iface_name, &props)) {
             if (g_strcmp0(iface_name, "org.bluez.Device1") == 0) {
                 /* Extract iterator from the a{sv} variant to traverse properties */
                 GVariantIter *piter = NULL;
@@ -1298,7 +1325,6 @@ void gui_bt_populate_existing_devices(void) {
             if (props) g_variant_unref(props);
             g_free(iface_name);
         }
-        if (iface_map) g_variant_iter_free(iface_map);
         g_free(path);
     }
     g_variant_iter_free(outer);

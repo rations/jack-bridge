@@ -408,6 +408,76 @@ else
     echo "Polkit rule not found at $POLKIT_RULE_SRC; skipping (Pair/Connect may prompt/deny without it)."
 fi
 
+# --- jack-bridge Bluetooth adapter convenience helper ---
+# Create a small helper script that ensures the primary adapter is Discoverable/Pairable
+# and sets DiscoverableTimeout=0 (stay discoverable) when invoked. The installer runs
+# this once now and installs an init script to run it at boot after bluetoothd.
+BLUETOOTH_HELPER="${USR_LIB_DIR}/bluetooth-enable.sh"
+mkdir -p "${USR_LIB_DIR}"
+cat > "${BLUETOOTH_HELPER}" <<'BLUETOOTH_HELPER_EOF'
+#!/bin/sh
+# jack-bridge bluetooth-enable.sh
+# Best-effort: set hci0 Adapter to Discoverable=true, Pairable=true, DiscoverableTimeout=0
+set -e
+if ! command -v gdbus >/dev/null 2>&1; then
+    echo "gdbus not available; cannot set BlueZ adapter properties"
+    exit 0
+fi
+# Try to set properties on /org/bluez/hci0; do not fail the installer if these fail.
+gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set "org.bluez.Adapter1" "Discoverable" "<true>" >/dev/null 2>&1 || true
+gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set "org.bluez.Adapter1" "Pairable" "<true>" >/dev/null 2>&1 || true
+gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set "org.bluez.Adapter1" "DiscoverableTimeout" "<uint32 0>" >/dev/null 2>&1 || true
+exit 0
+BLUETOOTH_HELPER_EOF
+chmod 755 "${BLUETOOTH_HELPER}" || true
+echo "Installed bluetooth-enable helper to ${BLUETOOTH_HELPER}"
+
+# Run helper now to enable adapter state at install time (best-effort)
+echo "Attempting to enable adapter Discoverable/Pairable now (best-effort)..."
+"${BLUETOOTH_HELPER}" || true
+
+# Install init script to ensure adapter is configured after boot/startup of bluetoothd
+INIT_HELPER="${INIT_DIR}/jack-bridge-bluetooth-config"
+cat > "${INIT_HELPER}" <<'INIT_HELPER_EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          jack-bridge-bluetooth-config
+# Required-Start:    $local_fs $remote_fs dbus bluetooth
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Configure BlueZ adapter for jack-bridge (discoverable/pairable)
+### END INIT INFO
+
+case "$1" in
+  start)
+    if [ -x "/usr/local/lib/jack-bridge/bluetooth-enable.sh" ]; then
+      /usr/local/lib/jack-bridge/bluetooth-enable.sh >/dev/null 2>&1 || true
+    fi
+    ;;
+  stop|restart|status)
+    # no-op
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 2
+    ;;
+esac
+
+exit 0
+INIT_HELPER_EOF
+chmod 755 "${INIT_HELPER}" || true
+echo "Installed init script ${INIT_HELPER}"
+
+# Register the init script so it runs after bluetoothd during boot (SysV)
+if command -v update-rc.d >/dev/null 2>&1; then
+    update-rc.d -f jack-bridge-bluetooth-config remove >/dev/null 2>&1 || true
+    # Start early (after bluetoothd which is registered at 20). Use 25 to run after bluetoothd.
+    update-rc.d jack-bridge-bluetooth-config start 25 2 3 4 5 . stop 75 0 1 6 . || true
+else
+    echo "update-rc.d not available; please register ${INIT_HELPER} to run at boot if desired."
+fi
+
 # Install jack-bridge Bluetooth config (non-destructive)
 CONF_SRC="contrib/etc/jack-bridge/bluetooth.conf"
 CONF_DST="/etc/jack-bridge/bluetooth.conf"
@@ -425,3 +495,78 @@ fi
 echo "Installation complete. Please reboot the system to start JACK, bluetoothd (distro), bluealsad (if installed), and the jack-bluealsa-autobridge service at boot."
 
 exit 0
+# --- jack-bridge Bluetooth adapter boot-time helper install (appended by repo update) ---
+# Install helper that ensures adapters are Powered/Discoverable/Pairable and a SysV init script
+# to run it at every boot. Non-fatal if pieces are missing.
+if [ -f "contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh" ]; then
+  echo "Installing Bluetooth adapter helper to /usr/local/lib/jack-bridge/bluetooth-enable.sh ..."
+  install -m 0755 contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh /usr/local/lib/jack-bridge/bluetooth-enable.sh || true
+
+  # Create SysV init script that runs the helper after bluetoothd is up
+  if [ ! -f "/etc/init.d/jack-bridge-bluetooth-config" ]; then
+    echo "Creating /etc/init.d/jack-bridge-bluetooth-config ..."
+    cat > /etc/init.d/jack-bridge-bluetooth-config <<'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          jack-bridge-bluetooth-config
+# Required-Start:    $local_fs $remote_fs dbus bluetooth
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Ensure BlueZ adapter discoverable/pairable each boot
+# Description:       Calls /usr/local/lib/jack-bridge/bluetooth-enable.sh once at boot.
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+HELPER="/usr/local/lib/jack-bridge/bluetooth-enable.sh"
+PIDFILE="/var/run/jack-bridge-bluetooth-config.pid"
+
+start() {
+    log_daemon_msg "Running Bluetooth adapter configuration helper" "jack-bridge-bluetooth-config"
+    if [ ! -x "$HELPER" ]; then
+        log_warning_msg "Missing helper $HELPER"
+        log_end_msg 0
+        return 0
+    fi
+    # best-effort: do not fail the boot if it errors
+    "$HELPER" >/dev/null 2>&1 || true
+    log_end_msg 0
+}
+
+stop() {
+    # one-shot helper; nothing persistent to stop
+    log_daemon_msg "No-op stop" "jack-bridge-bluetooth-config"
+    log_end_msg 0
+}
+
+status() {
+    echo "jack-bridge-bluetooth-config is a one-shot helper; see /var/log/jack-bridge-bluetooth-config.log"
+    return 0
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart|force-reload) start ;;
+  status) status ;;
+  *) echo "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
+esac
+
+exit 0
+EOF
+    chmod 755 /etc/init.d/jack-bridge-bluetooth-config || true
+  fi
+
+  # Register with update-rc.d (non-fatal if insserv is absent)
+  if command -v update-rc.d >/dev/null 2>&1; then
+    echo "Registering jack-bridge-bluetooth-config SysV service ..."
+    update-rc.d -f jack-bridge-bluetooth-config remove >/dev/null 2>&1 || true
+    # Start after bluetoothd (bluetoothd at 20 → pick 25)
+    update-rc.d jack-bridge-bluetooth-config start 25 2 3 4 5 . stop 75 0 1 6 . || true
+  fi
+
+  # Run once now (best-effort) so a reboot is not strictly required for discovery/pairing defaults
+  /usr/local/lib/jack-bridge/bluetooth-enable.sh || true
+fi
+# --- end: Bluetooth adapter boot-time helper install ---
