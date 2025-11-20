@@ -694,10 +694,10 @@ static void spawn_sco_for(const char *mac) {
 static void run_jack_autoconnect(void) {
     pid_t pid = fork();
     if (pid == 0) {
-        execlp("/usr/lib/jack-bridge/jack-autoconnect", "/usr/lib/jack-bridge/jack-autoconnect", (char *)NULL);
+        execlp("/usr/local/lib/jack-bridge/jack-autoconnect", "/usr/local/lib/jack-bridge/jack-autoconnect", (char *)NULL);
         _exit(EXIT_FAILURE);
     } else if (pid > 0) {
-        add_child(pid, "jack-autoconnect", "/usr/lib/jack-bridge/jack-autoconnect");
+        add_child(pid, "jack-autoconnect", "/usr/local/lib/jack-bridge/jack-autoconnect");
     } else {
         jb_log("Failed to fork for jack-autoconnect: %s", strerror(errno));
     }

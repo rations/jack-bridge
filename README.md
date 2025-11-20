@@ -51,7 +51,7 @@ sudo ./contrib/install.sh
 
 sudo reboot
 
-The installer will install the packages listed above and configure system files under /etc and helper scripts under /usr/local/bin as provided in the contrib/ directory.
+The installer will install the packages listed above and configure system files under /etc, helper scripts under /usr/local/lib/jack-bridge, and binaries under /usr/local/bin as provided in the contrib/ directory.
 
 Uninstall
 
@@ -166,8 +166,8 @@ Troubleshooting
   - Confirm BlueALSA PCM is present (after connecting):
     - bluealsactl status  (if provided)
   - Confirm JACK is running and autoconnect script exists:
-    - /usr/lib/jack-bridge/jack-autoconnect
-- Latency changes do not apply:
+    - /usr/local/lib/jack-bridge/jack-autoconnect
+ - Latency changes do not apply:
   - Verify that GUI updated:
     - /etc/jack-bridge/bluetooth.conf has BRIDGE_PERIOD/BRIDGE_NPERIODS (and A2DP_* equivalents)
   - Confirm autobridge PID and that SIGHUP was delivered:

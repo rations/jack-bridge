@@ -1,15 +1,21 @@
 #!/bin/sh
 # contrib/install.sh
 # Installer for jack-bridge contrib package on Debian-like systems (SysV-style).
-# Installs configs into /etc, helper scripts into /usr/lib/jack-bridge, init script into /etc/init.d,
+# Installs configs into /etc, helper scripts into /usr/local/lib/jack-bridge, init script into /etc/init.d,
 # and simple apulse wrappers into /usr/bin. Does not hardcode usernames or devices.
 #
 # Usage: sudo sh contrib/install.sh
 set -e
 
+# Require root (system-wide installer)
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This installer must be run as root. Try: sudo ./contrib/install.sh"
+    exit 1
+fi
+
 PREFIX_ROOT="/"
 ETC_DIR="${PREFIX_ROOT}etc"
-USR_LIB_DIR="${PREFIX_ROOT}usr/lib/jack-bridge"
+USR_LIB_DIR="${PREFIX_ROOT}usr/local/lib/jack-bridge"
 INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
@@ -21,13 +27,13 @@ echo "Installing jack-bridge contrib files (non-destructive)..."
 # Non-interactive package installation for Debian-like systems (will prompt for sudo password)
 if command -v apt >/dev/null 2>&1; then
     echo "Detected apt. Installing required packages: $REQUIRED_PACKAGES"
-    if ! sudo apt update; then
+    if ! apt update; then
         echo "Warning: apt update failed; continuing to install may still work."
     fi
-    if ! sudo apt install -y $REQUIRED_PACKAGES; then
-        echo "Package installation failed or was interrupted. Please install required packages manually:"
-        echo "  sudo apt install -y $REQUIRED_PACKAGES"
-        echo "Continuing installation of config files (admin must resolve missing packages before use)."
+    if ! apt install -y $REQUIRED_PACKAGES; then
+        echo "Package installation failed or was interrupted. Required packages must be installed for jack-bridge to function."
+        echo "Retry: sudo apt install -y $REQUIRED_PACKAGES"
+        exit 1
     fi
 else
     echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
@@ -184,10 +190,10 @@ if command -v update-rc.d >/dev/null 2>&1; then
     echo "Registering jackd-rt init script with explicit priorities..."
     # jackd-rt after bluealsad (bluetoothd -> bluealsad -> jackd-rt)
     # start 22 at runlevels 2 3 4 5; stop 78 at 0 1 6
-    sudo update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
-    if ! sudo update-rc.d jackd-rt start 22 2 3 4 5 . stop 78 0 1 6 .; then
+    update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
+    if ! update-rc.d jackd-rt start 22 2 3 4 5 . stop 78 0 1 6 .; then
         echo "Warning: update-rc.d jackd-rt explicit registration failed; falling back to defaults"
-        sudo update-rc.d jackd-rt defaults || true
+        update-rc.d jackd-rt defaults || true
     fi
 else
     echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
@@ -265,9 +271,9 @@ echo "Ensuring BlueALSA runtime and autobridge integration (non-destructive)..."
 if ! id -u bluealsa >/dev/null 2>&1; then
     echo "Creating system user 'bluealsa' (nologin) for bluealsad runtime..."
     if command -v adduser >/dev/null 2>&1; then
-        sudo adduser --system --group --no-create-home --shell /usr/sbin/nologin bluealsa || true
+        adduser --system --group --no-create-home --shell /usr/sbin/nologin bluealsa || true
     else
-        sudo useradd --system --group --no-create-home --shell /usr/sbin/nologin bluealsa || true
+        useradd --system --group --no-create-home --shell /usr/sbin/nologin bluealsa || true
     fi
 else
     echo "User 'bluealsa' already exists."
@@ -276,38 +282,38 @@ fi
 # Create persistent state directory for bluealsa with strict perms
 if [ ! -d /var/lib/bluealsa ]; then
     echo "Creating /var/lib/bluealsa owned by bluealsa (0700)..."
-    sudo mkdir -p /var/lib/bluealsa
-    sudo chown bluealsa:bluealsa /var/lib/bluealsa || true
-    sudo chmod 0700 /var/lib/bluealsa || true
+    mkdir -p /var/lib/bluealsa
+    chown bluealsa:bluealsa /var/lib/bluealsa || true
+    chmod 0700 /var/lib/bluealsa || true
 else
     echo "/var/lib/bluealsa already exists; ensuring ownership/perms..."
-    sudo chown bluealsa:bluealsa /var/lib/bluealsa 2>/dev/null || true
-    sudo chmod 0700 /var/lib/bluealsa 2>/dev/null || true
+    chown bluealsa:bluealsa /var/lib/bluealsa 2>/dev/null || true
+    chmod 0700 /var/lib/bluealsa 2>/dev/null || true
 fi
 
 # Install BlueALSA prebuilt binaries if provided in repo contrib/bin (prebuilt artifacts)
 if [ -f "contrib/bin/bluealsad" ]; then
     echo "Installing prebuilt bluealsad to /usr/local/bin..."
-    sudo install -m 0755 contrib/bin/bluealsad /usr/local/bin/bluealsad || true
+    install -m 0755 contrib/bin/bluealsad /usr/local/bin/bluealsad || true
 fi
 if [ -f "contrib/bin/bluealsactl" ]; then
     echo "Installing prebuilt bluealsactl to /usr/local/bin..."
-    sudo install -m 0755 contrib/bin/bluealsactl /usr/local/bin/bluealsactl || true
+    install -m 0755 contrib/bin/bluealsactl /usr/local/bin/bluealsactl || true
 fi
 if [ -f "contrib/bin/bluealsa-aplay" ]; then
     echo "Installing prebuilt bluealsa-aplay to /usr/local/bin..."
-    sudo install -m 0755 contrib/bin/bluealsa-aplay /usr/local/bin/bluealsa-aplay || true
+    install -m 0755 contrib/bin/bluealsa-aplay /usr/local/bin/bluealsa-aplay || true
 fi
 if [ -f "contrib/bin/bluealsa-rfcomm" ]; then
     echo "Installing prebuilt bluealsa-rfcomm to /usr/local/bin..."
-    sudo install -m 0755 contrib/bin/bluealsa-rfcomm /usr/local/bin/bluealsa-rfcomm || true
+    install -m 0755 contrib/bin/bluealsa-rfcomm /usr/local/bin/bluealsa-rfcomm || true
 fi
 
 
 # Install jack-bluealsa-autobridge binary if provided in repo contrib/bin (prebuilt artifact)
 if [ -f "contrib/bin/jack-bluealsa-autobridge" ]; then
     echo "Installing jack-bluealsa-autobridge to /usr/local/bin..."
-    sudo install -m 0755 contrib/bin/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autobridge || true
+    install -m 0755 contrib/bin/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autobridge || true
 else
     echo "No jack-bluealsa-autobridge binary found in contrib/bin/. Skip binary install."
 fi
@@ -317,13 +323,13 @@ fi
 # Install SysV init script for bluetoothd if present
 if [ -f "contrib/init.d/bluetoothd" ]; then
     echo "Installing SysV init script for bluetoothd..."
-    sudo cp -p contrib/init.d/bluetoothd "${INIT_DIR}/bluetoothd"
-    sudo chmod 755 "${INIT_DIR}/bluetoothd"
+    cp -p contrib/init.d/bluetoothd "${INIT_DIR}/bluetoothd"
+    chmod 755 "${INIT_DIR}/bluetoothd"
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering bluetoothd init script with explicit priorities..."
         # bluetoothd before bluealsad and jackd-rt
-        sudo update-rc.d -f bluetoothd remove >/dev/null 2>&1 || true
-        sudo update-rc.d bluetoothd start 20 2 3 4 5 . stop 80 0 1 6 . || true
+        update-rc.d -f bluetoothd remove >/dev/null 2>&1 || true
+        update-rc.d bluetoothd start 20 2 3 4 5 . stop 80 0 1 6 . || true
     else
         echo "update-rc.d not available; please register ${INIT_DIR}/bluetoothd manually if desired."
     fi
@@ -332,32 +338,32 @@ fi
 # Optionally install bluealsad init script and defaults if provided in contrib
 if [ -f "contrib/init.d/bluealsad" ]; then
     echo "Installing contrib init script for bluealsad (optional)..."
-    sudo cp -p contrib/init.d/bluealsad "${INIT_DIR}/bluealsad"
-    sudo chmod 755 "${INIT_DIR}/bluealsad"
+    cp -p contrib/init.d/bluealsad "${INIT_DIR}/bluealsad"
+    chmod 755 "${INIT_DIR}/bluealsad"
     # Install defaults file if provided
     if [ -f "contrib/default/bluealsad" ]; then
-        sudo install -m 0644 contrib/default/bluealsad "${DEFAULTS_DIR}/bluealsad" || true
+        install -m 0644 contrib/default/bluealsad "${DEFAULTS_DIR}/bluealsad" || true
         echo "Installed defaults to ${DEFAULTS_DIR}/bluealsad"
     fi
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering bluealsad init script with explicit priorities..."
         # bluealsad after bluetoothd, before jackd-rt
-        sudo update-rc.d -f bluealsad remove >/dev/null 2>&1 || true
-        sudo update-rc.d bluealsad start 21 2 3 4 5 . stop 79 0 1 6 . || true
+        update-rc.d -f bluealsad remove >/dev/null 2>&1 || true
+        update-rc.d bluealsad start 21 2 3 4 5 . stop 79 0 1 6 . || true
     fi
 fi
 
 # Now install and register autobridge after bluealsad is enabled/available
 if [ -f "contrib/init.d/jack-bluealsa-autobridge" ]; then
     echo "Installing SysV init script for jack-bluealsa-autobridge..."
-    sudo cp -p contrib/init.d/jack-bluealsa-autobridge "${INIT_DIR}/jack-bluealsa-autobridge"
-    sudo chmod 755 "${INIT_DIR}/jack-bluealsa-autobridge"
+    cp -p contrib/init.d/jack-bluealsa-autobridge "${INIT_DIR}/jack-bluealsa-autobridge"
+    chmod 755 "${INIT_DIR}/jack-bluealsa-autobridge"
     if command -v bluealsad >/dev/null 2>&1; then
         if command -v update-rc.d >/dev/null 2>&1; then
             echo "Registering jack-bluealsa-autobridge init script with explicit priorities..."
             # autobridge after jackd-rt
-            sudo update-rc.d -f jack-bluealsa-autobridge remove >/dev/null 2>&1 || true
-            sudo update-rc.d jack-bluealsa-autobridge start 23 2 3 4 5 . stop 77 0 1 6 . || true
+            update-rc.d -f jack-bluealsa-autobridge remove >/dev/null 2>&1 || true
+            update-rc.d jack-bluealsa-autobridge start 23 2 3 4 5 . stop 77 0 1 6 . || true
         else
             echo "update-rc.d not available; please register ${INIT_DIR}/jack-bluealsa-autobridge manually if desired."
         fi
@@ -374,11 +380,11 @@ DBUS_POLICY_SRC="usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_POLICY_DST="/usr/share/dbus-1/system.d/org.bluealsa.conf"
 if [ -f "$DBUS_POLICY_SRC" ]; then
     echo "Installing org.bluealsa D-Bus policy to $DBUS_POLICY_DST (from $DBUS_POLICY_SRC)"
-    sudo mkdir -p "$(dirname "$DBUS_POLICY_DST")"
-    sudo install -m 0644 "$DBUS_POLICY_SRC" "$DBUS_POLICY_DST" || true
+    mkdir -p "$(dirname "$DBUS_POLICY_DST")"
+    install -m 0644 "$DBUS_POLICY_SRC" "$DBUS_POLICY_DST" || true
     # best-effort reload of D-Bus to pick up policy changes
     if command -v service >/dev/null 2>&1; then
-        sudo service dbus reload >/dev/null 2>&1 || true
+        service dbus reload >/dev/null 2>&1 || true
     fi
 else
     echo "No bundled canonical D-Bus policy found at $DBUS_POLICY_SRC; assuming distro provides one."
@@ -389,14 +395,14 @@ POLKIT_RULE_SRC="contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
 POLKIT_RULE_DST="/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
 if [ -f "$POLKIT_RULE_SRC" ]; then
     echo "Installing polkit rule to $POLKIT_RULE_DST"
-    sudo mkdir -p "$(dirname "$POLKIT_RULE_DST")"
-    sudo install -m 0644 "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST" || true
+    mkdir -p "$(dirname "$POLKIT_RULE_DST")"
+    install -m 0644 "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST" || true
     # best-effort reload of polkit (no systemd dependency)
     if pidof polkitd >/dev/null 2>&1; then
-        sudo kill -HUP "$(pidof polkitd | awk '{print $1}')" 2>/dev/null || true
+        kill -HUP "$(pidof polkitd | awk '{print $1}')" 2>/dev/null || true
     fi
     if command -v service >/dev/null 2>&1; then
-        sudo service polkit restart >/dev/null 2>&1 || true
+        service polkit restart >/dev/null 2>&1 || true
     fi
 else
     echo "Polkit rule not found at $POLKIT_RULE_SRC; skipping (Pair/Connect may prompt/deny without it)."

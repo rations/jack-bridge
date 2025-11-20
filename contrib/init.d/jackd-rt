@@ -28,8 +28,8 @@ fi
 : ${JACKD_PRIORITY:=70}
 : ${JACKD_ARGS:=""}
 : ${JACKD_DAEMON:=/usr/bin/jackd}
-: ${DETECT_SCRIPT:=/usr/lib/jack-bridge/detect-alsa-device.sh}
-: ${DETECT_USER_SCRIPT:=/usr/lib/jack-bridge/detect-user.sh}
+: ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
+: ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
 
 # detect_user(): removed; detection is handled inline in start() for portability
@@ -136,11 +136,11 @@ start() {
         fi
 
         # Autoconnect (if present) and watchdog are started after jack_wait succeeds
-        if [ -x /usr/lib/jack-bridge/jack-autoconnect ]; then
-            /usr/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
+        if [ -x /usr/local/lib/jack-bridge/jack-autoconnect ]; then
+            /usr/local/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
         fi
-        if [ -x /usr/lib/jack-bridge/jack-watchdog ]; then
-            /usr/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
+        if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then
+            /usr/local/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
         fi
     else
         sleep 1
