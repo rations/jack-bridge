@@ -95,24 +95,56 @@ else
 fi
 echo
 
-# Interactive monitoring helper
+# Interactive monitoring helper (POSIX-safe)
 # This allows you to exercise the GUI while the script captures D-Bus events.
-read -r -p "Start interactive BlueZ monitor now so you can exercise the GUI? [y/N] " ans
+printf "Start interactive BlueZ monitor now so you can exercise the GUI? [y/N] "
+read ans
 if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
     if command -v gdbus >/dev/null 2>&1; then
-        MON_LOG="/tmp/bluez-monitor.log"
+        # Create a unique temp file in /tmp to avoid collisions and permission issues
+        MON_LOG="$(mktemp /tmp/bluez-monitor.XXXXXX.log 2>/dev/null)" || {
+            echo "Failed to create temp log in /tmp. Falling back to /tmp/bluez-monitor.log"
+            MON_LOG="/tmp/bluez-monitor.log"
+        }
+        # Try to ensure the file exists and is readable by the current user
+        touch "$MON_LOG" 2>/dev/null || {
+            echo "Warning: could not touch $MON_LOG; check /tmp permissions"
+        }
+        chmod a+rw "$MON_LOG" 2>/dev/null || true
+
         echo "Starting gdbus monitor -> $MON_LOG (background). Open the GUI and perform Scan/Pair/Connect actions."
         echo "When finished, return to this terminal and press Enter to stop monitoring."
+
+        # Start the monitor in background
         gdbus monitor --system --dest org.bluez >"$MON_LOG" 2>&1 &
         MON_PID=$!
-        # Wait for user to finish testing
-        read -r -p ""
-        # Stop monitor
-        kill "$MON_PID" 2>/dev/null || true
+
+        # Install a cleanup handler so monitor is killed if the script exits unexpectedly
+        cleanup() {
+            if [ -n "$MON_PID" ]; then
+                kill "$MON_PID" 2>/dev/null || true
+                wait "$MON_PID" 2>/dev/null || true
+            fi
+        }
+        trap cleanup EXIT INT TERM
+
+        # Wait for user to finish testing - POSIX read for a blank line
+        printf "Press Enter to stop monitoring..."
+        read _dummy
+
+        # Stop monitor and remove trap
+        cleanup
+        trap - EXIT INT TERM
+
         sleep 1
+        echo
         echo "Monitor stopped. Saved to $MON_LOG"
         echo "Tail last 200 lines from monitor log:"
-        tail -n 200 "$MON_LOG" || true
+        if [ -s "$MON_LOG" ]; then
+            tail -n 200 "$MON_LOG" 2>/dev/null || echo "No monitor output available in $MON_LOG"
+        else
+            echo "Monitor log is empty: $MON_LOG"
+        fi
     else
         echo "gdbus not installed; cannot run interactive monitor."
     fi

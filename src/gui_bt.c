@@ -23,6 +23,45 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+/* Ensure any device names/aliases we put into GTK are valid UTF-8.
+ * Non-UTF8 strings coming from BlueZ (e.g., BLE advertisements with raw bytes)
+ * can trigger GTK assertions/crashes. This helper guarantees a valid string. */
+static gchar* safe_utf8(const char *s) {
+    if (!s) return NULL;
+    if (g_utf8_validate(s, -1, NULL)) return g_strdup(s);
+#if GLIB_CHECK_VERSION(2,52,0)
+    /* Use -1 to indicate null-terminated string; g_utf8_make_valid takes (const gchar*, gssize). */
+    return g_utf8_make_valid(s, -1);
+#else
+    /* Fallback for older GLib: replace non-ASCII bytes with '?' */
+    GString *out = g_string_new(NULL);
+    for (const unsigned char *p = (const unsigned char*)s; *p; ++p) {
+        if (*p < 0x80) g_string_append_c(out, (char)*p);
+        else g_string_append_c(out, '?');
+    }
+    return g_string_free(out, FALSE);
+#endif
+}
+
+/* Strip any previously appended state markers from a device label, e.g.
+ * "My Device [Paired] [Trusted] [Connected]" -> "My Device".
+ * Returns a newly-allocated string the caller must free. */
+static char* strip_state_markers(const char *s) {
+    if (!s) return NULL;
+    char *out = g_strdup(s);
+    const char *toks[] = { " [Paired]", " [Trusted]", " [Connected]" };
+    for (int i = 0; i < 3; i++) {
+        const char *tok = toks[i];
+        size_t toklen = strlen(tok);
+        char *p;
+        while ((p = g_strstr_len(out, -1, tok)) != NULL) {
+            /* shift the tail left over the token (including trailing NUL) */
+            memmove(p, p + toklen, strlen(p + toklen) + 1);
+        }
+    }
+    return out;
+}
+ 
 /* Async operation callback for GUI (success flag, error message or NULL, user data) */
 typedef void (*GuiBtOpCb)(gboolean success, const char *message, gpointer user_data);
 
@@ -130,9 +169,11 @@ static gchar *get_default_adapter_path(void) {
 
         if (is_adapter) {
             adapter_path = g_strdup(path);
+            if (ifaces) g_variant_unref(ifaces);
             g_free(path);
             break;
         }
+        if (ifaces) g_variant_unref(ifaces);
         g_free(path);
     }
     if (outer) g_variant_iter_free(outer);
@@ -383,7 +424,7 @@ int gui_bt_pair_device(const char *device_path_or_mac) {
                                                NULL,
                                                NULL,
                                                G_DBUS_CALL_FLAGS_NONE,
-                                               4000,
+                                               20000,
                                                NULL,
                                                &err);
     if (!res) {
@@ -421,7 +462,7 @@ int gui_bt_connect_device(const char *device_path_or_mac) {
                                                NULL,
                                                NULL,
                                                G_DBUS_CALL_FLAGS_NONE,
-                                               4000,
+                                               15000,
                                                NULL,
                                                &err);
     if (!res) {
@@ -451,7 +492,8 @@ int gui_bt_trust_device(const char *device_path_or_mac, int trusted) {
     }
     if (!device_path) return -1;
 
-    GVariant *value = g_variant_new("v", g_variant_new_boolean(trusted ? TRUE : FALSE));
+    /* Build variant container for boolean per Properties.Set 'v' requirement */
+    GVariant *value = g_variant_new_variant(g_variant_new_boolean(trusted ? TRUE : FALSE));
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", value);
 
     /* Properties.Set must be invoked on the owner of the object (org.bluez).
@@ -465,7 +507,7 @@ int gui_bt_trust_device(const char *device_path_or_mac, int trusted) {
                                                params,
                                                NULL,
                                                G_DBUS_CALL_FLAGS_NONE,
-                                               4000,
+                                               15000,
                                                NULL,
                                                &err);
     if (!res) {
@@ -550,6 +592,9 @@ static void pair_call_done(GObject *source_object, GAsyncResult *res, gpointer u
         return;
     }
     g_variant_unref(r);
+    /* Refresh row state and selection after success */
+    update_device_row_state(ctx->device_path);
+    g_idle_add(__gui_bt_refresh_selection_idle, NULL);
     invoke_cb_main(ctx->cb, TRUE, NULL, ctx->ud);
     bt_op_ctx_free(ctx);
 }
@@ -575,6 +620,38 @@ int gui_bt_pair_device_async(const char *device_path_or_mac, GuiBtOpCb cb, gpoin
         invoke_cb_main(cb, FALSE, "Invalid device path/MAC", ud);
         return -1;
     }
+
+    /* Best-effort: stop discovery before pairing */
+    {
+        gchar *devpos = strstr(device_path, "/dev_");
+        gchar *adapter_path2 = NULL;
+        if (devpos) {
+            size_t len = (size_t)(devpos - device_path);
+            adapter_path2 = g_strndup(device_path, len);
+        } else {
+            adapter_path2 = get_default_adapter_path();
+        }
+        if (adapter_path2) {
+            GError *err2 = NULL;
+            GVariant *r2 = g_dbus_connection_call_sync(
+                gui_system_bus,
+                "org.bluez",
+                adapter_path2,
+                "org.bluez.Adapter1",
+                "StopDiscovery",
+                NULL,
+                NULL,
+                G_DBUS_CALL_FLAGS_NONE,
+                2000,
+                NULL,
+                &err2
+            );
+            if (!r2) { if (err2) g_error_free(err2); }
+            else g_variant_unref(r2);
+            g_free(adapter_path2);
+        }
+    }
+
     BtOpCtx *ctx = g_new0(BtOpCtx, 1);
     ctx->device_path = device_path;
     ctx->cb = cb; ctx->ud = ud;
@@ -587,7 +664,7 @@ int gui_bt_pair_device_async(const char *device_path_or_mac, GuiBtOpCb cb, gpoin
         NULL,
         NULL,
         G_DBUS_CALL_FLAGS_NONE,
-        8000,
+        20000,
         NULL,
         pair_call_done,
         ctx);
@@ -620,7 +697,7 @@ static void connect_call_done(GObject *source_object, GAsyncResult *res, gpointe
                 NULL,
                 NULL,
                 G_DBUS_CALL_FLAGS_NONE,
-                8000,
+                20000,
                 NULL,
                 connect_call_done,
                 ctx);
@@ -635,6 +712,9 @@ static void connect_call_done(GObject *source_object, GAsyncResult *res, gpointe
         return;
     }
     g_variant_unref(r);
+    /* Refresh row state and selection after success */
+    update_device_row_state(ctx->device_path);
+    g_idle_add(__gui_bt_refresh_selection_idle, NULL);
     invoke_cb_main(ctx->cb, TRUE, NULL, ctx->ud);
     bt_op_ctx_free(ctx);
 }
@@ -677,7 +757,7 @@ int gui_bt_connect_device_async(const char *device_path_or_mac, GuiBtOpCb cb, gp
         params,
         NULL,
         G_DBUS_CALL_FLAGS_NONE,
-        8000,
+        20000,
         NULL,
         connect_call_done,
         ctx);
@@ -706,6 +786,9 @@ static void trust_call_done(GObject *source_object, GAsyncResult *res, gpointer 
         return;
     }
     g_variant_unref(r);
+    /* Refresh row state and selection after success */
+    update_device_row_state(ctx->device_path);
+    g_idle_add(__gui_bt_refresh_selection_idle, NULL);
     invoke_cb_main(ctx->cb, TRUE, NULL, ctx->ud);
     bt_op_ctx_free(ctx);
 }
@@ -736,7 +819,8 @@ int gui_bt_trust_device_async(const char *device_path_or_mac, gboolean trusted, 
     ctx->device_path = device_path;
     ctx->cb = cb; ctx->ud = ud;
 
-    GVariant *value = g_variant_new("v", g_variant_new_boolean(trusted ? TRUE : FALSE));
+    /* Build variant container for boolean per Properties.Set 'v' requirement */
+    GVariant *value = g_variant_new_variant(g_variant_new_boolean(trusted ? TRUE : FALSE));
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", value);
 
     g_dbus_connection_call(gui_system_bus,
@@ -747,7 +831,7 @@ int gui_bt_trust_device_async(const char *device_path_or_mac, gboolean trusted, 
         params,
         NULL,
         G_DBUS_CALL_FLAGS_NONE,
-        8000,
+        15000,
         NULL,
         trust_call_done,
         ctx);
@@ -1104,6 +1188,126 @@ int gui_bt_bind_scan_buttons(GtkWidget *scan_btn, GtkWidget *stop_btn) {
 /* Query Device1 properties and update the GUI label for the given object_path.
    Appends state markers [Paired], [Trusted], [Connected]. Preserves a leading
    "★ " prefix (used to tag Known devices populated at startup). */
+/* ---- Asynchronous properties fetch + UI updater to avoid blocking GTK main loop ----
+ *
+ * We fetch Device1 GetAll via g_dbus_connection_call (async) and then schedule a
+ * main-loop idle callback to update the GtkListStore. This prevents bursts of
+ * PropertiesChanged signals from freezing or crashing the GUI.
+ */
+
+/* Data passed from async result into the idle updater */
+typedef struct {
+    char *object_path;
+    gboolean paired;
+    gboolean trusted;
+    gboolean connected;
+    char *name_or_alias; /* UTF-8 safe, newly allocated or NULL */
+} DevProps;
+
+/* Idle callback that applies parsed device properties into the device list */
+static gboolean __gui_bt_apply_device_props_idle(gpointer ud) {
+    DevProps *p = ud;
+    if (!p) return G_SOURCE_REMOVE;
+    if (!s_store) {
+        if (p->object_path) g_free(p->object_path);
+        if (p->name_or_alias) g_free(p->name_or_alias);
+        g_free(p);
+        return G_SOURCE_REMOVE;
+    }
+
+    /* Find current row and update label (preserve star prefix) */
+    GtkTreeIter row;
+    gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(s_store), &row);
+    while (valid) {
+        gchar *obj = NULL;
+        gchar *current = NULL;
+        gtk_tree_model_get(GTK_TREE_MODEL(s_store), &row, 0, &current, 1, &obj, -1);
+        gboolean match = (obj && g_strcmp0(obj, p->object_path) == 0);
+        if (match) {
+            const gchar *prefix = (current && g_str_has_prefix(current, "★ ")) ? "★ " : "";
+            const gchar *raw_base = p->name_or_alias ? p->name_or_alias
+                                  : (current ? (g_str_has_prefix(current, "★ ") ? current + 2 : current)
+                                             : p->object_path);
+            char *base = strip_state_markers(raw_base);
+            GString *label = g_string_new(NULL);
+            g_string_append_printf(label, "%s%s", prefix, base ? base : "");
+            if (p->paired)   g_string_append(label, " [Paired]");
+            if (p->trusted)  g_string_append(label, " [Trusted]");
+            if (p->connected)g_string_append(label, " [Connected]");
+            gtk_list_store_set(s_store, &row, 0, label->str, -1);
+            g_string_free(label, TRUE);
+            if (current) g_free(current);
+            if (obj) g_free(obj);
+            if (base) g_free(base);
+            break;
+        }
+        if (current) g_free(current);
+        if (obj) g_free(obj);
+        valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(s_store), &row);
+    }
+
+    if (p->object_path) g_free(p->object_path);
+    if (p->name_or_alias) g_free(p->name_or_alias);
+    g_free(p);
+    return G_SOURCE_REMOVE;
+}
+
+/* Async result handler: parse properties and schedule UI update on main loop */
+static void get_device_props_done(GObject *source_object, GAsyncResult *res, gpointer user_data) {
+    /* GAsyncReadyCallback signature uses GObject* as first param; convert to GDBusConnection below */
+    char *obj = user_data; /* ownership transferred here */
+    if (!obj) return;
+
+    if (g_shutting_down) {
+        g_free(obj);
+        return;
+    }
+
+    GError *err = NULL;
+    GDBusConnection *conn = G_DBUS_CONNECTION(source_object);
+    GVariant *r = g_dbus_connection_call_finish(conn, res, &err);
+    if (!r) {
+        if (err) {
+            g_debug("get_device_props_done: GetAll failed for %s: %s", obj, err->message);
+            g_error_free(err);
+        }
+        g_free(obj);
+        return;
+    }
+
+    DevProps *p = g_new0(DevProps, 1);
+    p->object_path = obj;
+    p->paired = FALSE;
+    p->trusted = FALSE;
+    p->connected = FALSE;
+    p->name_or_alias = NULL;
+
+    GVariantIter *iter = NULL;
+    g_variant_get(r, "(a{sv})", &iter);
+    gchar *key = NULL;
+    GVariant *val = NULL;
+    while (g_variant_iter_next(iter, "{sv}", &key, &val)) {
+        if (g_strcmp0(key, "Paired") == 0 && g_variant_is_of_type(val, G_VARIANT_TYPE_BOOLEAN))
+            p->paired = g_variant_get_boolean(val);
+        else if (g_strcmp0(key, "Trusted") == 0 && g_variant_is_of_type(val, G_VARIANT_TYPE_BOOLEAN))
+            p->trusted = g_variant_get_boolean(val);
+        else if (g_strcmp0(key, "Connected") == 0 && g_variant_is_of_type(val, G_VARIANT_TYPE_BOOLEAN))
+            p->connected = g_variant_get_boolean(val);
+        else if (!p->name_or_alias && (g_strcmp0(key, "Alias") == 0 || g_strcmp0(key, "Name") == 0) &&
+                 g_variant_is_of_type(val, G_VARIANT_TYPE_STRING)) {
+            p->name_or_alias = safe_utf8(g_variant_get_string(val, NULL));
+        }
+        if (val) g_variant_unref(val);
+        g_free(key);
+    }
+    if (iter) g_variant_iter_free(iter);
+    g_variant_unref(r);
+
+    /* Schedule main-loop UI update */
+    g_idle_add(__gui_bt_apply_device_props_idle, p);
+}
+
+/* Asynchronous update starter: initiates GetAll and returns immediately */
 void update_device_row_state(const char *object_path) {
     if (!object_path || !s_store) return;
 
@@ -1113,79 +1317,30 @@ void update_device_row_state(const char *object_path) {
         return;
     }
 
-    /* Fetch properties */
-    GVariant *res = g_dbus_connection_call_sync(
-        gui_system_bus,
-        "org.bluez",
-        object_path,
-        "org.freedesktop.DBus.Properties",
-        "GetAll",
-        g_variant_new("(s)", "org.bluez.Device1"),
-        G_VARIANT_TYPE("(a{sv})"),
-        G_DBUS_CALL_FLAGS_NONE,
-        2000,
-        NULL,
-        &err
-    );
-    if (!res) {
-        if (err) { g_debug("update_device_row_state(GetAll): %s", err->message); g_error_free(err); }
-        return;
-    }
-
-    gboolean paired = FALSE, trusted = FALSE, connected = FALSE;
-    gchar *name_or_alias = NULL;
-
-    GVariantIter *iter = NULL;
-    g_variant_get(res, "(a{sv})", &iter);
-    gchar *key = NULL;
-    GVariant *val = NULL;
-    while (g_variant_iter_next(iter, "{sv}", &key, &val)) {
-        if (g_strcmp0(key, "Paired") == 0 && g_variant_is_of_type(val, G_VARIANT_TYPE_BOOLEAN))
-            paired = g_variant_get_boolean(val);
-        else if (g_strcmp0(key, "Trusted") == 0 && g_variant_is_of_type(val, G_VARIANT_TYPE_BOOLEAN))
-            trusted = g_variant_get_boolean(val);
-        else if (g_strcmp0(key, "Connected") == 0 && g_variant_is_of_type(val, G_VARIANT_TYPE_BOOLEAN))
-            connected = g_variant_get_boolean(val);
-        else if (!name_or_alias && (g_strcmp0(key, "Alias") == 0 || g_strcmp0(key, "Name") == 0) &&
-                 g_variant_is_of_type(val, G_VARIANT_TYPE_STRING))
-            name_or_alias = g_strdup(g_variant_get_string(val, NULL));
-        g_free(key);
-        g_variant_unref(val);
-    }
-    if (iter) g_variant_iter_free(iter);
-    g_variant_unref(res);
-
-    /* Find current row and existing label (to preserve "★ " if present) */
-    GtkTreeIter row;
-    gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(s_store), &row);
-    while (valid) {
-        gchar *obj = NULL;
-        gchar *current = NULL;
-        gtk_tree_model_get(GTK_TREE_MODEL(s_store), &row, 0, &current, 1, &obj, -1);
-        gboolean match = (obj && g_strcmp0(obj, object_path) == 0);
-        if (match) {
-            const gchar *prefix = (current && g_str_has_prefix(current, "★ ")) ? "★ " : "";
-            const gchar *base = name_or_alias ? name_or_alias : (current ? (g_str_has_prefix(current, "★ ") ? current + 2 : current) : object_path);
-            GString *label = g_string_new(NULL);
-            g_string_append_printf(label, "%s%s", prefix, base);
-            if (paired)   g_string_append(label, " [Paired]");
-            if (trusted)  g_string_append(label, " [Trusted]");
-            if (connected)g_string_append(label, " [Connected]");
-            gtk_list_store_set(s_store, &row, 0, label->str, -1);
-            g_string_free(label, TRUE);
-            if (current) g_free(current);
-            if (obj) g_free(obj);
-            break;
-        }
-        if (current) g_free(current);
-        if (obj) g_free(obj);
-        valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(s_store), &row);
-    }
-
-    if (name_or_alias) g_free(name_or_alias);
+    /* Duplicate path for ownership transfer into async callback */
+    char *dup = g_strdup(object_path);
+    g_dbus_connection_call(gui_system_bus,
+                           "org.bluez",
+                           dup,
+                           "org.freedesktop.DBus.Properties",
+                           "GetAll",
+                           g_variant_new("(s)", "org.bluez.Device1"),
+                           G_VARIANT_TYPE("(a{sv})"),
+                           G_DBUS_CALL_FLAGS_NONE,
+                           -1, /* timeout: let GLib manage */
+                           NULL,
+                           get_device_props_done,
+                           dup);
 }
 
-/* D-Bus InterfacesAdded callback for BlueZ (ObjectManager) */
+/* D-Bus InterfacesAdded callback for BlueZ (ObjectManager)
+ *
+ * Keep this handler extremely conservative to avoid any GVariant parsing bugs on
+ * older GLib builds. We do NOT parse Device1 properties here. We only extract the
+ * object path and schedule a UI add with a placeholder label derived from the path.
+ * The detailed label (Name/Alias + flags) will be filled by update_device_row_state()
+ * asynchronously on the main loop.
+ */
 static void bluez_interfaces_added_for_gui(GDBusConnection *connection,
                                           const gchar *sender_name,
                                           const gchar *object_path,
@@ -1196,53 +1351,26 @@ static void bluez_interfaces_added_for_gui(GDBusConnection *connection,
 {
     (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)user_data; (void)signal_name;
 
-    /* Unpack (o a{sa{sv}}) and look for org.bluez.Device1 */
-    gchar *path = NULL;
+    /* Expect (o a{sa{sv}}); borrow the path pointer from parameters */
+    const gchar *path = NULL;
     GVariantIter *interfaces = NULL;
 
     if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(oa{sa{sv}})")))
         return;
 
     g_variant_get(parameters, "(oa{sa{sv}})", &path, &interfaces);
+    if (interfaces) g_variant_iter_free(interfaces);
     if (!path) return;
 
-    gchar *iface = NULL;
-    GVariant *props = NULL;
-    while (g_variant_iter_next(interfaces, "{sa{sv}}", &iface, &props)) {
-        if (g_strcmp0(iface, "org.bluez.Device1") == 0) {
-            /* try to read Name or Alias property from props */
-            GVariantIter *piter = NULL;
-            gchar *pkey = NULL;
-            GVariant *pval = NULL;
-            char *display = NULL;
-            g_variant_get(props, "a{sv}", &piter);
-            while (g_variant_iter_next(piter, "{sv}", &pkey, &pval)) {
-                if (g_strcmp0(pkey, "Name") == 0 && pval && g_variant_is_of_type(pval, G_VARIANT_TYPE_STRING)) {
-                    display = g_strdup(g_variant_get_string(pval, NULL));
-                } else if (g_strcmp0(pkey, "Alias") == 0 && !display && pval && g_variant_is_of_type(pval, G_VARIANT_TYPE_STRING)) {
-                    display = g_strdup(g_variant_get_string(pval, NULL));
-                }
-                if (pval) g_variant_unref(pval);
-                g_free(pkey);
-            }
-            if (piter) g_variant_iter_free(piter);
-            if (!display) {
-                const gchar *last = strrchr(path, '/');
-                display = last ? g_strdup(last + 1) : g_strdup(path);
-            }
+    /* Derive a safe display label from the object path; row will be updated later */
+    const gchar *last = strrchr(path, '/');
+    char *display = last ? safe_utf8(last + 1) : safe_utf8(path);
 
-            /* Schedule GUI update on main loop */
-            char **pair = g_new0(char*, 3);
-            pair[0] = display;
-            pair[1] = g_strdup(path);
-            g_idle_add(__gui_bt_add_device_idle, pair);
-        }
-        if (props) g_variant_unref(props);
-        g_free(iface);
-    }
-
-    if (interfaces) g_variant_iter_free(interfaces);
-    g_free(path);
+    char **pair = g_new0(char*, 3);
+    pair[0] = display;
+    pair[1] = g_strdup(path);
+    g_idle_add(__gui_bt_add_device_idle, pair);
+    /* Do NOT free 'path'; it is borrowed from parameters */
 }
 
 /* D-Bus InterfacesRemoved callback for BlueZ (ObjectManager) */
@@ -1257,11 +1385,13 @@ static void bluez_interfaces_removed_for_gui(GDBusConnection *connection,
     (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)user_data; (void)signal_name;
 
     /* Prefer (oas) signature */
-    gchar *path = NULL;
+    const gchar *path = NULL;     /* borrowed if coming from "(oas)" */
+    char *owned_path = NULL;      /* duplicated string we can pass to idle handler */
     GVariantIter *ifaces = NULL;
 
     if (g_variant_is_of_type(parameters, G_VARIANT_TYPE("(oas)"))) {
         g_variant_get(parameters, "(oas)", &path, &ifaces);
+        if (path) owned_path = g_strdup(path);
         if (ifaces) g_variant_iter_free(ifaces);
     } else if (g_variant_n_children(parameters) > 0) {
         /* Fallback: support (o@as) and other variant shapes by extracting first child.
@@ -1269,14 +1399,14 @@ static void bluez_interfaces_removed_for_gui(GDBusConnection *connection,
          * on older GLib versions (they can trigger g_variant_type_info_check failures). */
         GVariant *child = g_variant_get_child_value(parameters, 0);
         if (child && g_variant_is_of_type(child, G_VARIANT_TYPE_STRING)) {
-            path = g_strdup(g_variant_get_string(child, NULL));
+            owned_path = g_strdup(g_variant_get_string(child, NULL));
         }
         if (child) g_variant_unref(child);
     }
 
-    if (path) {
-        g_idle_add(__gui_bt_remove_device_idle, g_strdup(path));
-        g_free(path);
+    if (owned_path) {
+        g_idle_add(__gui_bt_remove_device_idle, owned_path);
+        /* owned_path will be freed in __gui_bt_remove_device_idle */
     }
 }
 
@@ -1331,9 +1461,9 @@ void gui_bt_populate_existing_devices(void) {
                 char *display = NULL;
                 while (g_variant_iter_next(piter, "{sv}", &pkey, &pval)) {
                     if (!display && g_strcmp0(pkey, "Name") == 0 && pval && g_variant_is_of_type(pval, G_VARIANT_TYPE_STRING)) {
-                        display = g_strdup(g_variant_get_string(pval, NULL));
+                        display = safe_utf8(g_variant_get_string(pval, NULL));
                     } else if (!display && g_strcmp0(pkey, "Alias") == 0 && pval && g_variant_is_of_type(pval, G_VARIANT_TYPE_STRING)) {
-                        display = g_strdup(g_variant_get_string(pval, NULL));
+                        display = safe_utf8(g_variant_get_string(pval, NULL));
                     }
                     if (pval) g_variant_unref(pval);
                     g_free(pkey);
@@ -1341,7 +1471,7 @@ void gui_bt_populate_existing_devices(void) {
                 if (piter) g_variant_iter_free(piter);
                 if (!display) {
                     const gchar *last = strrchr(path, '/');
-                    display = last ? g_strdup(last + 1) : g_strdup(path);
+                    display = last ? safe_utf8(last + 1) : safe_utf8(path);
                 }
                 /* Tag pre-existing devices as Known with a star prefix */
                 gchar *disp2 = g_strdup_printf("★ %s", display);
@@ -1352,6 +1482,7 @@ void gui_bt_populate_existing_devices(void) {
             if (props) g_variant_unref(props);
             g_free(iface_name);
         }
+        if (ifaces) g_variant_unref(ifaces);
         g_free(path);
     }
     g_variant_iter_free(outer);

@@ -202,6 +202,22 @@ static void on_trust_clicked(GtkButton *b, gpointer user_data) {
     gchar *obj = tree_get_selected_obj(tv);
     GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(b));
     if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
+
+    /* Recheck current device state to avoid racing transient states */
+    gboolean paired = FALSE, trusted = FALSE, connected = FALSE;
+    if (gui_bt_get_device_state(obj, &paired, &trusted, &connected) == 0) {
+        if (!paired) {
+            show_bt_error_dialog(parent, "Device is not paired. Pair the device before marking it as trusted.");
+            g_free(obj);
+            return;
+        }
+        if (trusted) {
+            show_bt_error_dialog(parent, "Device is already trusted.");
+            g_free(obj);
+            return;
+        }
+    }
+
     /* Async trust=true with error surfacing */
     gui_bt_trust_device_async(obj, TRUE, bt_trust_op_cb, parent);
     g_free(obj);
@@ -213,6 +229,17 @@ static void on_connect_clicked(GtkButton *b, gpointer user_data) {
     gchar *obj = tree_get_selected_obj(tv);
     GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(b));
     if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
+
+    /* Recheck current device state to ensure Connect preconditions are met */
+    gboolean paired = FALSE, trusted = FALSE, connected = FALSE;
+    if (gui_bt_get_device_state(obj, &paired, &trusted, &connected) == 0) {
+        if (!paired) {
+            show_bt_error_dialog(parent, "Device is not paired. Pair the device before connecting.");
+            g_free(obj);
+            return;
+        }
+    }
+
     /* Async connect with error surfacing */
     gui_bt_connect_device_async(obj, bt_connect_op_cb, parent);
     g_free(obj);
