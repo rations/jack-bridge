@@ -22,7 +22,7 @@ BIN_DIR="${PREFIX_ROOT}usr/bin"
 
 REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1"
 
-echo "Installing jack-bridge contrib files (non-destructive)..."
+echo "Installing jack-bridge contrib files"
 
 # Non-interactive package installation for Debian-like systems (will prompt for sudo password)
 if command -v apt >/dev/null 2>&1; then
@@ -39,17 +39,11 @@ else
     echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
 fi
 
-# Install /etc/asound.conf template (force-install; back up existing file)
+# Install /etc/asound.conf template
 ASOUND_DST="${ETC_DIR}/asound.conf"
 mkdir -p "$(dirname "$ASOUND_DST")"
-if [ -e "$ASOUND_DST" ]; then
-    # Back up existing file with timestamp before replacing
-    BACKUP="${ASOUND_DST}.$(date +%Y%m%d%H%M%S).bak"
-    cp -p "$ASOUND_DST" "$BACKUP" || true
-    echo "Backed up existing $ASOUND_DST to $BACKUP"
-fi
 # Force copy the updated template (overwrite)
-cp -pf contrib/etc/asound.conf "$ASOUND_DST"
+cp -f contrib/etc/asound.conf "$ASOUND_DST" || true
 echo "Installed (or replaced) $ASOUND_DST"
 
 # Install init script
@@ -110,13 +104,14 @@ if [ -f "contrib/bin/mxeq" ]; then
         install -m 0644 contrib/mxeq.desktop /usr/share/applications/mxeq.desktop || true
     fi
     echo "Installed AlsaTune (mxeq) launcher."
+
 else
     echo "No bundled AlsaTune found in contrib/; skipping GUI installation."
 fi
 
-# Install simple apulse wrappers
+# Install apulse wrappers (always; do not remove)
 mkdir -p "$BIN_DIR"
-# apulse wrapper for firefox
+# /usr/bin/apulse-firefox
 cat > "${BIN_DIR}/apulse-firefox" <<'EOF'
 #!/bin/sh
 # wrapper to run firefox under apulse so PA apps use ALSA -> JACK
@@ -125,7 +120,7 @@ EOF
 chmod 755 "${BIN_DIR}/apulse-firefox"
 echo "Installed apulse-firefox to ${BIN_DIR}/apulse-firefox"
 
-# apulse wrapper for chromium
+# /usr/bin/apulse-chromium
 cat > "${BIN_DIR}/apulse-chromium" <<'EOF'
 #!/bin/sh
 # wrapper to run chromium under apulse so PA apps use ALSA -> JACK
@@ -134,55 +129,11 @@ EOF
 chmod 755 "${BIN_DIR}/apulse-chromium"
 echo "Installed apulse-chromium to ${BIN_DIR}/apulse-chromium"
 
-# Create .desktop launcher overrides so desktop environments launch apulse-wrapped browsers
-DESKTOP_DIR="/usr/share/applications"
-mkdir -p "$DESKTOP_DIR"
-
-# Firefox desktop wrapper (non-destructive: only write if not present or if --force later)
-FIREFOX_DESKTOP="${DESKTOP_DIR}/apulse-firefox.desktop"
-cat > "$FIREFOX_DESKTOP" <<'EOF'
-[Desktop Entry]
-Name=Firefox (apulse)
-Comment=Run Firefox under apulse so web audio routes to ALSA->JACK
-Exec=/usr/bin/apulse-firefox %u
-Terminal=false
-Type=Application
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
-EOF
-chmod 644 "$FIREFOX_DESKTOP"
-echo "Installed desktop launcher $FIREFOX_DESKTOP"
-
-# Chromium desktop wrapper
-CHROMIUM_DESKTOP="${DESKTOP_DIR}/apulse-chromium.desktop"
-cat > "$CHROMIUM_DESKTOP" <<'EOF'
-[Desktop Entry]
-Name=Chromium (apulse)
-Comment=Run Chromium under apulse so web audio routes to ALSA->JACK
-Exec=/usr/bin/apulse-chromium %U
-Terminal=false
-Type=Application
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
-EOF
-chmod 644 "$CHROMIUM_DESKTOP"
-echo "Installed desktop launcher $CHROMIUM_DESKTOP"
-
-# Note: We do not override system 'firefox' or 'chromium' executables. Instead we provide
-# wrapped desktop entries named "Firefox (apulse)" and "Chromium (apulse)" so users
-# can launch browsers without extra steps. Administrators who want full replacement
-# can create symlinks or update system desktop files.
-
-# Install realtime limits template (force-install; back up existing file)
+# Install realtime limits template (force-install; overwrite without backup)
 LIMITS_DST="${ETC_DIR}/security/limits.d/audio.conf"
 mkdir -p "$(dirname "$LIMITS_DST")"
-if [ -e "$LIMITS_DST" ]; then
-    BACKUP="${LIMITS_DST}.$(date +%Y%m%d%H%M%S).bak"
-    cp -p "$LIMITS_DST" "$BACKUP" || true
-    echo "Backed up existing $LIMITS_DST to $BACKUP"
-fi
-cp -pf contrib/etc/security/limits.d/audio.conf "$LIMITS_DST"
-echo "Installed (or replaced) realtime limits template to $LIMITS_DST"
+install -m 0644 contrib/etc/security/limits.d/audio.conf "$LIMITS_DST" || true
+echo "Installed (replaced) realtime limits template to $LIMITS_DST"
 
 # Register init script with update-rc.d if available (explicit priorities for ordering)
 # Desired order: dbus -> bluetoothd -> bluealsad -> jackd-rt -> jack-bluealsa-autobridge
@@ -247,6 +198,19 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     fi
 done
 
+# Explicitly add the installer invoker (SUDO_USER) when present for convenience
+if [ -n "$SUDO_USER" ]; then
+    if id -nG "$SUDO_USER" 2>/dev/null | grep -qw audio; then
+        echo "SUDO_USER '$SUDO_USER' already in audio group."
+    else
+        if usermod -aG audio "$SUDO_USER" 2>/dev/null; then
+            echo "Added SUDO_USER '$SUDO_USER' to audio group."
+        else
+            echo "Warning: failed to add SUDO_USER '$SUDO_USER' to audio group."
+        fi
+    fi
+fi
+
 # Also add desktop users to 'bluetooth' group when present (required for some BlueZ setups)
 if getent group bluetooth >/dev/null; then
     echo "Adding desktop users (UID>=1000) to the 'bluetooth' group (if present)..."
@@ -261,9 +225,25 @@ if getent group bluetooth >/dev/null; then
             fi
         fi
     done
+
+    # Also add the installer invoker (SUDO_USER) when present
+    if [ -n "$SUDO_USER" ]; then
+        if id -nG "$SUDO_USER" 2>/dev/null | grep -qw bluetooth; then
+            echo "SUDO_USER '$SUDO_USER' already in bluetooth group."
+        else
+            if usermod -aG bluetooth "$SUDO_USER" 2>/dev/null; then
+                echo "Added SUDO_USER '$SUDO_USER' to bluetooth group."
+            else
+                echo "Warning: failed to add SUDO_USER '$SUDO_USER' to bluetooth group."
+            fi
+        fi
+    fi
 else
     echo "Group 'bluetooth' not present; skipping bluetooth group additions."
 fi
+
+# Inform admin/user that group changes require re-login
+echo "Note: Users added to groups must log out and log back in (or reboot) for group membership to take effect."
 
 echo "Ensuring BlueALSA runtime and autobridge integration (non-destructive)..."
 
@@ -344,6 +324,26 @@ if [ -f "contrib/init.d/bluealsad" ]; then
     if [ -f "contrib/default/bluealsad" ]; then
         install -m 0644 contrib/default/bluealsad "${DEFAULTS_DIR}/bluealsad" || true
         echo "Installed defaults to ${DEFAULTS_DIR}/bluealsad"
+    fi
+
+    # If no defaults file was provided, create a conservative /etc/default/bluealsad so
+    # bluealsad can be started with common profiles enabled (a2dp + sco/hfp).
+    if [ ! -f "${DEFAULTS_DIR}/bluealsad" ]; then
+        cat > "${DEFAULTS_DIR}/bluealsad" <<'BLUEALSAD_DEFAULT'
+# Created by jack-bridge installer - sensible defaults for BlueALSA daemon
+BLUEALSAD_USER=bluealsa
+# Provide common profile options so audio profiles are available at start
+BLUEALSAD_ARGS="-p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs"
+BLUEALSAD_LOG=/var/log/bluealsad.log
+BLUEALSAD_PIDFILE=/var/run/bluealsad.pid
+BLUEALSAD_RUNTIME_DIR=/var/lib/bluealsa
+BLUEALSAD_EXTRA=""
+BLUEALSAD_VERBOSE=0
+BLUEALSAD_AUTOSTART=1
+BLUEALSAD_NOTES="Defaults provided by jack-bridge installer"
+BLUEALSAD_DEFAULT
+        chmod 644 "${DEFAULTS_DIR}/bluealsad" || true
+        echo "Wrote default ${DEFAULTS_DIR}/bluealsad with common profile args (a2dp/sco)."
     fi
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering bluealsad init script with explicit priorities..."
@@ -478,95 +478,15 @@ else
     echo "update-rc.d not available; please register ${INIT_HELPER} to run at boot if desired."
 fi
 
-# Install jack-bridge Bluetooth config (non-destructive)
+# Install jack-bridge Bluetooth config (force-install; overwrite without backup)
 CONF_SRC="contrib/etc/jack-bridge/bluetooth.conf"
 CONF_DST="/etc/jack-bridge/bluetooth.conf"
 if [ -f "$CONF_SRC" ]; then
     mkdir -p /etc/jack-bridge
-    if [ -e "$CONF_DST" ]; then
-        echo "Existing $CONF_DST detected; installing as $CONF_DST.new (review and merge manually if desired)"
-        install -m 0644 "$CONF_SRC" "$CONF_DST.new" || true
-    else
-        install -m 0644 "$CONF_SRC" "$CONF_DST" || true
-        echo "Installed $CONF_DST"
-    fi
+    install -m 0644 "$CONF_SRC" "$CONF_DST" || true
+    echo "Installed (replaced) $CONF_DST"
 fi
 
 echo "Installation complete. Please reboot the system to start JACK, bluetoothd (distro), bluealsad (if installed), and the jack-bluealsa-autobridge service at boot."
 
 exit 0
-# --- jack-bridge Bluetooth adapter boot-time helper install (appended by repo update) ---
-# Install helper that ensures adapters are Powered/Discoverable/Pairable and a SysV init script
-# to run it at every boot. Non-fatal if pieces are missing.
-if [ -f "contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh" ]; then
-  echo "Installing Bluetooth adapter helper to /usr/local/lib/jack-bridge/bluetooth-enable.sh ..."
-  install -m 0755 contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh /usr/local/lib/jack-bridge/bluetooth-enable.sh || true
-
-  # Create SysV init script that runs the helper after bluetoothd is up
-  if [ ! -f "/etc/init.d/jack-bridge-bluetooth-config" ]; then
-    echo "Creating /etc/init.d/jack-bridge-bluetooth-config ..."
-    cat > /etc/init.d/jack-bridge-bluetooth-config <<'EOF'
-#!/bin/sh
-### BEGIN INIT INFO
-# Provides:          jack-bridge-bluetooth-config
-# Required-Start:    $local_fs $remote_fs dbus bluetooth
-# Required-Stop:
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: Ensure BlueZ adapter discoverable/pairable each boot
-# Description:       Calls /usr/local/lib/jack-bridge/bluetooth-enable.sh once at boot.
-### END INIT INFO
-
-. /lib/lsb/init-functions
-
-HELPER="/usr/local/lib/jack-bridge/bluetooth-enable.sh"
-PIDFILE="/var/run/jack-bridge-bluetooth-config.pid"
-
-start() {
-    log_daemon_msg "Running Bluetooth adapter configuration helper" "jack-bridge-bluetooth-config"
-    if [ ! -x "$HELPER" ]; then
-        log_warning_msg "Missing helper $HELPER"
-        log_end_msg 0
-        return 0
-    fi
-    # best-effort: do not fail the boot if it errors
-    "$HELPER" >/dev/null 2>&1 || true
-    log_end_msg 0
-}
-
-stop() {
-    # one-shot helper; nothing persistent to stop
-    log_daemon_msg "No-op stop" "jack-bridge-bluetooth-config"
-    log_end_msg 0
-}
-
-status() {
-    echo "jack-bridge-bluetooth-config is a one-shot helper; see /var/log/jack-bridge-bluetooth-config.log"
-    return 0
-}
-
-case "$1" in
-  start) start ;;
-  stop) stop ;;
-  restart|force-reload) start ;;
-  status) status ;;
-  *) echo "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
-esac
-
-exit 0
-EOF
-    chmod 755 /etc/init.d/jack-bridge-bluetooth-config || true
-  fi
-
-  # Register with update-rc.d (non-fatal if insserv is absent)
-  if command -v update-rc.d >/dev/null 2>&1; then
-    echo "Registering jack-bridge-bluetooth-config SysV service ..."
-    update-rc.d -f jack-bridge-bluetooth-config remove >/dev/null 2>&1 || true
-    # Start after bluetoothd (bluetoothd at 20 → pick 25)
-    update-rc.d jack-bridge-bluetooth-config start 25 2 3 4 5 . stop 75 0 1 6 . || true
-  fi
-
-  # Run once now (best-effort) so a reboot is not strictly required for discovery/pairing defaults
-  /usr/local/lib/jack-bridge/bluetooth-enable.sh || true
-fi
-# --- end: Bluetooth adapter boot-time helper install ---

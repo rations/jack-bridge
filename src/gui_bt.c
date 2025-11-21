@@ -451,7 +451,7 @@ int gui_bt_trust_device(const char *device_path_or_mac, int trusted) {
     }
     if (!device_path) return -1;
 
-    GVariant *value = g_variant_new_variant(g_variant_new_boolean(trusted ? TRUE : FALSE));
+    GVariant *value = g_variant_new("v", g_variant_new_boolean(trusted ? TRUE : FALSE));
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", value);
 
     /* Properties.Set must be invoked on the owner of the object (org.bluez).
@@ -485,6 +485,7 @@ typedef struct {
     char *device_path;
     GuiBtOpCb cb;
     gpointer ud;
+    int tried_profile; /* 0 = none, 1 = tried ConnectProfile, 2 = tried fallback Connect */
 } BtOpCtx;
 
 static gboolean __invoke_cb_idle(gpointer data) {
@@ -606,6 +607,26 @@ static void connect_call_done(GObject *source_object, GAsyncResult *res, gpointe
     GDBusConnection *conn = G_DBUS_CONNECTION(source_object);
     GVariant *r = g_dbus_connection_call_finish(conn, res, &err);
     if (!r) {
+        /* If we attempted ConnectProfile first, fall back to generic Connect once */
+        if (ctx->tried_profile == 1) {
+            /* clear error and try Connect (fallback) */
+            if (err) { g_error_free(err); err = NULL; }
+            ctx->tried_profile = 2;
+            g_dbus_connection_call(gui_system_bus,
+                "org.bluez",
+                ctx->device_path,
+                "org.bluez.Device1",
+                "Connect",
+                NULL,
+                NULL,
+                G_DBUS_CALL_FLAGS_NONE,
+                8000,
+                NULL,
+                connect_call_done,
+                ctx);
+            return;
+        }
+
         gchar *msg = compose_hint_message("Connect failed", err ? err->message : "unknown error");
         if (err) g_error_free(err);
         invoke_cb_main(ctx->cb, FALSE, msg, ctx->ud);
@@ -642,19 +663,25 @@ int gui_bt_connect_device_async(const char *device_path_or_mac, GuiBtOpCb cb, gp
     BtOpCtx *ctx = g_new0(BtOpCtx, 1);
     ctx->device_path = device_path;
     ctx->cb = cb; ctx->ud = ud;
+    ctx->tried_profile = 1; /* will attempt ConnectProfile first */
+
+    /* Try ConnectProfile for A2DP Sink (headsets) first; fallback to Connect in callback */
+    const char *a2dp_sink_uuid = "0000110b-0000-1000-8000-00805f9b34fb";
+    GVariant *params = g_variant_new("(s)", a2dp_sink_uuid);
 
     g_dbus_connection_call(gui_system_bus,
         "org.bluez",
         ctx->device_path,
         "org.bluez.Device1",
-        "Connect",
-        NULL,
+        "ConnectProfile",
+        params,
         NULL,
         G_DBUS_CALL_FLAGS_NONE,
         8000,
         NULL,
         connect_call_done,
         ctx);
+
     return 0;
 }
 
@@ -709,7 +736,7 @@ int gui_bt_trust_device_async(const char *device_path_or_mac, gboolean trusted, 
     ctx->device_path = device_path;
     ctx->cb = cb; ctx->ud = ud;
 
-    GVariant *value = g_variant_new_variant(g_variant_new_boolean(trusted ? TRUE : FALSE));
+    GVariant *value = g_variant_new("v", g_variant_new_boolean(trusted ? TRUE : FALSE));
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", value);
 
     g_dbus_connection_call(gui_system_bus,
