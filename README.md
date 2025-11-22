@@ -90,14 +90,11 @@ Prerequisites
   - /var/lib/bluealsa owned by bluealsa:bluealsa with 0700
 
 Services and start order (SysV init, no systemd)
-- The installer registers SysV init scripts. Required-Start/Stop headers handle sequencing:
-  1) dbus (distro provided)
-  2) bluetoothd (contrib/init.d/bluetoothd)
-  3) bluealsad (contrib/init.d/bluealsad)
-  4) jackd-rt (contrib/init.d/jackd-rt)
-  5) jack-bluealsa-autobridge (contrib/init.d/jack-bluealsa-autobridge)
-- bluetoothd is run with “-n” (foreground) so start-stop-daemon reliably manages it.
-- bluealsad runs as the bluealsa user on the system bus.
+- bluetoothd is managed by the distro; this installer does not install or modify a bluetoothd init script.
+- Optional: installs contrib/init.d/bluealsad if present and registers it after bluetoothd.
+- Installs contrib/init.d/jackd-rt.
+- Desired order: dbus (distro) -> bluetoothd (distro) -> bluealsad (optional) -> jackd-rt.
+- Also installs a small post-boot helper (/etc/init.d/jack-bridge-bluetooth-config) that sets the adapter Discoverable/Pairable (best-effort).
 
 D-Bus and polkit policies
 - BlueALSA D-Bus policy (org.bluealsa):
@@ -124,24 +121,15 @@ Latency control
 - The Bluetooth panel includes:
   - “Bluetooth latency (period frames)” slider: 128..1024
   - “nperiods” spin control: 2..4
-- These controls write atomically to the bridge config:
-  - /etc/jack-bridge/bluetooth.conf
-  - Keys written: BRIDGE_PERIOD, BRIDGE_NPERIODS plus canonical A2DP_PERIOD, A2DP_NPERIODS
-- The autobridge daemon supports aliases:
-  - BRIDGE_PERIOD → A2DP_PERIOD
-  - BRIDGE_NPERIODS → A2DP_NPERIODS
-- On change, the GUI sends SIGHUP to the autobridge so the new settings apply without reboot.
+- Values are written atomically to /etc/jack-bridge/devices.conf:
+  - Keys: BT_PERIOD, BT_NPERIODS
+- They are applied when Bluetooth is selected as the output in the Devices panel. The routing helper [/usr/local/lib/jack-bridge/jack-route-select](contrib/usr/local/lib/jack-bridge/jack-route-select:1) passes -p BT_PERIOD and -n BT_NPERIODS to alsa_out for the bt_out JACK client.
 
-Autobridge (BlueALSA → JACK)
-- Daemon: jack-bluealsa-autobridge
-- Reads config: /etc/jack-bridge/bluetooth.conf
-- Subscribes to BlueALSA D-Bus and spawns:
-  - alsa_in for A2DP sink (phone → us)
-  - alsa_out for A2DP source (us → headset)
-  - alsa_in for SCO where applicable
-- Prevents duplicate spawns per MAC and respects availability heuristics.
-- Log: /var/log/jack-bluealsa-autobridge.log
-- PID: /var/run/jack-bluealsa-autobridge.pid (GUI sends SIGHUP here on latency changes)
+Device switching (Internal / USB / HDMI / Bluetooth)
+- Change the active audio target at runtime without restarting JACK.
+- The GUI “Devices” panel provides radio buttons for Internal, USB, HDMI, and Bluetooth.
+- Under the hood, the helper [/usr/local/lib/jack-bridge/jack-route-select](contrib/usr/local/lib/jack-bridge/jack-route-select:1) rewires JACK ports and spawns alsa_out clients as needed (out_usb, out_hdmi, bt_out).
+- The selection and device mappings are persisted in [/etc/jack-bridge/devices.conf](etc/jack-bridge/devices.conf:1).
 
 Troubleshooting
 - Discovery finds nothing:
@@ -160,19 +148,18 @@ Troubleshooting
   - Verify BlueZ device is present:
     - bluetoothctl show
     - bluetoothctl devices
-- BlueALSA audio not bridging to JACK:
-  - Check autobridge log:
-    - tail -f /var/log/jack-bluealsa-autobridge.log
-  - Confirm BlueALSA PCM is present (after connecting):
-    - bluealsactl status  (if provided)
-  - Confirm JACK is running and autoconnect script exists:
-    - /usr/local/lib/jack-bridge/jack-autoconnect
- - Latency changes do not apply:
-  - Verify that GUI updated:
-    - /etc/jack-bridge/bluetooth.conf has BRIDGE_PERIOD/BRIDGE_NPERIODS (and A2DP_* equivalents)
-  - Confirm autobridge PID and that SIGHUP was delivered:
-    - cat /var/run/jack-bluealsa-autobridge.pid
-    - kill -HUP $(cat /var/run/jack-bluealsa-autobridge.pid)
+- No audio on Bluetooth target:
+  - Ensure the bt_out JACK client exists:
+    - jack_lsp | grep '^bt_out:'
+  - If missing, select Bluetooth in the Devices panel or run:
+    - /usr/local/lib/jack-bridge/jack-route-select bluetooth
+  - Confirm BlueALSA is running (bluealsad) and the device is connected in the GUI.
+  - Verify [/etc/jack-bridge/devices.conf](etc/jack-bridge/devices.conf:1) has BLUETOOTH_DEVICE (default: bluealsa:PROFILE=a2dp).
+- Latency changes do not apply:
+  - Verify BT_PERIOD/BT_NPERIODS in [/etc/jack-bridge/devices.conf](etc/jack-bridge/devices.conf:1).
+  - Re-select Bluetooth in the Devices panel or run:
+    - /usr/local/lib/jack-bridge/jack-route-select bluetooth
+  - This respawns bt_out with the new -p/-n settings.
 
 Notes
 - This stack avoids systemd, PulseAudio, and PipeWire by design.
@@ -180,9 +167,9 @@ Notes
 - The GUI is designed so end users do not need to use the terminal after installation.
 
 Changelog highlights (Bluetooth)
-- Added adapter resolution/power-up, discovery filter, and properties subscriptions in [gui_bt.c](src/gui_bt.c:1)
-- Added star “★” tag for Known (cached) devices and state markers [Paired]/[Trusted]/[Connected]
-- Added Bluetooth latency slider and nperiods spinner in [mxeq.c](src/mxeq.c:1), mapped to [/etc/jack-bridge/bluetooth.conf](etc/jack-bridge/bluetooth.conf:1)
-- Added config alias support for BRIDGE_PERIOD/BRIDGE_NPERIODS in [jack-bluealsa-autobridge.c](src/jack-bluealsa-autobridge.c:1)
-- Provided polkit rule and D-Bus policy installation; ensured bluetoothd foreground mode and proper bluealsad defaults
+- Fixed discovery crash and Properties.Set signature issues in [gui_bt.c](src/gui_bt.c:1)
+- Added Devices panel and runtime routing via [jack-route-select](contrib/usr/local/lib/jack-bridge/jack-route-select:1); persisted preferences in [/etc/jack-bridge/devices.conf](etc/jack-bridge/devices.conf:1)
+- Moved Bluetooth latency to BT_PERIOD/BT_NPERIODS in devices.conf; applied to bt_out via alsa_out
+- Removed autobridge and bluetooth.conf; installer/uninstaller now clean legacy artifacts
+- Provided polkit rule and D-Bus policy installation; proper bluealsad defaults
 

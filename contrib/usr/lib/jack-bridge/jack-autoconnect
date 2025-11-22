@@ -1,10 +1,12 @@
 #!/bin/sh
 # contrib/usr/lib/jack-bridge/jack-autoconnect
-# Idempotent auto-connect of ALSA pcm outputs to system playback ports.
+# Idempotent auto-connect of ALSA pcm outputs to a default sink and then
+# honor a preferred target using jack-route-select if configured.
 # Safe to call multiple times; suppress errors.
-# Attempts optional mic loopback if JACK_AUTOCONNECT_LOOPBACK=1 in /etc/default/jackd-rt
 
 : ${JACK_AUTOCONNECT_LOOPBACK:=0}
+ROUTE_HELPER="/usr/local/lib/jack-bridge/jack-route-select"
+DEVCONF="/etc/jack-bridge/devices.conf"
 
 # Allow override from /etc/default/jackd-rt if present
 if [ -r /etc/default/jackd-rt ]; then
@@ -23,7 +25,7 @@ try_connect() {
     fi
 }
 
-# Common ALSA plugin ports (alsa_pcm:playback_N) -> system:playback_N
+# Default wiring to internal system playback as a baseline
 try_connect "alsa_pcm:playback_1" "system:playback_1"
 try_connect "alsa_pcm:playback_2" "system:playback_2"
 
@@ -31,6 +33,24 @@ try_connect "alsa_pcm:playback_2" "system:playback_2"
 if [ "x$JACK_AUTOCONNECT_LOOPBACK" = "x1" ]; then
     try_connect "system:capture_1" "system:playback_1"
     try_connect "system:capture_2" "system:playback_2"
+fi
+
+# Optional route-select auto-routing (disabled by default).
+# To enable, set AUTOROUTE=1 in /etc/jack-bridge/devices.conf (or export AUTOROUTE=1).
+AUTOROUTE="${AUTOROUTE:-0}"
+if [ -r "$DEVCONF" ]; then
+    # shellcheck disable=SC1090
+    . "$DEVCONF"
+fi
+
+if [ "x$AUTOROUTE" = "x1" ]; then
+    case "$PREFERRED_OUTPUT" in
+      internal|usb|hdmi|bluetooth)
+        if [ -x "$ROUTE_HELPER" ]; then
+            "$ROUTE_HELPER" "$PREFERRED_OUTPUT" >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
 fi
 
 exit 0

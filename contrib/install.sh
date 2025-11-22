@@ -39,6 +39,14 @@ else
     echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
 fi
 
+# Cleanup obsolete artifacts from previous versions (authoritative removal)
+for f in /etc/init.d/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autobridge /etc/jack-bridge/bluetooth.conf; do
+    if [ -e "$f" ]; then
+        rm -f "$f"
+        echo "Removed obsolete $f"
+    fi
+done
+
 # Install /etc/asound.conf template
 ASOUND_DST="${ETC_DIR}/asound.conf"
 mkdir -p "$(dirname "$ASOUND_DST")"
@@ -90,6 +98,18 @@ if [ -f "contrib/usr/lib/jack-bridge/jack-watchdog" ]; then
     echo "Installed jack-watchdog to ${USR_LIB_DIR}/jack-watchdog"
 fi
 
+# Ensure ALSA override directory exists and install default current_input.conf -> input_card0
+ASOUND_D_DIR="${ETC_DIR}/asound.conf.d"
+mkdir -p "$ASOUND_D_DIR"
+cat > "${ASOUND_D_DIR}/current_input.conf" <<'EOF'
+pcm.current_input {
+    type plug
+    slave.pcm "input_card0"
+}
+EOF
+chmod 644 "${ASOUND_D_DIR}/current_input.conf"
+echo "Installed default ${ASOUND_D_DIR}/current_input.conf (pcm.current_input -> input_card0)"
+
 # Install bundled AlsaTune GUI from repo contrib/ paths
 # The mxeq binary and desktop file are expected to be committed into the repo at:
 #   contrib/bin/mxeq
@@ -129,23 +149,50 @@ EOF
 chmod 755 "${BIN_DIR}/apulse-chromium"
 echo "Installed apulse-chromium to ${BIN_DIR}/apulse-chromium"
 
+# Create .desktop launcher overrides so desktop environments launch apulse-wrapped browsers
+DESKTOP_DIR="/usr/share/applications"
+mkdir -p "$DESKTOP_DIR"
+
+# Firefox desktop wrapper (non-destructive: only write if not present or if --force later)
+FIREFOX_DESKTOP="${DESKTOP_DIR}/apulse-firefox.desktop"
+cat > "$FIREFOX_DESKTOP" <<'EOF'
+[Desktop Entry]
+Name=Firefox (apulse)
+Comment=Run Firefox under apulse so web audio routes to ALSA->JACK
+Exec=/usr/bin/apulse-firefox %u
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
+EOF
+chmod 644 "$FIREFOX_DESKTOP"
+echo "Installed desktop launcher $FIREFOX_DESKTOP"
+
+# Chromium desktop wrapper
+CHROMIUM_DESKTOP="${DESKTOP_DIR}/apulse-chromium.desktop"
+cat > "$CHROMIUM_DESKTOP" <<'EOF'
+[Desktop Entry]
+Name=Chromium (apulse)
+Comment=Run Chromium under apulse so web audio routes to ALSA->JACK
+Exec=/usr/bin/apulse-chromium %U
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
+EOF
+chmod 644 "$CHROMIUM_DESKTOP"
+echo "Installed desktop launcher $CHROMIUM_DESKTOP"
+
 # Install realtime limits template (force-install; overwrite without backup)
 LIMITS_DST="${ETC_DIR}/security/limits.d/audio.conf"
 mkdir -p "$(dirname "$LIMITS_DST")"
 install -m 0644 contrib/etc/security/limits.d/audio.conf "$LIMITS_DST" || true
 echo "Installed (replaced) realtime limits template to $LIMITS_DST"
 
-# Register init script with update-rc.d if available (explicit priorities for ordering)
-# Desired order: dbus -> bluetoothd -> bluealsad -> jackd-rt -> jack-bluealsa-autobridge
+# Register init script with update-rc.d if available (defaults)
 if command -v update-rc.d >/dev/null 2>&1; then
-    echo "Registering jackd-rt init script with explicit priorities..."
-    # jackd-rt after bluealsad (bluetoothd -> bluealsad -> jackd-rt)
-    # start 22 at runlevels 2 3 4 5; stop 78 at 0 1 6
-    update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
-    if ! update-rc.d jackd-rt start 22 2 3 4 5 . stop 78 0 1 6 .; then
-        echo "Warning: update-rc.d jackd-rt explicit registration failed; falling back to defaults"
-        update-rc.d jackd-rt defaults || true
-    fi
+    echo "Registering jackd-rt init script with update-rc.d (defaults)..."
+    update-rc.d jackd-rt defaults || true
 else
     echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
 fi
@@ -245,7 +292,7 @@ fi
 # Inform admin/user that group changes require re-login
 echo "Note: Users added to groups must log out and log back in (or reboot) for group membership to take effect."
 
-echo "Ensuring BlueALSA runtime and autobridge integration (non-destructive)..."
+echo "Ensuring BlueALSA runtime (non-destructive)..."
 
 # Create dedicated bluealsa system user (nologin) if it does not exist
 if ! id -u bluealsa >/dev/null 2>&1; then
@@ -290,30 +337,11 @@ if [ -f "contrib/bin/bluealsa-rfcomm" ]; then
 fi
 
 
-# Install jack-bluealsa-autobridge binary if provided in repo contrib/bin (prebuilt artifact)
-if [ -f "contrib/bin/jack-bluealsa-autobridge" ]; then
-    echo "Installing jack-bluealsa-autobridge to /usr/local/bin..."
-    install -m 0755 contrib/bin/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autobridge || true
-else
-    echo "No jack-bluealsa-autobridge binary found in contrib/bin/. Skip binary install."
-fi
+# Note: jack-bluealsa-autobridge has been removed from this project; no autobridge binary is installed.
 
-# Autobridge init script will be installed after bluealsad registration (see below)
 
-# Install SysV init script for bluetoothd if present
-if [ -f "contrib/init.d/bluetoothd" ]; then
-    echo "Installing SysV init script for bluetoothd..."
-    cp -p contrib/init.d/bluetoothd "${INIT_DIR}/bluetoothd"
-    chmod 755 "${INIT_DIR}/bluetoothd"
-    if command -v update-rc.d >/dev/null 2>&1; then
-        echo "Registering bluetoothd init script with explicit priorities..."
-        # bluetoothd before bluealsad and jackd-rt
-        update-rc.d -f bluetoothd remove >/dev/null 2>&1 || true
-        update-rc.d bluetoothd start 20 2 3 4 5 . stop 80 0 1 6 . || true
-    else
-        echo "update-rc.d not available; please register ${INIT_DIR}/bluetoothd manually if desired."
-    fi
-fi
+# Leave distro bluetoothd service untouched; no installer-managed init for bluetoothd
+echo "Leaving distro bluetoothd service as-is (no custom init script installed or modified)."
 
 # Optionally install bluealsad init script and defaults if provided in contrib
 if [ -f "contrib/init.d/bluealsad" ]; then
@@ -353,26 +381,7 @@ BLUEALSAD_DEFAULT
     fi
 fi
 
-# Now install and register autobridge after bluealsad is enabled/available
-if [ -f "contrib/init.d/jack-bluealsa-autobridge" ]; then
-    echo "Installing SysV init script for jack-bluealsa-autobridge..."
-    cp -p contrib/init.d/jack-bluealsa-autobridge "${INIT_DIR}/jack-bluealsa-autobridge"
-    chmod 755 "${INIT_DIR}/jack-bluealsa-autobridge"
-    if command -v bluealsad >/dev/null 2>&1; then
-        if command -v update-rc.d >/dev/null 2>&1; then
-            echo "Registering jack-bluealsa-autobridge init script with explicit priorities..."
-            # autobridge after jackd-rt
-            update-rc.d -f jack-bluealsa-autobridge remove >/dev/null 2>&1 || true
-            update-rc.d jack-bluealsa-autobridge start 23 2 3 4 5 . stop 77 0 1 6 . || true
-        else
-            echo "update-rc.d not available; please register ${INIT_DIR}/jack-bluealsa-autobridge manually if desired."
-        fi
-    else
-        echo "bluealsad binary not found; skipping autobridge registration to avoid insserv dependency errors. Install BlueALSA first."
-    fi
-else
-    echo "No contrib/init.d/jack-bluealsa-autobridge found; skipping init script install."
-fi
+# (autobridge removed) No jack-bluealsa-autobridge init script is installed or registered.
 
 
 # Install BlueALSA D-Bus policy (canonical)
@@ -478,15 +487,23 @@ else
     echo "update-rc.d not available; please register ${INIT_HELPER} to run at boot if desired."
 fi
 
-# Install jack-bridge Bluetooth config (force-install; overwrite without backup)
-CONF_SRC="contrib/etc/jack-bridge/bluetooth.conf"
-CONF_DST="/etc/jack-bridge/bluetooth.conf"
-if [ -f "$CONF_SRC" ]; then
-    mkdir -p /etc/jack-bridge
-    install -m 0644 "$CONF_SRC" "$CONF_DST" || true
-    echo "Installed (replaced) $CONF_DST"
-fi
+# Install jack-bridge devices config (authoritative; overwrite without backup)
+mkdir -p /etc/jack-bridge
+cat > /etc/jack-bridge/devices.conf <<'DEVCONF'
+# /etc/jack-bridge/devices.conf (installed by jack-bridge)
+INTERNAL_DEVICE="hw:0"
+USB_DEVICE="hw:1"
+HDMI_DEVICE="hw:2,3"
+BLUETOOTH_DEVICE="bluealsa:PROFILE=a2dp"
+# Default Bluetooth output latency (used by jack-route-select when spawning bt_out)
+BT_PERIOD="1024"
+BT_NPERIODS="3"
+# Initial preferred output
+PREFERRED_OUTPUT="internal"
+DEVCONF
+chmod 0644 /etc/jack-bridge/devices.conf
+echo "Installed (replaced) /etc/jack-bridge/devices.conf"
 
-echo "Installation complete. Please reboot the system to start JACK, bluetoothd (distro), bluealsad (if installed), and the jack-bluealsa-autobridge service at boot."
+echo "Installation complete. Please reboot the system to start JACK, bluetoothd (distro), and bluealsad (if installed)."
 
 exit 0

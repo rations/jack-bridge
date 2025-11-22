@@ -3,9 +3,10 @@ Provisioning and runtime notes for BlueALSA integration (jack-bridge)
 
 Purpose
 -------
-This document explains the provisioning actions required to run BlueALSA and the jack-bluealsa-autobridge
-on systemd-free Debian-like systems. The provided helper script `contrib/setup-bluetooth.sh` automates
-the common steps, but this file documents what it does and what to verify manually.
+This document explains the provisioning actions required to run BlueALSA and integrate Bluetooth audio into JACK
+on systemd-free Debian-like systems. There is no autobridge daemon anymore; routing is handled in JACK via
+the helper /usr/local/lib/jack-bridge/jack-route-select and settings in /etc/jack-bridge/devices.conf. The provided
+helper script `contrib/setup-bluetooth.sh` automates the common steps, and this file documents what to verify manually.
 
 Summary of actions performed by contrib/setup-bluetooth.sh
 ---------------------------------------------------------
@@ -18,9 +19,13 @@ Summary of actions performed by contrib/setup-bluetooth.sh
    - Creates `/var/lib/bluealsa` if missing and sets ownership to `bluealsa:bluealsa` and permissions `0700`.
    - This directory stores BlueALSA persistent state and must be protected.
 
-3. Ensure log file
-   - Ensures `/var/log/jack-bluealsa-autobridge.log` exists and is writable.
-   - Ownership is set to `bluealsa:bluealsa` where possible.
+3. Devices config and routing helper
+   - The installer writes `/etc/jack-bridge/devices.conf` with defaults:
+     - INTERNAL_DEVICE, USB_DEVICE, HDMI_DEVICE, BLUETOOTH_DEVICE
+     - BT_PERIOD, BT_NPERIODS
+     - PREFERRED_OUTPUT
+   - Runtime routing is performed by `/usr/local/lib/jack-bridge/jack-route-select` which rewires JACK ports and spawns
+     alsa_out for USB/HDMI/Bluetooth targets as needed. The GUI Devices panel calls this helper; no separate daemon required.
 
 4. Install D-Bus policy
    - If `usr/share/dbus-1/system.d/org.bluealsa.conf` exists in the repo, it is copied to
@@ -57,8 +62,9 @@ Manual verification checklist
 - Confirm D-Bus policy present:
   ls -l /usr/share/dbus-1/system.d/org.bluealsa.conf
 
-- Confirm autobridge log file:
-  ls -l /var/log/jack-bluealsa-autobridge.log
+- Confirm devices configuration:
+  ls -l /etc/jack-bridge/devices.conf
+  cat /etc/jack-bridge/devices.conf
 
 - Confirm target user in audio group:
   id <your-user>   # should show 'audio' in groups
@@ -67,8 +73,8 @@ Integration notes
 -----------------
 - The init scripts provided in contrib/init.d/ are SysV-style and should be installed by package maintainer or copied
   into `/etc/init.d/` and enabled via `update-rc.d` or equivalent for your distribution.
-- The autobridge daemon binary is expected at `/usr/local/bin/jack-bluealsa-autobridge` by the init script.
-  Ensure the binary is installed there and executable by the `jack` runtime user configured in `/etc/default/` files.
+- There is no autobridge daemon. Routing is handled by JACK using `/usr/local/lib/jack-bridge/jack-route-select`
+  and preferences in `/etc/jack-bridge/devices.conf`.
 - No systemd, PulseAudio, or PipeWire are required. The provisioning script and init scripts are written to work on sysvinit-like systems.
 
 Troubleshooting
@@ -77,7 +83,10 @@ Troubleshooting
   is present. Check `/var/log/syslog` or `journalctl` (if available).
 - If permissions prevent `bluealsad` from owning `org.bluealsa`, ensure the policy file enables the `bluealsa` user and the daemon
   is started with that user.
-- For diagnosing bridge launches, consult `/var/log/jack-bluealsa-autobridge.log` (autobridge) and the JACK log at the configured path.
+- For diagnosing routing: verify JACK ports and helper operation
+  - jack_lsp | egrep '^(alsa_pcm:playback_|out_usb:|out_hdmi:|bt_out:)'
+  - Re-route explicitly: /usr/local/lib/jack-bridge/jack-route-select bluetooth
+  - Inspect /etc/jack-bridge/devices.conf for BLUETOOTH_DEVICE and latency (BT_PERIOD/BT_NPERIODS).
 
 Security considerations
 -----------------------

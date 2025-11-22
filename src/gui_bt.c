@@ -949,9 +949,11 @@ int bluez_remove_device(const char *device_path_or_mac) {
     return 0;
 }
 
-/* Toggle routing for a device (A2DP sink/source or SCO). This should update
-   /etc/jack-bridge/bluetooth.conf or call an IPC endpoint on the autobridge.
-   'route' is a small string like "a2dp_sink", "a2dp_source", "sco".
+/* Toggle routing for a device (A2DP sink/source or SCO).
+   Note: autobridge has been removed. Routing is handled via JACK by
+   /usr/local/lib/jack-bridge/jack-route-select and preferences persist in
+   /etc/jack-bridge/devices.conf (e.g., PREFERRED_OUTPUT, BLUETOOTH_DEVICE).
+   'route' tokens are presently unused here; kept as a placeholder.
 */
 int gui_bt_set_route(const char *mac, const char *route, int enabled) {
     if (!mac || !route) return -1;

@@ -8,11 +8,16 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+
+/* Forward declaration for Devices panel (defined later in this file) */
+static void create_devices_panel_input(GtkWidget *main_box);
 
 typedef struct {
     snd_mixer_t *mixer;
     snd_mixer_elem_t *elem;
     GtkWidget *scale;
+    GtkWidget *mute_check;
     const char *channel_name;
 } MixerChannel;
 
@@ -106,6 +111,8 @@ extern void gui_bt_populate_existing_devices(void);
 extern int gui_bt_bind_scan_buttons(GtkWidget *scan_btn, GtkWidget *stop_btn);
 /* Query Device1 state (Paired/Trusted/Connected) for button gating */
 extern int gui_bt_get_device_state(const char *object_path, gboolean *paired, gboolean *trusted, gboolean *connected);
+/* Forward declaration for Bluetooth "Set as input" action */
+static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data);
 
 /* Safe wrappers return 0 on success, -1 on failure and show a GTK dialog when appropriate */
 static int bt_wrapper_start_discovery(GtkWindow *parent) {
@@ -419,6 +426,15 @@ static void slider_changed(GtkRange *range, MixerChannel *channel) {
     snd_mixer_selem_set_playback_volume_all(channel->elem, alsa_value);
 }
 
+/* Mute toggle handler — ALSA playback switch: 1=unmuted, 0=muted.
+   We expose a "Mute" checkbox; when checked, set switch=0 (mute). */
+static void on_mute_toggled(GtkToggleButton *btn, gpointer user_data) {
+    MixerChannel *ch = (MixerChannel *)user_data;
+    if (!ch || !ch->elem) return;
+    int checked = gtk_toggle_button_get_active(btn) ? 1 : 0;
+    snd_mixer_selem_set_playback_switch_all(ch->elem, checked ? 0 : 1);
+}
+
 static void eq_slider_changed(GtkRange *range, EQBand *band) {
     gdouble value = gtk_range_get_value(range);
     long alsa_value = (long)(value * 100.0); // Map 0-1 to 0-100
@@ -706,6 +722,7 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
 
     gchar *argv[] = {
         "arecord",
+        "-D", "current_input",
         "-r", rate_s,
         "-c", channels_s,
         "-f", "S16_LE",
@@ -919,14 +936,10 @@ static int upsert_kv_atomic(const char *path, const char *key, const char *value
     return 0;
 }
 
+static void hup_autobridge(void) __attribute__((unused));
 static void hup_autobridge(void) {
-    FILE *f = fopen("/var/run/jack-bluealsa-autobridge.pid", "r");
-    if (!f) return;
-    int pid = 0;
-    if (fscanf(f, "%d", &pid) == 1 && pid > 1) {
-        kill(pid, SIGHUP);
-    }
-    fclose(f);
+    /* Autobridge removed: no-op to avoid spurious file access */
+    (void)0;
 }
 
 static void on_latency_period_changed(GtkRange *range, gpointer user_data) {
@@ -936,10 +949,8 @@ static void on_latency_period_changed(GtkRange *range, gpointer user_data) {
     if (period > 1024) period = 1024;
     char val[32];
     snprintf(val, sizeof(val), "%d", period);
-    /* Write both alias and canonical to keep compatibility */
-    upsert_kv_atomic("/etc/jack-bridge/bluetooth.conf", "BRIDGE_PERIOD", val);
-    upsert_kv_atomic("/etc/jack-bridge/bluetooth.conf", "A2DP_PERIOD", val);
-    hup_autobridge();
+    /* Write authoritative latency to devices.conf (no autobridge, no bluetooth.conf) */
+    upsert_kv_atomic("/etc/jack-bridge/devices.conf", "BT_PERIOD", val);
 }
 
 static void on_latency_nperiods_changed(GtkSpinButton *spin, gpointer user_data) {
@@ -949,9 +960,8 @@ static void on_latency_nperiods_changed(GtkSpinButton *spin, gpointer user_data)
     if (n > 4) n = 4;
     char val[16];
     snprintf(val, sizeof(val), "%d", n);
-    upsert_kv_atomic("/etc/jack-bridge/bluetooth.conf", "BRIDGE_NPERIODS", val);
-    upsert_kv_atomic("/etc/jack-bridge/bluetooth.conf", "A2DP_NPERIODS", val);
-    hup_autobridge();
+    /* Persist in devices.conf for bt_out spawn parameters */
+    upsert_kv_atomic("/etc/jack-bridge/devices.conf", "BT_NPERIODS", val);
 }
 
 /* Build Bluetooth panel once and bind to GUI BT helpers */
@@ -964,12 +974,14 @@ static void on_bt_selection_changed(GtkTreeSelection *sel, gpointer user_data) {
     GtkWidget *trust_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "trust_btn"));
     GtkWidget *connect_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "connect_btn"));
     GtkWidget *remove_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "remove_btn"));
+    GtkWidget *set_input_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "set_input_btn"));
 
     /* Default: disable all until we have state */
     if (pair_btn) gtk_widget_set_sensitive(pair_btn, FALSE);
     if (trust_btn) gtk_widget_set_sensitive(trust_btn, FALSE);
     if (connect_btn) gtk_widget_set_sensitive(connect_btn, FALSE);
     if (remove_btn) gtk_widget_set_sensitive(remove_btn, has);
+    if (set_input_btn) gtk_widget_set_sensitive(set_input_btn, has);
 
     if (!has) return;
 
@@ -1047,10 +1059,12 @@ static void create_bt_panel(GtkWidget *main_box) {
     GtkWidget *trust_btn = gtk_button_new_with_label("Trust");
     GtkWidget *connect_btn = gtk_button_new_with_label("Connect");
     GtkWidget *remove_btn = gtk_button_new_with_label("Remove");
+    GtkWidget *set_input_btn = gtk_button_new_with_label("Set as input");
     gtk_box_pack_start(GTK_BOX(bt_action_row), pair_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), trust_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), remove_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bt_action_row), set_input_btn, FALSE, FALSE, 0);
 
     /* Latency controls (A2DP/JACK bridge) */
     GtkWidget *lat_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -1070,16 +1084,14 @@ static void create_bt_panel(GtkWidget *main_box) {
     gtk_box_pack_start(GTK_BOX(lat_box), n_spin, FALSE, FALSE, 0);
 
     /* Initialize latency controls from config or defaults */
-    char *v_period = read_kv_value("/etc/jack-bridge/bluetooth.conf", "BRIDGE_PERIOD");
-    if (!v_period) v_period = read_kv_value("/etc/jack-bridge/bluetooth.conf", "A2DP_PERIOD");
+    char *v_period = read_kv_value("/etc/jack-bridge/devices.conf", "BT_PERIOD");
     int init_period = v_period ? atoi(v_period) : 1024;
     if (init_period < 128) init_period = 128;
     if (init_period > 1024) init_period = 1024;
     gtk_range_set_value(GTK_RANGE(lat_scale), init_period);
     if (v_period) g_free(v_period);
 
-    char *v_n = read_kv_value("/etc/jack-bridge/bluetooth.conf", "BRIDGE_NPERIODS");
-    if (!v_n) v_n = read_kv_value("/etc/jack-bridge/bluetooth.conf", "A2DP_NPERIODS");
+    char *v_n = read_kv_value("/etc/jack-bridge/devices.conf", "BT_NPERIODS");
     int init_n = v_n ? atoi(v_n) : 3;
     if (init_n < 2) init_n = 2;
     if (init_n > 4) init_n = 4;
@@ -1094,6 +1106,7 @@ static void create_bt_panel(GtkWidget *main_box) {
     gtk_widget_set_sensitive(trust_btn, FALSE);
     gtk_widget_set_sensitive(connect_btn, FALSE);
     gtk_widget_set_sensitive(remove_btn, FALSE);
+    gtk_widget_set_sensitive(set_input_btn, FALSE);
 
     /* Bind device store to GUI BT helpers, register listeners, and populate existing devices */
     gui_bt_set_device_store_widget(tree, store);
@@ -1105,12 +1118,14 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_object_set_data(G_OBJECT(trust_btn), "device_tree", tree);
     g_object_set_data(G_OBJECT(connect_btn), "device_tree", tree);
     g_object_set_data(G_OBJECT(remove_btn), "device_tree", tree);
+    g_object_set_data(G_OBJECT(set_input_btn), "device_tree", tree);
 
     /* Expose buttons via the tree so selection-changed can toggle sensitivity */
     g_object_set_data(G_OBJECT(tree), "pair_btn", pair_btn);
     g_object_set_data(G_OBJECT(tree), "trust_btn", trust_btn);
     g_object_set_data(G_OBJECT(tree), "connect_btn", connect_btn);
     g_object_set_data(G_OBJECT(tree), "remove_btn", remove_btn);
+    g_object_set_data(G_OBJECT(tree), "set_input_btn", set_input_btn);
 
     GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(tree));
     g_signal_connect(sel, "changed", G_CALLBACK(on_bt_selection_changed), NULL);
@@ -1122,6 +1137,7 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_signal_connect(trust_btn, "clicked", G_CALLBACK(on_trust_clicked), NULL);
     g_signal_connect(connect_btn, "clicked", G_CALLBACK(on_connect_clicked), NULL);
     g_signal_connect(remove_btn, "clicked", G_CALLBACK(on_remove_clicked), NULL);
+    g_signal_connect(set_input_btn, "clicked", G_CALLBACK(on_bt_set_input_clicked), NULL);
 }
 
 /* Main function starts here */
@@ -1209,6 +1225,18 @@ int main(int argc, char *argv[]) {
         snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
         snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
         gtk_range_set_value(GTK_RANGE(mixer_data.channels[i].scale), (double)(value - min) / (max - min));
+
+        /* Optional per-channel Mute (if the element exposes a playback switch) */
+        mixer_data.channels[i].mute_check = NULL;
+        if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
+            int sw = 1;
+            snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+            GtkWidget *mute = gtk_check_button_new_with_label("Mute");
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
+            gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
+            g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
+            mixer_data.channels[i].mute_check = mute;
+        }
 
         GtkWidget *padding = gtk_label_new("");
         gtk_box_pack_start(GTK_BOX(channel_box), padding, FALSE, FALSE, 5);
@@ -1333,6 +1361,9 @@ int main(int argc, char *argv[]) {
 
     /* Bluetooth panel (collapsible) */
     create_bt_panel(main_box);
+ 
+    /* Devices panel (Input Source) */
+    create_devices_panel_input(main_box);
 
     gtk_widget_show_all(window);
     gtk_main();
@@ -1346,4 +1377,468 @@ int main(int argc, char *argv[]) {
 
     cleanup_alsa(&mixer_data, &eq_data);
     return 0;
+}
+
+
+static gboolean file_exists_readable(const char *path) {
+    if (!path) return FALSE;
+    FILE *f = fopen(path, "r");
+    if (!f) return FALSE;
+    fclose(f);
+    return TRUE;
+}
+
+/* ---- Input Source selector helpers (pcm.current_input via /etc/asound.conf.d/current_input.conf) ----
+ * Always show Internal/USB/HDMI/Bluetooth. Grey-out those not currently present.
+ * Mapping:
+ *   Internal  -> input_card0
+ *   USB       -> input_usb
+ *   HDMI      -> input_hdmi
+ *   Bluetooth -> input_bt
+ */
+static const char *CURRENT_INPUT_PATH = "/etc/asound.conf.d/current_input.conf";
+
+/* Simple helper to scan a text file for a substring (case-sensitive) */
+static gboolean file_contains_substr(const char *path, const char *needle) {
+    if (!path || !needle) return FALSE;
+    FILE *f = fopen(path, "r");
+    if (!f) return FALSE;
+    char buf[512];
+    gboolean found = FALSE;
+    while (fgets(buf, sizeof(buf), f)) {
+        if (strstr(buf, needle) != NULL) { found = TRUE; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+static gboolean is_usb_present(void) {
+    /* Look for "USB" in ALSA cards listing */
+    if (file_contains_substr("/proc/asound/cards", "USB")) return TRUE;
+    if (file_contains_substr("/proc/asound/cards", "USB Audio")) return TRUE;
+    return FALSE;
+}
+static gboolean is_hdmi_present(void) {
+    if (file_contains_substr("/proc/asound/cards", "HDMI")) return TRUE;
+    return FALSE;
+}
+static gboolean is_bt_present(void) {
+    /* Prefer checking for bluealsa binary or running daemon */
+    if (g_file_test("/usr/bin/bluealsa", G_FILE_TEST_IS_REGULAR) ||
+        g_file_test("/usr/sbin/bluealsa", G_FILE_TEST_IS_REGULAR)) return TRUE;
+    /* Fallback to checking for running bluealsad */
+    int status = 0;
+    gboolean ok = g_spawn_command_line_sync("pidof bluealsad", NULL, NULL, &status, NULL);
+    if (ok && WIFEXITED(status) && WEXITSTATUS(status) == 0) return TRUE;
+    return FALSE;
+}
+
+/* Read current_input.conf and return the slave.pcm target (newly allocated string) or NULL */
+static gchar *read_current_input(void) {
+    FILE *f = fopen(CURRENT_INPUT_PATH, "r");
+    if (!f) return NULL;
+    char line[512];
+    gchar *result = NULL;
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "slave.pcm");
+        if (p) {
+            /* Find opening quote */
+            char *q = strchr(p, '\"');
+            if (q) {
+                char *q2 = strchr(q+1, '\"');
+                if (q2) {
+                    *q2 = '\0';
+                    result = g_strdup(q+1);
+                    break;
+                }
+            } else {
+                /* No quotes: unsupported form; ignore */
+            }
+        }
+    }
+    fclose(f);
+    return result;
+}
+
+/* Atomically write current_input.conf with pcm.current_input slave.pcm set to pcm_name */
+static int write_current_input(const char *pcm_name) {
+    if (!pcm_name) return -1;
+    /* Ensure directory exists */
+    char *dir = g_path_get_dirname(CURRENT_INPUT_PATH);
+    if (dir && dir[0]) g_mkdir_with_parents(dir, 0755);
+    if (dir) g_free(dir);
+
+    char *tmp = g_strdup_printf("%s.tmp", CURRENT_INPUT_PATH);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { g_free(tmp); return -1; }
+
+    fprintf(f, "pcm.current_input {\n");
+    fprintf(f, "    type plug;\n");
+    fprintf(f, "    slave.pcm \"%s\";\n", pcm_name);
+    fprintf(f, "}\n");
+    fclose(f);
+
+    if (g_rename(tmp, CURRENT_INPUT_PATH) != 0) {
+        g_unlink(tmp);
+        g_free(tmp);
+        return -1;
+    }
+    g_free(tmp);
+    return 0;
+}
+
+typedef struct {
+    GtkWidget *rb_internal;
+    GtkWidget *rb_usb;
+    GtkWidget *rb_hdmi;
+    GtkWidget *rb_bt;
+} DevicesUI_Input;
+
+static void on_device_radio_toggled_input(GtkToggleButton *tb, gpointer user_data) {
+    (void)user_data;
+    if (!gtk_toggle_button_get_active(tb)) return;
+    const char *label = gtk_button_get_label(GTK_BUTTON(tb));
+    if (!label) return;
+
+    const char *pcm = NULL;
+    if (g_strcmp0(label, "Internal") == 0) pcm = "input_card0";
+    else if (g_strcmp0(label, "USB") == 0) pcm = "input_usb";
+    else if (g_strcmp0(label, "HDMI") == 0) pcm = "input_hdmi";
+    else if (g_strcmp0(label, "Bluetooth") == 0) pcm = "input_bt";
+
+    if (!pcm) return;
+
+    if (write_current_input(pcm) != 0) {
+        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "Failed to write %s. Try running the GUI as root or configure /etc/asound.conf.d manually.",
+                                              CURRENT_INPUT_PATH);
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        return;
+    }
+
+    /* Notify user briefly */
+    GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
+    if (parent) {
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                             GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Selected input: %s", label);
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+    }
+}
+
+/* New Input Devices panel. Replace call site in main() to use this function instead of create_devices_panel */
+static void create_devices_panel_input(GtkWidget *main_box) {
+    GtkWidget *dev_expander = gtk_expander_new("Devices (Input Source)");
+    gtk_expander_set_expanded(GTK_EXPANDER(dev_expander), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_box), dev_expander, FALSE, FALSE, 0);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_add(GTK_CONTAINER(dev_expander), vbox);
+
+    /* Radio buttons row */
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), row, FALSE, FALSE, 0);
+
+    DevicesUI_Input *ui = g_new0(DevicesUI_Input, 1);
+
+    ui->rb_internal = gtk_radio_button_new_with_label(NULL, "Internal");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_internal, FALSE, FALSE, 0);
+
+    ui->rb_usb = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "USB");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_usb, FALSE, FALSE, 0);
+
+    ui->rb_hdmi = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "HDMI");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_hdmi, FALSE, FALSE, 0);
+
+    ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
+
+    g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
+    g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
+    g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
+    g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
+
+    /* Set sensitivity based on rough presence heuristics */
+    gtk_widget_set_sensitive(ui->rb_usb, is_usb_present());
+    gtk_widget_set_sensitive(ui->rb_hdmi, is_hdmi_present());
+    gtk_widget_set_sensitive(ui->rb_bt, is_bt_present());
+    gtk_widget_set_sensitive(ui->rb_internal, TRUE); /* always allow internal/card0 */
+
+    /* Initialize selection from current_input.conf */
+    gchar *cur = read_current_input();
+    if (cur) {
+        if (g_strcmp0(cur, "input_usb") == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
+        else if (g_strcmp0(cur, "input_hdmi") == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
+        else if (g_strcmp0(cur, "input_bt") == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
+        else gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
+        g_free(cur);
+    } else {
+        /* No config: default to input_card0 (installer should set this at install time) */
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
+    }
+}
+
+
+/* ---- Devices panel (Internal / USB / HDMI / Bluetooth) ----
+ * Provides runtime JACK routing without restarting jackd by invoking:
+ *   /usr/local/lib/jack-bridge/jack-route-select {internal|usb|hdmi|bluetooth}
+ * The helper persists selection into /etc/jack-bridge/devices.conf
+ */
+static const char *ROUTE_HELPER = "/usr/local/lib/jack-bridge/jack-route-select";
+static const char *DEVCONF_PATH = "/etc/jack-bridge/devices.conf";
+
+static gchar *load_preferred_output(void) {
+    if (!file_exists_readable(DEVCONF_PATH)) return g_strdup("internal");
+    FILE *f = fopen(DEVCONF_PATH, "r");
+    if (!f) return g_strdup("internal");
+    char line[512];
+    gchar *pref = NULL;
+    while (fgets(line, sizeof(line), f)) {
+        if (g_str_has_prefix(line, "PREFERRED_OUTPUT=")) {
+            char *eq = strchr(line, '=');
+            if (eq) {
+                char *val = eq + 1;
+                /* strip quotes/newline/spaces */
+                while (*val == ' ' || *val == '\t' || *val == '\"') val++;
+                char *end = val + strlen(val);
+                while (end > val && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\"')) end--;
+                *end = '\0';
+                pref = g_strdup(val);
+                break;
+            }
+        }
+    }
+    fclose(f);
+    if (!pref || !*pref) {
+        if (pref) g_free(pref);
+        return g_strdup("internal");
+    }
+    return pref;
+}
+
+static void route_to_target_async(const char *target) {
+    if (!target || !*target) return;
+    if (!file_exists_readable(ROUTE_HELPER)) {
+        g_warning("route helper missing: %s", ROUTE_HELPER);
+        return;
+    }
+    gchar *cmd = g_strdup_printf("%s %s", ROUTE_HELPER, target);
+    GError *err = NULL;
+    if (!g_spawn_command_line_async(cmd, &err)) {
+        g_warning("failed to invoke %s: %s", cmd, err ? err->message : "unknown");
+        if (err) g_error_free(err);
+    }
+    g_free(cmd);
+}
+
+typedef struct {
+    GtkWidget *rb_internal;
+    GtkWidget *rb_usb;
+    GtkWidget *rb_hdmi;
+    GtkWidget *rb_bt;
+} DevicesUI;
+
+static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
+    (void)user_data;
+    if (!gtk_toggle_button_get_active(tb)) return;
+    const char *label = gtk_button_get_label(GTK_BUTTON(tb));
+    if (!label) return;
+    /* Map label to target token */
+    const char *target = NULL;
+    if (g_strcmp0(label, "Internal") == 0) target = "internal";
+    else if (g_strcmp0(label, "USB") == 0) target = "usb";
+    else if (g_strcmp0(label, "HDMI") == 0) target = "hdmi";
+    else if (g_strcmp0(label, "Bluetooth") == 0) target = "bluetooth";
+    if (target) route_to_target_async(target);
+}
+
+static void __attribute__((unused)) create_devices_panel(GtkWidget *main_box) {
+    GtkWidget *dev_expander = gtk_expander_new("Devices");
+    gtk_expander_set_expanded(GTK_EXPANDER(dev_expander), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_box), dev_expander, FALSE, FALSE, 0);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_add(GTK_CONTAINER(dev_expander), vbox);
+
+    /* Radio buttons row */
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), row, FALSE, FALSE, 0);
+
+    DevicesUI *ui = g_new0(DevicesUI, 1);
+
+    ui->rb_internal = gtk_radio_button_new_with_label(NULL, "Internal");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_internal, FALSE, FALSE, 0);
+
+    ui->rb_usb = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "USB");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_usb, FALSE, FALSE, 0);
+
+    ui->rb_hdmi = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "HDMI");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_hdmi, FALSE, FALSE, 0);
+
+    ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
+
+    g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+
+    /* Initialize from persisted preference */
+    gchar *pref = load_preferred_output();
+    if (g_strcmp0(pref, "usb") == 0) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
+    } else if (g_strcmp0(pref, "hdmi") == 0) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
+    } else if (g_strcmp0(pref, "bluetooth") == 0) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
+    } else {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
+    }
+    g_free(pref);
+}
+
+
+/* ---- Bluetooth: "Set as input" implementation (writes BlueALSA MAC + switches current_input) ---- */
+
+/* Helper: derive MAC AA:BB:CC:DD:EE:FF from BlueZ object path ".../dev_AA_BB_CC_DD_EE_FF";
+   if input is already a MAC, return a duplicate as-is. Caller must g_free(). */
+static char *mac_from_bluez_object(const char *s) {
+    if (!s) return NULL;
+    if (strchr(s, '/') == NULL) {
+        /* assume already MAC */
+        return g_strdup(s);
+    }
+    const char *last = strrchr(s, '/');
+    if (!last) return NULL;
+    /* Expect "dev_XX_XX_..." */
+    const char *p = last + 1;
+    const char *prefix = "dev_";
+    size_t plen = strlen(prefix);
+    if (strncmp(p, prefix, plen) != 0) {
+        /* Unexpected form; best-effort: take tail and replace '_' with ':' */
+        char *dup = g_strdup(p);
+        for (char *q = dup; *q; ++q) if (*q == '_') *q = ':';
+        return dup;
+    }
+    p += plen;
+    char *mac = g_strdup(p);
+    /* Trim any trailing path junk */
+    for (char *q = mac; *q; ++q) {
+        if (*q == '/') { *q = '\0'; break; }
+    }
+    for (char *q = mac; *q; ++q) if (*q == '_') *q = ':';
+    return mac;
+}
+
+/* Write /etc/asound.conf.d/input_bt.conf to map input_bt -> bluealsa MAC */
+static int write_bt_input_override(const char *mac) {
+    if (!mac || strlen(mac) < 11) return -1;
+    const char *dst = "/etc/asound.conf.d/input_bt.conf";
+
+    /* Ensure parent dir exists */
+    char *dir = g_path_get_dirname(dst);
+    if (dir && dir[0]) g_mkdir_with_parents(dir, 0755);
+    if (dir) g_free(dir);
+
+    char *tmp = g_strdup_printf("%s.tmp", dst);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { g_free(tmp); return -1; }
+
+    /* Minimal, safe-to-override mapping for BlueALSA capture */
+    fprintf(f,
+            "pcm.input_bt_raw {\n"
+            "    type bluealsa\n"
+            "    device \"%s\"\n"
+            "    profile \"a2dp\"\n"
+            "}\n"
+            "\n"
+            "pcm.input_bt {\n"
+            "    type plug\n"
+            "    slave.pcm \"input_bt_raw\"\n"
+            "}\n", mac);
+
+    fclose(f);
+
+    if (g_rename(tmp, dst) != 0) {
+        g_unlink(tmp);
+        g_free(tmp);
+        return -1;
+    }
+    g_free(tmp);
+    return 0;
+}
+
+/* Forward reference (implemented earlier in this file in the Input Source helpers) */
+static int write_current_input(const char *pcm_name);
+
+/* Button handler: set selected Bluetooth device as current input (writes MAC + switches to input_bt) */
+static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
+    (void)user_data;
+    GtkWidget *btnw = GTK_WIDGET(b);
+    GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(btnw), "device_tree"));
+    if (!tv) return;
+
+    /* Get selected object path */
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(tv);
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    if (!gtk_tree_selection_get_selected(sel, &model, &iter)) {
+        GtkWindow *parent = get_parent_window_from_widget(btnw);
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "No device selected");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        return;
+    }
+
+    gchar *obj = NULL;
+    gtk_tree_model_get(model, &iter, 1, &obj, -1);
+    if (!obj) return;
+
+    /* Derive MAC and write overrides */
+    char *mac = mac_from_bluez_object(obj);
+    g_free(obj);
+
+    if (!mac) {
+        GtkWindow *parent = get_parent_window_from_widget(btnw);
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "Failed to derive Bluetooth MAC from selection.");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        return;
+    }
+
+    if (write_bt_input_override(mac) != 0) {
+        GtkWindow *parent = get_parent_window_from_widget(btnw);
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "Could not write /etc/asound.conf.d/input_bt.conf.\n"
+                                              "Try running the GUI as root or create this file manually.");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        g_free(mac);
+        return;
+    }
+
+    /* Switch current_input to input_bt */
+    if (write_current_input("input_bt") != 0) {
+        GtkWindow *parent = get_parent_window_from_widget(btnw);
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+                                              "Wrote Bluetooth input mapping, but failed to set current_input.\n"
+                                              "Set pcm.current_input manually to \"input_bt\".");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        g_free(mac);
+        return;
+    }
+
+    GtkWindow *parent = get_parent_window_from_widget(btnw);
+    GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                          GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                          "Bluetooth input set to %s\n"
+                                          "pcm.current_input -> input_bt", mac);
+    gtk_dialog_run(GTK_DIALOG(d));
+    gtk_widget_destroy(d);
+    g_free(mac);
 }

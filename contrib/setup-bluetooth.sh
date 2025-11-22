@@ -6,11 +6,16 @@
 # Actions:
 # - create system user 'bluealsa' (nologin) if missing
 # - create /var/lib/bluealsa owned by bluealsa:bluealsa mode 0700
-# - ensure /var/log/jack-bluealsa-autobridge.log exists and owned by root (or bluealsa)
 # - install D-Bus policy file if present in repo (usr/share/dbus-1/system.d/org.bluealsa.conf)
-# - add TARGET_USER (or first audio-group user) to 'audio' group
+# - install polkit rule for BlueZ if present (contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules)
+# - add TARGET_USER (or first audio-group user) to 'audio' (and 'bluetooth' if present) groups
 # - create C GUI stub files: src/bt_agent.c, src/gui_bt.c, src/bt_bridge.c if they don't exist
 #
+# Notes:
+# - Autobridge has been removed. Routing is handled via JACK using
+#   /usr/local/lib/jack-bridge/jack-route-select and settings in
+#   /etc/jack-bridge/devices.conf (installed by the main installer).
+# - This script does not manage devices.conf; use contrib/install.sh for that.
 # This is intentionally portable POSIX sh for Debian-like systems without systemd.
 
 set -eu
@@ -44,17 +49,8 @@ chown bluealsa:bluealsa "$BLUEALSA_DIR" >/dev/null 2>&1 || true
 chmod 0700 "$BLUEALSA_DIR" >/dev/null 2>&1 || true
 printf "Ensured %s owned bluealsa:bluealsa mode 0700\n" "$BLUEALSA_DIR"
 
-# Ensure log file exists
-LOG_FILE="/var/log/jack-bluealsa-autobridge.log"
-if [ ! -f "$LOG_FILE" ]; then
-    touch "$LOG_FILE" >/dev/null 2>&1 || true
-fi
-# chown to bluealsa if available, else keep root
-if id bluealsa >/dev/null 2>&1; then
-    chown bluealsa:bluealsa "$LOG_FILE" >/dev/null 2>&1 || true
-fi
-chmod 0644 "$LOG_FILE" >/dev/null 2>&1 || true
-printf "Ensured log %s\n" "$LOG_FILE"
+# Autobridge removed: no log provisioning required.
+printf "Note: autobridge removed; routing via jack-route-select and /etc/jack-bridge/devices.conf\n"
 
 # Install D-Bus policy if provided in repo (best-effort)
 if [ -f "usr/share/dbus-1/system.d/org.bluealsa.conf" ]; then

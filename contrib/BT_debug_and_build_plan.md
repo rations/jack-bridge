@@ -2,15 +2,15 @@
 
 Overview
 --------
-This document explains steps to build the GUI and autobridge, how to reproduce and capture errors for Bluetooth scan failures, and a troubleshooting checklist for services, D‑Bus and polkit.
+This document explains steps to build the GUI and verify Bluetooth behavior, how to reproduce and capture errors for Bluetooth scan failures, and a troubleshooting checklist for services, D‑Bus and polkit. The autobridge component has been removed; routing is handled via JACK with jack-route-select and settings in /etc/jack-bridge/devices.conf.
 
 Files referenced
 --------------
 - [`src/gui_bt.c`](src/gui_bt.c:1)
 - [`src/mxeq.c`](src/mxeq.c:1)
 - [`src/bt_agent.c`](src/bt_agent.c:1)
-- [`src/jack-bluealsa-autobridge.c`](src/jack-bluealsa-autobridge.c:1)
-- [`etc/jack-bridge/bluetooth.conf`](etc/jack-bridge/bluetooth.conf:1)
+- [`contrib/usr/local/lib/jack-bridge/jack-route-select`](contrib/usr/local/lib/jack-bridge/jack-route-select:1)
+- [`/etc/jack-bridge/devices.conf`](etc/jack-bridge/devices.conf:1)
 - [`contrib/install.sh`](contrib/install.sh:1)
 
 Build commands (compile individually)
@@ -19,9 +19,8 @@ Build commands (compile individually)
 
 gcc -Wall -Wextra -o contrib/bin/mxeq src/mxeq.c src/gui_bt.c src/bt_agent.c $(pkg-config --cflags --libs gtk+-3.0 glib-2.0 gio-2.0 alsa)
 
-2) Compile the autobridge daemon:
-
-gcc -Wall -Wextra -std=c11 -o contrib/bin/jack-bluealsa-autobridge src/jack-bluealsa-autobridge.c $(pkg-config --cflags --libs glib-2.0 gio-2.0 alsa)
+2) Runtime routing helper:
+- jack-route-select is a POSIX shell helper installed to /usr/local/lib/jack-bridge/jack-route-select by the installer. It rewires JACK ports and spawns alsa_out for USB/HDMI/Bluetooth as needed, persisting preferences in /etc/jack-bridge/devices.conf.
 
 Notes
 -----
@@ -48,14 +47,16 @@ gdbus call --system --dest org.bluez / org.freedesktop.DBus.ObjectManager.GetMan
 
 and parse the output to find the adapter object path.
 
-Useful runtime logs and files
-----------------------------
-- Autobridge: /var/log/jack-bluealsa-autobridge.log
-- BlueALSA: /var/log/bluealsad.log (if installed)
+Useful runtime files and checks
+-------------------------------
+- BlueALSA log (if configured): /var/log/bluealsad.log
 - BlueZ bluetoothd: /var/log/bluetoothd.log or system syslog
 - D-Bus policy: /usr/share/dbus-1/system.d/org.bluealsa.conf
 - Polkit rule: /etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules
-- Autobridge PID: /var/run/jack-bluealsa-autobridge.pid
+- Device routing config: /etc/jack-bridge/devices.conf (verify BLUETOOTH_DEVICE, BT_PERIOD, BT_NPERIODS, PREFERRED_OUTPUT)
+- Routing helper: /usr/local/lib/jack-bridge/jack-route-select
+- Verify JACK ports after selection:
+  jack_lsp | egrep '^(alsa_pcm:playback_|out_usb:|out_hdmi:|bt_out:)'
 
 Commands to verify services & permissions
 -----------------------------------------
