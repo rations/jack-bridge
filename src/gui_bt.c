@@ -222,16 +222,18 @@ static int ensure_adapter_powered(const char *adapter_path) {
 
     if (powered) return 0;
 
-    /* Set Powered=true */
-    GVariant *value = g_variant_new_variant(g_variant_new_boolean(TRUE));
-    g_message("DBG: ensure_adapter_powered Set Powered=true on %s", adapter_path);
+    /* Set Powered=true
+     * Use a plain boolean variant for the 'v' slot to avoid double-boxing on
+     * some GLib/BlueZ combinations that can cause "invalid signature". */
+    GVariant *params = g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", g_variant_new_boolean(TRUE));
+    g_message("DBG: ensure_adapter_powered Set Powered=true on %s (params type=%s)", adapter_path, g_variant_get_type_string(params));
     res = g_dbus_connection_call_sync(
         gui_system_bus,
         "org.bluez",
         adapter_path,
         "org.freedesktop.DBus.Properties",
         "Set",
-        g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", value),
+        params,
         NULL,
         G_DBUS_CALL_FLAGS_NONE,
         -1,
@@ -492,10 +494,16 @@ int gui_bt_trust_device(const char *device_path_or_mac, int trusted) {
     }
     if (!device_path) return -1;
 
-    /* Build variant container for boolean per Properties.Set 'v' requirement */
-    GVariant *value = g_variant_new_variant(g_variant_new_boolean(trusted ? TRUE : FALSE));
-    GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", value);
-
+    /* Build params: pass boolean directly (GLib will box where required) to avoid
+     * invalid-signature on some systems. */
+    GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", g_variant_new_boolean(trusted ? TRUE : FALSE));
+    /* Debug: print param type & contents for diagnosis */
+    {
+        gchar *dump = g_variant_print(params, TRUE);
+        g_message("DBG: gui_bt_trust_device: params type=%s value=%s", g_variant_get_type_string(params), dump);
+        g_free(dump);
+    }
+ 
     /* Properties.Set must be invoked on the owner of the object (org.bluez).
        Call the org.freedesktop.DBus.Properties Set method on the device object
        with destination "org.bluez". */
@@ -819,10 +827,14 @@ int gui_bt_trust_device_async(const char *device_path_or_mac, gboolean trusted, 
     ctx->device_path = device_path;
     ctx->cb = cb; ctx->ud = ud;
 
-    /* Build variant container for boolean per Properties.Set 'v' requirement */
-    GVariant *value = g_variant_new_variant(g_variant_new_boolean(trusted ? TRUE : FALSE));
-    GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", value);
-
+    /* Build params: pass boolean directly as above */
+    GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", g_variant_new_boolean(trusted ? TRUE : FALSE));
+    {
+        gchar *dump = g_variant_print(params, TRUE);
+        g_message("DBG: gui_bt_trust_device_async: params type=%s value=%s", g_variant_get_type_string(params), dump);
+        g_free(dump);
+    }
+ 
     g_dbus_connection_call(gui_system_bus,
         "org.bluez",
         ctx->device_path,
