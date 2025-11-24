@@ -10,8 +10,12 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-/* Forward declaration for Devices panel (defined later in this file) */
-static void create_devices_panel_input(GtkWidget *main_box);
+/* Forward declaration for Devices panel (Playback switching) */
+static void create_devices_panel(GtkWidget *main_box);
+
+/* Forward declarations needed by earlier callers */
+static int write_string_atomic(const char *path, const char *content);
+static gchar *read_current_input_effective(void);
 
 typedef struct {
     snd_mixer_t *mixer;
@@ -46,6 +50,10 @@ typedef struct {
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_eq_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
+/* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
+static GtkWidget *g_bt_tree = NULL;
+/* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
+static char *mac_from_bluez_object(const char *s);
 
 /* When both expanders are collapsed we want the main window to shrink back to a
    compact height so there is no wasted blank space. This handler watches the
@@ -444,42 +452,72 @@ static void eq_slider_changed(GtkRange *range, EQBand *band) {
 }
 
 static void init_alsa_mixer(MixerData *data) {
-    if (snd_mixer_open(&data->mixer, 0) < 0) {
-        fprintf(stderr, "Failed to open ALSA mixer\n");
-        return;
-    }
-    if (snd_mixer_attach(data->mixer, "default") < 0) {
-        fprintf(stderr, "Failed to attach mixer to default device\n");
-        snd_mixer_close(data->mixer);
-        return;
-    }
-    if (snd_mixer_selem_register(data->mixer, NULL, NULL) < 0) {
-        fprintf(stderr, "Failed to register mixer\n");
-        snd_mixer_close(data->mixer);
-        return;
-    }
-    if (snd_mixer_load(data->mixer) < 0) {
-        fprintf(stderr, "Failed to load mixer\n");
-        snd_mixer_close(data->mixer);
-        return;
-    }
+    /* Try to find a mixer with known channel elements.
+     * Some systems route ALSA default through JACK/equal and do not expose mixer
+     * elements there. In that case try explicit hardware card attachments.
+     */
+    const char *attach_list[] = {
+        "default",
+        "hw:0",
+        "plughw:0",
+        "hw:1",
+        "plughw:1",
+        NULL
+    };
 
     const char *channel_names[] = {"Master", "Speaker", "PCM", "Headphone", "Mic", "Mic Boost", "Beep"};
     int max_channels = G_N_ELEMENTS(channel_names);
     data->channels = g_new(MixerChannel, max_channels);
     data->num_channels = 0;
 
-    for (int i = 0; i < max_channels; i++) {
-        snd_mixer_selem_id_t *sid;
-        snd_mixer_selem_id_alloca(&sid);
-        snd_mixer_selem_id_set_name(sid, channel_names[i]);
-        snd_mixer_elem_t *elem = snd_mixer_find_selem(data->mixer, sid);
-        if (elem) {
-            data->channels[data->num_channels].elem = elem;
-            data->channels[data->num_channels].channel_name = channel_names[i];
-            data->num_channels++;
+    for (const char **a = attach_list; *a != NULL; ++a) {
+        snd_mixer_t *m = NULL;
+        if (snd_mixer_open(&m, 0) < 0) {
+            /* try next attach point */
+            continue;
+        }
+        if (snd_mixer_attach(m, *a) < 0) {
+            snd_mixer_close(m);
+            continue;
+        }
+        if (snd_mixer_selem_register(m, NULL, NULL) < 0) {
+            snd_mixer_close(m);
+            continue;
+        }
+        if (snd_mixer_load(m) < 0) {
+            snd_mixer_close(m);
+            continue;
+        }
+
+        /* Probe for known controls on this mixer instance */
+        int found = 0;
+        for (int i = 0; i < max_channels; i++) {
+            snd_mixer_selem_id_t *sid;
+            snd_mixer_selem_id_alloca(&sid);
+            snd_mixer_selem_id_set_name(sid, channel_names[i]);
+            snd_mixer_elem_t *elem = snd_mixer_find_selem(m, sid);
+            if (elem) {
+                data->channels[found].elem = elem;
+                data->channels[found].channel_name = channel_names[i];
+                found++;
+            }
+        }
+
+        if (found > 0) {
+            /* Accept this mixer as the active mixer */
+            data->mixer = m;
+            data->num_channels = found;
+            return;
+        } else {
+            /* No useful elements on this mixer; close and try next */
+            snd_mixer_close(m);
         }
     }
+
+    /* If we reach here, no usable mixer was found */
+    fprintf(stderr, "init_alsa_mixer: No mixer elements found on default or common hw devices\n");
+    data->num_channels = 0;
+    /* channels array remains allocated but empty; UI will show informative message */
 }
 
 static void init_alsa_eq(EQData *data) {
@@ -618,12 +656,13 @@ static char *resolve_music_dir(void) {
     return fallback;
 }
 
-/* Format default filename like AlsaTune-YYYYmmdd-HHMMSS.wav (newly allocated) */
+/* Format default filename like Alsa Sound Connect-YYYYmmdd-HHMMSS.wav (newly allocated) */
 static char *format_default_filename(void) {
     time_t t = time(NULL);
     struct tm tm = *localtime(&t);
-    char buf[64];
-    strftime(buf, sizeof(buf), "AlsaTune-%Y%m%d-%H%M%S.wav", &tm);
+    char buf[128];
+    /* Use a human-friendly prefix matching the application name */
+    strftime(buf, sizeof(buf), "Alsa Sound Connect-%Y%m%d-%H%M%S.wav", &tm);
     return g_strdup(buf);
 }
 
@@ -716,13 +755,21 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         g_free((gchar*)rate_text);
     }
 
+    /* Prefer per-user 'current_input' device; fallback to ALSA 'default' if not configured */
+    gchar *cur_pcm = read_current_input_effective();
+    const char *input_dev = "default";
+    if (cur_pcm && *cur_pcm) {
+        input_dev = "current_input";
+    }
+    if (cur_pcm) g_free(cur_pcm);
+
     /* Build argv for arecord */
     gchar *channels_s = g_strdup_printf("%d", channels);
     gchar *rate_s = g_strdup_printf("%d", rate);
 
     gchar *argv[] = {
         "arecord",
-        "-D", "current_input",
+        "-D", (gchar*)input_dev,
         "-r", rate_s,
         "-c", channels_s,
         "-f", "S16_LE",
@@ -1041,6 +1088,8 @@ static void create_bt_panel(GtkWidget *main_box) {
     /* Device list model and view */
     GtkListStore *store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING); /* display, object */
     GtkWidget *tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    /* Make BT device list accessible to the Devices (Playback) panel */
+    g_bt_tree = tree;
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("Discovered Devices", renderer, "text", 0, NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(tree), col);
@@ -1059,7 +1108,8 @@ static void create_bt_panel(GtkWidget *main_box) {
     GtkWidget *trust_btn = gtk_button_new_with_label("Trust");
     GtkWidget *connect_btn = gtk_button_new_with_label("Connect");
     GtkWidget *remove_btn = gtk_button_new_with_label("Remove");
-    GtkWidget *set_input_btn = gtk_button_new_with_label("Set as input");
+    /* Use clearer label for playback routing (this routes output to the selected device) */
+    GtkWidget *set_input_btn = gtk_button_new_with_label("Use for output");
     gtk_box_pack_start(GTK_BOX(bt_action_row), pair_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), trust_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
@@ -1154,13 +1204,16 @@ int main(int argc, char *argv[]) {
         g_warning("mxeq: gui_bt_init failed or BlueZ agent not available; continuing without Bluetooth controls");
     }
 
-    // Set the default window icon for all windows
-    gtk_window_set_default_icon_name("audio-speakers");
+    // Set the default application icon (matches desktop entry Icon=alsa-sound-connect)
+    gtk_window_set_default_icon_name("alsa-sound-connect");
 
     MixerData mixer_data = {0};
     EQData eq_data = {0};
     init_alsa_mixer(&mixer_data);
     init_alsa_eq(&eq_data);
+    /* Ensure per-user ALSA override exists so Recorder works without root/system writes */
+    extern void ensure_user_asoundrc_bootstrap(void);
+    ensure_user_asoundrc_bootstrap();
 
     // Create a CSS provider for custom styling
     GtkCssProvider *css_provider = gtk_css_provider_new();
@@ -1181,7 +1234,7 @@ int main(int argc, char *argv[]) {
 
     // Create window
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "AlsaTune");
+    gtk_window_set_title(GTK_WINDOW(window), "Alsa Sound Connect");
     // Make window wider so mixer columns fit comfortably but keep height tight
     gtk_window_set_default_size(GTK_WINDOW(window), 900, 260); // Wider and shorter default to avoid blank area underneath collapsed expanders
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
@@ -1204,42 +1257,60 @@ int main(int argc, char *argv[]) {
     gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 5);
     gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_box);
 
-    // Add sliders for each mixer channel
-    for (int i = 0; i < mixer_data.num_channels; i++) {
-        GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-        gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 5);
+    // Add sliders for each mixer channel (if none found, show an informative message)
+    if (mixer_data.num_channels == 0) {
+        GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        gtk_widget_set_hexpand(no_mixer_box, TRUE);
+        gtk_widget_set_halign(no_mixer_box, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(mixer_box), no_mixer_box, TRUE, TRUE, 5);
 
-        GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
-        gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
+        GtkWidget *no_mixer_label = gtk_label_new(
+            "No mixer controls were detected on the default ALSA device.\n"
+            "Audio may still play, but mixer sliders are unavailable.\n\n"
+            "Possible fixes:\n"
+            "• Ensure the default ALSA device has mixer elements (try 'alsamixer').\n"
+            "• Check that ALSA's default device maps to your hardware (see /proc/asound/cards).\n"
+            "• If using BlueALSA-only profiles, there may be no system mixer to control."
+        );
+        gtk_label_set_justify(GTK_LABEL(no_mixer_label), GTK_JUSTIFY_CENTER);
+        gtk_box_pack_start(GTK_BOX(no_mixer_box), no_mixer_label, TRUE, TRUE, 8);
+    } else {
+        for (int i = 0; i < mixer_data.num_channels; i++) {
+            GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+            gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 5);
 
-        mixer_data.channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
-        gtk_range_set_inverted(GTK_RANGE(mixer_data.channels[i].scale), TRUE);
-        gtk_scale_set_draw_value(GTK_SCALE(mixer_data.channels[i].scale), TRUE);
-        gtk_scale_set_value_pos(GTK_SCALE(mixer_data.channels[i].scale), GTK_POS_BOTTOM);
-        gtk_widget_set_size_request(mixer_data.channels[i].scale, -1, 150);
-        gtk_box_pack_start(GTK_BOX(channel_box), mixer_data.channels[i].scale, TRUE, TRUE, 0);
-        g_signal_connect(mixer_data.channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &mixer_data.channels[i]);
+            GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
+            gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
+            gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
 
-        long min, max, value;
-        snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
-        snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
-        gtk_range_set_value(GTK_RANGE(mixer_data.channels[i].scale), (double)(value - min) / (max - min));
+            mixer_data.channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
+            gtk_range_set_inverted(GTK_RANGE(mixer_data.channels[i].scale), TRUE);
+            gtk_scale_set_draw_value(GTK_SCALE(mixer_data.channels[i].scale), TRUE);
+            gtk_scale_set_value_pos(GTK_SCALE(mixer_data.channels[i].scale), GTK_POS_BOTTOM);
+            gtk_widget_set_size_request(mixer_data.channels[i].scale, -1, 150);
+            gtk_box_pack_start(GTK_BOX(channel_box), mixer_data.channels[i].scale, TRUE, TRUE, 0);
+            g_signal_connect(mixer_data.channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &mixer_data.channels[i]);
 
-        /* Optional per-channel Mute (if the element exposes a playback switch) */
-        mixer_data.channels[i].mute_check = NULL;
-        if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
-            int sw = 1;
-            snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-            GtkWidget *mute = gtk_check_button_new_with_label("Mute");
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
-            gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
-            g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
-            mixer_data.channels[i].mute_check = mute;
+            long min, max, value;
+            snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
+            snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
+            gtk_range_set_value(GTK_RANGE(mixer_data.channels[i].scale), (double)(value - min) / (max - min));
+
+            /* Optional per-channel Mute (if the element exposes a playback switch) */
+            mixer_data.channels[i].mute_check = NULL;
+            if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
+                int sw = 1;
+                snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                GtkWidget *mute = gtk_check_button_new_with_label("Mute");
+                gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
+                gtk_widget_set_margin_top(mute, 4);
+                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
+                gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
+                g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
+                mixer_data.channels[i].mute_check = mute;
+            }
+            /* Removed padding label so the mute button sits directly under the slider */
         }
-
-        GtkWidget *padding = gtk_label_new("");
-        gtk_box_pack_start(GTK_BOX(channel_box), padding, FALSE, FALSE, 5);
     }
 
     // EQ and Recording expander (collapsed by default to minimize vertical footprint)
@@ -1362,8 +1433,8 @@ int main(int argc, char *argv[]) {
     /* Bluetooth panel (collapsible) */
     create_bt_panel(main_box);
  
-    /* Devices panel (Input Source) */
-    create_devices_panel_input(main_box);
+    /* Devices panel (Playback) */
+    create_devices_panel(main_box);
 
     gtk_widget_show_all(window);
     gtk_main();
@@ -1388,15 +1459,21 @@ static gboolean file_exists_readable(const char *path) {
     return TRUE;
 }
 
-/* ---- Input Source selector helpers (pcm.current_input via /etc/asound.conf.d/current_input.conf) ----
- * Always show Internal/USB/HDMI/Bluetooth. Grey-out those not currently present.
- * Mapping:
- *   Internal  -> input_card0
- *   USB       -> input_usb
- *   HDMI      -> input_hdmi
- *   Bluetooth -> input_bt
+/* ---- Input Source selector helpers (user-level override in ~/.asoundrc) ----
+ * We keep system defaults in /etc/asound.conf(.d), but the GUI writes a managed
+ * block in ~/.asoundrc that takes precedence without needing root. The block is
+ * delimited with:
+ *   # BEGIN jack-bridge
+ *   ... (managed content)
+ *   # END jack-bridge
+ * Content written:
+ *   - pcm.current_input -> one of: input_card0, input_usb, input_hdmi, input_bt
+ *   - Optional: pcm.input_bt_raw + pcm.input_bt when a Bluetooth MAC is chosen
  */
-static const char *CURRENT_INPUT_PATH = "/etc/asound.conf.d/current_input.conf";
+static const char *CURRENT_INPUT_PATH = "/etc/asound.conf.d/current_input.conf"; /* still used for fallback read */
+
+static const char *JB_BEGIN = "# BEGIN jack-bridge";
+static const char *JB_END   = "# END jack-bridge";
 
 /* Simple helper to scan a text file for a substring (case-sensitive) */
 static gboolean file_contains_substr(const char *path, const char *needle) {
@@ -1413,7 +1490,6 @@ static gboolean file_contains_substr(const char *path, const char *needle) {
 }
 
 static gboolean is_usb_present(void) {
-    /* Look for "USB" in ALSA cards listing */
     if (file_contains_substr("/proc/asound/cards", "USB")) return TRUE;
     if (file_contains_substr("/proc/asound/cards", "USB Audio")) return TRUE;
     return FALSE;
@@ -1423,17 +1499,15 @@ static gboolean is_hdmi_present(void) {
     return FALSE;
 }
 static gboolean is_bt_present(void) {
-    /* Prefer checking for bluealsa binary or running daemon */
     if (g_file_test("/usr/bin/bluealsa", G_FILE_TEST_IS_REGULAR) ||
         g_file_test("/usr/sbin/bluealsa", G_FILE_TEST_IS_REGULAR)) return TRUE;
-    /* Fallback to checking for running bluealsad */
     int status = 0;
     gboolean ok = g_spawn_command_line_sync("pidof bluealsad", NULL, NULL, &status, NULL);
     if (ok && WIFEXITED(status) && WEXITSTATUS(status) == 0) return TRUE;
     return FALSE;
 }
 
-/* Read current_input.conf and return the slave.pcm target (newly allocated string) or NULL */
+/* System default reader: parse /etc/asound.conf.d/current_input.conf */
 static gchar *read_current_input(void) {
     FILE *f = fopen(CURRENT_INPUT_PATH, "r");
     if (!f) return NULL;
@@ -1442,7 +1516,6 @@ static gchar *read_current_input(void) {
     while (fgets(line, sizeof(line), f)) {
         char *p = strstr(line, "slave.pcm");
         if (p) {
-            /* Find opening quote */
             char *q = strchr(p, '\"');
             if (q) {
                 char *q2 = strchr(q+1, '\"');
@@ -1451,8 +1524,6 @@ static gchar *read_current_input(void) {
                     result = g_strdup(q+1);
                     break;
                 }
-            } else {
-                /* No quotes: unsupported form; ignore */
             }
         }
     }
@@ -1460,25 +1531,99 @@ static gchar *read_current_input(void) {
     return result;
 }
 
-/* Atomically write current_input.conf with pcm.current_input slave.pcm set to pcm_name */
-static int write_current_input(const char *pcm_name) {
-    if (!pcm_name) return -1;
-    /* Ensure directory exists */
-    char *dir = g_path_get_dirname(CURRENT_INPUT_PATH);
-    if (dir && dir[0]) g_mkdir_with_parents(dir, 0755);
-    if (dir) g_free(dir);
+/* Build ~/.asoundrc path */
+static char *user_asoundrc_path(void) {
+    const char *home = g_get_home_dir();
+    return g_build_filename(home, ".asoundrc", NULL);
+}
 
-    char *tmp = g_strdup_printf("%s.tmp", CURRENT_INPUT_PATH);
+/* XDG-style per-user config directory used for current_input fragment */
+static char *user_config_dir(void) {
+    const char *home = g_get_home_dir();
+    return g_build_filename(home, ".config", "jack-bridge", NULL);
+}
+
+/* Full path to per-user current_input.conf fragment */
+static char *user_current_input_conf_path(void) {
+    char *dir = user_config_dir();
+    char *path = g_build_filename(dir, "current_input.conf", NULL);
+    g_free(dir);
+    return path;
+}
+
+/* Compose the content of ~/.config/jack-bridge/current_input.conf
+ * Mirrors the format of /etc/asound.conf.d/current_input.conf and embeds
+ * Bluetooth input definitions when bt_mac_opt is provided. */
+static char *compose_user_current_input_conf(const char *pcm_current, const char *bt_mac_opt) {
+    GString *s = g_string_new("");
+    if (bt_mac_opt && *bt_mac_opt) {
+        g_string_append_printf(s,
+            "pcm.input_bt_raw {\n"
+            "    type bluealsa\n"
+            "    device \"%s\"\n"
+            "    profile \"a2dp\"\n"
+            "}\n"
+            "\n"
+            "pcm.input_bt {\n"
+            "    type plug\n"
+            "    slave.pcm \"input_bt_raw\"\n"
+            "}\n"
+            "\n", bt_mac_opt);
+    }
+    g_string_append_printf(s,
+        "pcm.current_input {\n"
+        "    type plug\n"
+        "    slave.pcm \"%s\"\n"
+        "}\n", pcm_current ? pcm_current : "input_card0");
+    return g_string_free(s, FALSE);
+}
+
+/* Write ~/.config/jack-bridge/current_input.conf atomically */
+static int write_user_current_input_conf(const char *pcm_current, const char *bt_mac_opt) {
+    char *dir = user_config_dir();
+    if (g_mkdir_with_parents(dir, 0755) != 0) {
+        g_free(dir);
+        return -1;
+    }
+    char *path = user_current_input_conf_path();
+    char *content = compose_user_current_input_conf(pcm_current, bt_mac_opt);
+    int rc = write_string_atomic(path, content);
+    g_free(content);
+    g_free(path);
+    g_free(dir);
+    return rc;
+}
+
+/* Load whole file into memory (NULL if not exists/empty) */
+static char *load_file_to_string(const char *path) {
+    if (!path) return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    char *buf = g_malloc(sz + 1);
+    size_t rd = fread(buf, 1, sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+    return buf;
+}
+
+/* Atomic write: path.tmp then rename */
+static int write_string_atomic(const char *path, const char *content) {
+    if (!path || !content) return -1;
+    char *tmp = g_strdup_printf("%s.tmp", path);
     FILE *f = fopen(tmp, "w");
     if (!f) { g_free(tmp); return -1; }
-
-    fprintf(f, "pcm.current_input {\n");
-    fprintf(f, "    type plug;\n");
-    fprintf(f, "    slave.pcm \"%s\";\n", pcm_name);
-    fprintf(f, "}\n");
+    if (fputs(content, f) == EOF) {
+        fclose(f);
+        g_unlink(tmp);
+        g_free(tmp);
+        return -1;
+    }
     fclose(f);
-
-    if (g_rename(tmp, CURRENT_INPUT_PATH) != 0) {
+    if (g_rename(tmp, path) != 0) {
         g_unlink(tmp);
         g_free(tmp);
         return -1;
@@ -1487,98 +1632,125 @@ static int write_current_input(const char *pcm_name) {
     return 0;
 }
 
-typedef struct {
-    GtkWidget *rb_internal;
-    GtkWidget *rb_usb;
-    GtkWidget *rb_hdmi;
-    GtkWidget *rb_bt;
-} DevicesUI_Input;
-
-static void on_device_radio_toggled_input(GtkToggleButton *tb, gpointer user_data) {
-    (void)user_data;
-    if (!gtk_toggle_button_get_active(tb)) return;
-    const char *label = gtk_button_get_label(GTK_BUTTON(tb));
-    if (!label) return;
-
-    const char *pcm = NULL;
-    if (g_strcmp0(label, "Internal") == 0) pcm = "input_card0";
-    else if (g_strcmp0(label, "USB") == 0) pcm = "input_usb";
-    else if (g_strcmp0(label, "HDMI") == 0) pcm = "input_hdmi";
-    else if (g_strcmp0(label, "Bluetooth") == 0) pcm = "input_bt";
-
-    if (!pcm) return;
-
-    if (write_current_input(pcm) != 0) {
-        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Failed to write %s. Try running the GUI as root or configure /etc/asound.conf.d manually.",
-                                              CURRENT_INPUT_PATH);
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
-        return;
-    }
-
-    /* Notify user briefly */
-    GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
-    if (parent) {
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
-                                             GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Selected input: %s", label);
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
-    }
+/* Strip existing managed block from content (if present). Returns newly allocated content. */
+static char *strip_managed_block(const char *src) {
+    if (!src) return g_strdup("");
+    const char *begin = strstr(src, JB_BEGIN);
+    if (!begin) return g_strdup(src);
+    const char *end = strstr(begin, JB_END);
+    if (!end) return g_strdup(src); /* malformed; leave as-is */
+    end += strlen(JB_END);
+    /* Include trailing newline after END if present */
+    while (*end == '\r' || *end == '\n') end++;
+    GString *out = g_string_new_len(src, (gssize)(begin - src));
+    /* Trim trailing blank lines in prefix */
+    while (out->len > 0 && (out->str[out->len - 1] == '\n' || out->str[out->len - 1] == '\r'))
+        g_string_truncate(out, out->len - 1);
+    g_string_append_c(out, '\n');
+    return g_string_free(out, FALSE);
 }
 
-/* New Input Devices panel. Replace call site in main() to use this function instead of create_devices_panel */
-static void create_devices_panel_input(GtkWidget *main_box) {
-    GtkWidget *dev_expander = gtk_expander_new("Devices (Input Source)");
-    gtk_expander_set_expanded(GTK_EXPANDER(dev_expander), FALSE);
-    gtk_box_pack_start(GTK_BOX(main_box), dev_expander, FALSE, FALSE, 0);
-
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_container_add(GTK_CONTAINER(dev_expander), vbox);
-
-    /* Radio buttons row */
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_box_pack_start(GTK_BOX(vbox), row, FALSE, FALSE, 0);
-
-    DevicesUI_Input *ui = g_new0(DevicesUI_Input, 1);
-
-    ui->rb_internal = gtk_radio_button_new_with_label(NULL, "Internal");
-    gtk_box_pack_start(GTK_BOX(row), ui->rb_internal, FALSE, FALSE, 0);
-
-    ui->rb_usb = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "USB");
-    gtk_box_pack_start(GTK_BOX(row), ui->rb_usb, FALSE, FALSE, 0);
-
-    ui->rb_hdmi = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "HDMI");
-    gtk_box_pack_start(GTK_BOX(row), ui->rb_hdmi, FALSE, FALSE, 0);
-
-    ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
-    gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
-
-    g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
-    g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
-    g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
-    g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled_input), NULL);
-
-    /* Set sensitivity based on rough presence heuristics */
-    gtk_widget_set_sensitive(ui->rb_usb, is_usb_present());
-    gtk_widget_set_sensitive(ui->rb_hdmi, is_hdmi_present());
-    gtk_widget_set_sensitive(ui->rb_bt, is_bt_present());
-    gtk_widget_set_sensitive(ui->rb_internal, TRUE); /* always allow internal/card0 */
-
-    /* Initialize selection from current_input.conf */
-    gchar *cur = read_current_input();
-    if (cur) {
-        if (g_strcmp0(cur, "input_usb") == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
-        else if (g_strcmp0(cur, "input_hdmi") == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
-        else if (g_strcmp0(cur, "input_bt") == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
-        else gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
-        g_free(cur);
-    } else {
-        /* No config: default to input_card0 (installer should set this at install time) */
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
-    }
+/* Compose managed block for ~/.asoundrc (include-only pointing at per-user fragment) */
+static char *compose_managed_block(const char *pcm_current, const char *bt_mac_opt) {
+    /* Compose a unified managed block that includes both the per-user
+     * current_input and current_output fragments. This ensures ~/.asoundrc
+     * consistently points to both user-managed fragments so both recording
+     * and playback overrides take effect for non-JACK ALSA apps.
+     */
+    (void)pcm_current;
+    (void)bt_mac_opt;
+    char *dir = user_config_dir();
+    char *in_path = g_build_filename(dir, "current_input.conf", NULL);
+    char *out_path = g_build_filename(dir, "current_output.conf", NULL);
+    GString *s = g_string_new("");
+    g_string_append_printf(s, "%s\n", JB_BEGIN);
+    g_string_append(s, "# Managed by jack-bridge GUI — do not edit between markers.\n");
+    g_string_append_printf(s, "include \"%s\"\n", in_path);
+    g_string_append_printf(s, "include \"%s\"\n", out_path);
+    g_string_append_printf(s, "%s\n", JB_END);
+    g_free(in_path);
+    g_free(out_path);
+    g_free(dir);
+    return g_string_free(s, FALSE);
 }
+
+/* Write per-user current_input fragment and ensure ~/.asoundrc includes it; preserves user content outside the block */
+static int write_user_asoundrc_block(const char *pcm_current, const char *bt_mac_opt) {
+    /* First write the per-user fragment that mirrors /etc/asound.conf.d/current_input.conf */
+    if (write_user_current_input_conf(pcm_current, bt_mac_opt) != 0) {
+        return -1;
+    }
+
+    /* Then ensure ~/.asoundrc has our include block */
+    char *path = user_asoundrc_path();
+    char *orig = load_file_to_string(path);
+    char *prefix = strip_managed_block(orig ? orig : "");
+    char *block = compose_managed_block(pcm_current, bt_mac_opt);
+    GString *final = g_string_new(prefix);
+    if (final->len > 0 && final->str[final->len - 1] != '\n') g_string_append_c(final, '\n');
+    g_string_append(final, "\n");
+    g_string_append(final, block);
+    g_string_append(final, "\n");
+    int rc = write_string_atomic(path, final->str);
+    g_string_free(final, TRUE);
+    if (orig) g_free(orig);
+    g_free(prefix);
+    g_free(block);
+    g_free(path);
+    return rc;
+}
+
+/* Read pcm.current_input from per-user fragment (~/.config/jack-bridge/current_input.conf), or NULL if not present */
+static gchar *read_user_current_input(void) {
+    char *path = user_current_input_conf_path();
+    FILE *f = fopen(path, "r");
+    if (!f) { g_free(path); return NULL; }
+    char line[512];
+    gchar *result = NULL;
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "slave.pcm");
+        if (p) {
+            char *q = strchr(p, '\"');
+            if (q) {
+                char *q2 = strchr(q + 1, '\"');
+                if (q2) {
+                    *q2 = '\0';
+                    result = g_strdup(q + 1);
+                    break;
+                }
+            }
+        }
+    }
+    fclose(f);
+    g_free(path);
+    return result;
+}
+
+/* Effective reader: prefer user override, fallback to system default */
+static gchar *read_current_input_effective(void) {
+    gchar *u = read_user_current_input();
+    if (u && *u) return u;
+    return read_current_input();
+}
+
+/* Bootstrap: ensure include exists and per-user fragment mirrors system default so apps can record immediately */
+void ensure_user_asoundrc_bootstrap(void) {
+    gchar *u = read_user_current_input();
+    if (u) { g_free(u); return; }
+    gchar *sys = read_current_input();
+    const char *initial = sys ? sys : "input_card0";
+    /* Write per-user fragment and include block */
+    write_user_asoundrc_block(initial, NULL);
+    if (sys) g_free(sys);
+}
+
+
+
+
+/* Input Devices panel removed in favor of the new Playback "Devices" panel.
+ * Keep a small unused stub to avoid build warnings/errors on systems that
+ * reference this symbol in older branches.
+ */
 
 
 /* ---- Devices panel (Internal / USB / HDMI / Bluetooth) ----
@@ -1587,50 +1759,69 @@ static void create_devices_panel_input(GtkWidget *main_box) {
  * The helper persists selection into /etc/jack-bridge/devices.conf
  */
 static const char *ROUTE_HELPER = "/usr/local/lib/jack-bridge/jack-route-select";
-static const char *DEVCONF_PATH = "/etc/jack-bridge/devices.conf";
+static const char *DEVCONF_PATH = "/etc/jack-bridge/devices.conf"; /* system-wide default (user override checked in loader) */
 
 static gchar *load_preferred_output(void) {
-    if (!file_exists_readable(DEVCONF_PATH)) return g_strdup("internal");
-    FILE *f = fopen(DEVCONF_PATH, "r");
-    if (!f) return g_strdup("internal");
-    char line[512];
-    gchar *pref = NULL;
-    while (fgets(line, sizeof(line), f)) {
-        if (g_str_has_prefix(line, "PREFERRED_OUTPUT=")) {
-            char *eq = strchr(line, '=');
-            if (eq) {
-                char *val = eq + 1;
-                /* strip quotes/newline/spaces */
-                while (*val == ' ' || *val == '\t' || *val == '\"') val++;
-                char *end = val + strlen(val);
-                while (end > val && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\"')) end--;
-                *end = '\0';
-                pref = g_strdup(val);
-                break;
+    /* Prefer per-user config (~/.config/jack-bridge/devices.conf), fallback to system DEVCONF_PATH */
+    gchar *user_conf = NULL;
+    {
+        const char *home = g_get_home_dir();
+        if (home) user_conf = g_build_filename(home, ".config", "jack-bridge", "devices.conf", NULL);
+    }
+    const char *paths[3];
+    int pi = 0;
+    if (user_conf) paths[pi++] = user_conf;
+    paths[pi++] = DEVCONF_PATH;
+    paths[pi] = NULL;
+
+    for (int i = 0; paths[i]; i++) {
+        const char *p = paths[i];
+        if (!file_exists_readable(p)) continue;
+        FILE *f = fopen(p, "r");
+        if (!f) continue;
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            if (g_str_has_prefix(line, "PREFERRED_OUTPUT=")) {
+                char *eq = strchr(line, '=');
+                if (eq) {
+                    char *val = eq + 1;
+                    while (*val == ' ' || *val == '\t' || *val == '\"') val++;
+                    char *end = val + strlen(val);
+                    while (end > val && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\"')) end--;
+                    *end = '\0';
+                    gchar *out = g_strdup(val && *val ? val : "internal");
+                    fclose(f);
+                    if (user_conf) g_free(user_conf);
+                    return out;
+                }
             }
         }
+        fclose(f);
     }
-    fclose(f);
-    if (!pref || !*pref) {
-        if (pref) g_free(pref);
-        return g_strdup("internal");
-    }
-    return pref;
+    if (user_conf) g_free(user_conf);
+    return g_strdup("internal");
 }
 
-static void route_to_target_async(const char *target) {
-    if (!target || !*target) return;
+static gboolean route_to_target_async_with_arg(const char *target, const char *opt_arg) {
+    if (!target || !*target) return FALSE;
     if (!file_exists_readable(ROUTE_HELPER)) {
         g_warning("route helper missing: %s", ROUTE_HELPER);
-        return;
+        return FALSE;
     }
-    gchar *cmd = g_strdup_printf("%s %s", ROUTE_HELPER, target);
+    gchar *cmd = NULL;
+    if (opt_arg && *opt_arg) cmd = g_strdup_printf("%s %s %s", ROUTE_HELPER, target, opt_arg);
+    else cmd = g_strdup_printf("%s %s", ROUTE_HELPER, target);
     GError *err = NULL;
-    if (!g_spawn_command_line_async(cmd, &err)) {
+    gboolean ok = g_spawn_command_line_async(cmd, &err);
+    if (!ok) {
         g_warning("failed to invoke %s: %s", cmd, err ? err->message : "unknown");
         if (err) g_error_free(err);
     }
     g_free(cmd);
+    return ok;
+}
+static gboolean route_to_target_async(const char *target) {
+    return route_to_target_async_with_arg(target, NULL);
 }
 
 typedef struct {
@@ -1645,16 +1836,41 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     if (!gtk_toggle_button_get_active(tb)) return;
     const char *label = gtk_button_get_label(GTK_BUTTON(tb));
     if (!label) return;
-    /* Map label to target token */
-    const char *target = NULL;
-    if (g_strcmp0(label, "Internal") == 0) target = "internal";
-    else if (g_strcmp0(label, "USB") == 0) target = "usb";
-    else if (g_strcmp0(label, "HDMI") == 0) target = "hdmi";
-    else if (g_strcmp0(label, "Bluetooth") == 0) target = "bluetooth";
-    if (target) route_to_target_async(target);
+
+    gboolean ok = TRUE;
+
+    if (g_strcmp0(label, "Internal") == 0) {
+        ok = route_to_target_async("internal");
+    } else if (g_strcmp0(label, "USB") == 0) {
+        ok = route_to_target_async("usb");
+    } else if (g_strcmp0(label, "HDMI") == 0) {
+        ok = route_to_target_async("hdmi");
+    } else if (g_strcmp0(label, "Bluetooth") == 0) {
+        /* If a Bluetooth device is selected in the BT panel, pass its MAC to the helper */
+        char *obj = NULL;
+        char *mac = NULL;
+        if (g_bt_tree && GTK_IS_TREE_VIEW(g_bt_tree)) {
+            obj = (char*)tree_get_selected_obj(GTK_TREE_VIEW(g_bt_tree)); /* returns newly-allocated or NULL */
+            if (obj) mac = mac_from_bluez_object(obj);
+        }
+        ok = route_to_target_async_with_arg("bluetooth", mac);
+        if (mac) g_free(mac);
+        if (obj) g_free(obj);
+    } else {
+        return;
+    }
+
+    if (!ok) {
+        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "Routing helper is missing or failed.\nExpected at: %s\nRun install.sh or copy the helper to that path.",
+                                              ROUTE_HELPER);
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+    }
 }
 
-static void __attribute__((unused)) create_devices_panel(GtkWidget *main_box) {
+static void create_devices_panel(GtkWidget *main_box) {
     GtkWidget *dev_expander = gtk_expander_new("Devices");
     gtk_expander_set_expanded(GTK_EXPANDER(dev_expander), FALSE);
     gtk_box_pack_start(GTK_BOX(main_box), dev_expander, FALSE, FALSE, 0);
@@ -1680,18 +1896,28 @@ static void __attribute__((unused)) create_devices_panel(GtkWidget *main_box) {
     ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
     gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
 
+    /* Presence-based sensitivity (no hardcoding) */
+    gtk_widget_set_sensitive(ui->rb_internal, TRUE);
+    gtk_widget_set_sensitive(ui->rb_usb, is_usb_present());
+    gtk_widget_set_sensitive(ui->rb_hdmi, is_hdmi_present());
+    gtk_widget_set_sensitive(ui->rb_bt, is_bt_present());
+
     g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
 
-    /* Initialize from persisted preference */
+    /* Initialize from persisted preference, but fall back if device not present */
     gchar *pref = load_preferred_output();
-    if (g_strcmp0(pref, "usb") == 0) {
+    gboolean have_usb = gtk_widget_get_sensitive(ui->rb_usb);
+    gboolean have_hdmi = gtk_widget_get_sensitive(ui->rb_hdmi);
+    gboolean have_bt = gtk_widget_get_sensitive(ui->rb_bt);
+
+    if (g_strcmp0(pref, "usb") == 0 && have_usb) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
-    } else if (g_strcmp0(pref, "hdmi") == 0) {
+    } else if (g_strcmp0(pref, "hdmi") == 0 && have_hdmi) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
-    } else if (g_strcmp0(pref, "bluetooth") == 0) {
+    } else if (g_strcmp0(pref, "bluetooth") == 0 && have_bt) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
     } else {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
@@ -1732,8 +1958,8 @@ static char *mac_from_bluez_object(const char *s) {
     return mac;
 }
 
-/* Write /etc/asound.conf.d/input_bt.conf to map input_bt -> bluealsa MAC */
-static int write_bt_input_override(const char *mac) {
+/* Write /etc/asound.conf.d/input_bt.conf to map input_bt -> bluealsa MAC (unused with per-user override) */
+static int __attribute__((unused)) write_bt_input_override(const char *mac) {
     if (!mac || strlen(mac) < 11) return -1;
     const char *dst = "/etc/asound.conf.d/input_bt.conf";
 
@@ -1770,8 +1996,6 @@ static int write_bt_input_override(const char *mac) {
     return 0;
 }
 
-/* Forward reference (implemented earlier in this file in the Input Source helpers) */
-static int write_current_input(const char *pcm_name);
 
 /* Button handler: set selected Bluetooth device as current input (writes MAC + switches to input_bt) */
 static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
@@ -1810,23 +2034,12 @@ static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
         return;
     }
 
-    if (write_bt_input_override(mac) != 0) {
+    /* Per-user override: write managed block with BT MAC and set current_input to input_bt */
+    if (write_user_asoundrc_block("input_bt", mac) != 0) {
         GtkWindow *parent = get_parent_window_from_widget(btnw);
         GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Could not write /etc/asound.conf.d/input_bt.conf.\n"
-                                              "Try running the GUI as root or create this file manually.");
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
-        g_free(mac);
-        return;
-    }
-
-    /* Switch current_input to input_bt */
-    if (write_current_input("input_bt") != 0) {
-        GtkWindow *parent = get_parent_window_from_widget(btnw);
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
-                                              "Wrote Bluetooth input mapping, but failed to set current_input.\n"
-                                              "Set pcm.current_input manually to \"input_bt\".");
+                                              "Failed to update your ALSA configuration at ~/.asoundrc.\n"
+                                              "Please verify your home directory is writable.");
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
         g_free(mac);
@@ -1837,7 +2050,7 @@ static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
     GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
                                           GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
                                           "Bluetooth input set to %s\n"
-                                          "pcm.current_input -> input_bt", mac);
+                                          "Saved to ~/.config/jack-bridge/current_input.conf (pcm.current_input -> input_bt)", mac);
     gtk_dialog_run(GTK_DIALOG(d));
     gtk_widget_destroy(d);
     g_free(mac);

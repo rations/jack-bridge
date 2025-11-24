@@ -20,7 +20,7 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1"
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick"
 
 echo "Installing jack-bridge contrib files"
 
@@ -50,20 +50,18 @@ done
 # Install /etc/asound.conf template
 ASOUND_DST="${ETC_DIR}/asound.conf"
 mkdir -p "$(dirname "$ASOUND_DST")"
-# Force copy the updated template (overwrite)
-cp -f contrib/etc/asound.conf "$ASOUND_DST" || true
-echo "Installed (or replaced) $ASOUND_DST"
+# Force install the updated template (overwrite)
+install -m 0644 contrib/etc/asound.conf "$ASOUND_DST"
+echo "Installed (replaced) $ASOUND_DST"
 
 # Install init script
 mkdir -p "$INIT_DIR"
-cp -p contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
-chmod 755 "${INIT_DIR}/jackd-rt"
+install -m 0755 contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
 echo "Installed init script to ${INIT_DIR}/jackd-rt"
 
 # Install defaults file
 mkdir -p "$DEFAULTS_DIR"
-cp -p contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
-chmod 644 "${DEFAULTS_DIR}/jackd-rt"
+install -m 0644 contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
 echo "Installed defaults to ${DEFAULTS_DIR}/jackd-rt"
 
 # Ensure JACK_NO_AUDIO_RESERVATION is set in /etc/default/jackd-rt to allow service startup
@@ -79,22 +77,27 @@ if [ -f "$DEFAULT_FILE" ]; then
     fi
 fi
 
-# Install helper scripts
+# Install helper scripts (force overwrite)
 mkdir -p "$USR_LIB_DIR"
-cp -p contrib/usr/lib/jack-bridge/detect-alsa-device.sh "${USR_LIB_DIR}/detect-alsa-device.sh"
-chmod 755 "${USR_LIB_DIR}/detect-alsa-device.sh"
+install -m 0755 contrib/usr/lib/jack-bridge/detect-alsa-device.sh "${USR_LIB_DIR}/detect-alsa-device.sh"
 echo "Installed helper detect script to ${USR_LIB_DIR}/detect-alsa-device.sh"
 
-# Install autoconnect and watchdog helpers (from contrib; idempotent)
+# Install routing helper used by the GUI Devices panel (runtime JACK routing)
+if [ -f "contrib/usr/local/lib/jack-bridge/jack-route-select" ]; then
+    install -m 0755 contrib/usr/local/lib/jack-bridge/jack-route-select "${USR_LIB_DIR}/jack-route-select"
+    echo "Installed routing helper to ${USR_LIB_DIR}/jack-route-select"
+else
+    echo "Warning: routing helper not found at contrib/usr/local/lib/jack-bridge/jack-route-select; Devices panel may not route."
+fi
+
+# Install autoconnect and watchdog helpers (from contrib; force overwrite)
 if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
-    cp -p contrib/usr/lib/jack-bridge/jack-autoconnect "${USR_LIB_DIR}/jack-autoconnect"
-    chmod 755 "${USR_LIB_DIR}/jack-autoconnect"
+    install -m 0755 contrib/usr/lib/jack-bridge/jack-autoconnect "${USR_LIB_DIR}/jack-autoconnect"
     echo "Installed jack-autoconnect to ${USR_LIB_DIR}/jack-autoconnect"
 fi
 
 if [ -f "contrib/usr/lib/jack-bridge/jack-watchdog" ]; then
-    cp -p contrib/usr/lib/jack-bridge/jack-watchdog "${USR_LIB_DIR}/jack-watchdog"
-    chmod 755 "${USR_LIB_DIR}/jack-watchdog"
+    install -m 0755 contrib/usr/lib/jack-bridge/jack-watchdog "${USR_LIB_DIR}/jack-watchdog"
     echo "Installed jack-watchdog to ${USR_LIB_DIR}/jack-watchdog"
 fi
 
@@ -110,23 +113,65 @@ EOF
 chmod 644 "${ASOUND_D_DIR}/current_input.conf"
 echo "Installed default ${ASOUND_D_DIR}/current_input.conf (pcm.current_input -> input_card0)"
 
-# Install bundled AlsaTune GUI from repo contrib/ paths
+# Install bundled Alsa Sound Connect GUI from repo contrib/ paths
 # The mxeq binary and desktop file are expected to be committed into the repo at:
 #   contrib/bin/mxeq
 #   contrib/mxeq.desktop
 # This makes the installer self-contained for end users.
 if [ -f "contrib/bin/mxeq" ]; then
-    echo "Installing bundled AlsaTune GUI to /usr/local/bin and desktop entries..."
+    echo "Installing bundled Alsa Sound Connect GUI to /usr/local/bin and desktop entries..."
     mkdir -p /usr/local/bin
     install -m 0755 contrib/bin/mxeq /usr/local/bin/mxeq || true
+
+    # Install desktop entry, but ensure Icon is set to alsa-sound-connect so it matches the installed icon.
     if [ -f "contrib/mxeq.desktop" ]; then
         mkdir -p /usr/share/applications
-        install -m 0644 contrib/mxeq.desktop /usr/share/applications/mxeq.desktop || true
+        TMPDESK="$(mktemp /tmp/mxeq.desktop.XXXXXX)"
+        sed 's/^Icon=.*$/Icon=alsa-sound-connect/' contrib/mxeq.desktop > "$TMPDESK" || cp -f contrib/mxeq.desktop "$TMPDESK"
+        install -m 0644 "$TMPDESK" /usr/share/applications/mxeq.desktop || true
+        rm -f "$TMPDESK" || true
     fi
-    echo "Installed AlsaTune (mxeq) launcher."
+
+    # Install PNG icon to hicolor scalable apps and update icon cache
+    ICON_SRC_PNG="contrib/usr/share/icons/hicolor/scalable/apps/alsasoundconnectlogo.png"
+    ICON_DST_DIR="/usr/share/icons/hicolor/scalable/apps"
+    mkdir -p "$ICON_DST_DIR"
+    if [ -f "$ICON_SRC_PNG" ]; then
+        # Install as alsa-sound-connect.png so the desktop entry Icon=alsa-sound-connect resolves
+        install -m 0644 "$ICON_SRC_PNG" "${ICON_DST_DIR}/alsa-sound-connect.png" || true
+        echo "Installed icon: ${ICON_DST_DIR}/alsa-sound-connect.png"
+
+        # Generate PNG fallbacks at common sizes for DE compatibility
+        for SZ in 16 32 48 128; do
+            DST_DIR="/usr/share/icons/hicolor/${SZ}x${SZ}/apps"
+            mkdir -p "$DST_DIR"
+            if command -v convert >/dev/null 2>&1; then
+                # Best-effort resize; if convert fails, copy original
+                convert "$ICON_SRC_PNG" -resize "${SZ}x${SZ}" "${DST_DIR}/alsa-sound-connect.png" >/dev/null 2>&1 \
+                  || cp -f "$ICON_SRC_PNG" "${DST_DIR}/alsa-sound-connect.png"
+            else
+                # Fallback: copy original PNG (may be larger than target size)
+                cp -f "$ICON_SRC_PNG" "${DST_DIR}/alsa-sound-connect.png" || true
+            fi
+            echo "Installed icon fallback: ${DST_DIR}/alsa-sound-connect.png"
+        done
+    else
+        echo "Warning: No bundled PNG icon found at $ICON_SRC_PNG; skipping icon install."
+    fi
+
+    # Refresh icon cache (best-effort)
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    fi
+    # Refresh desktop database so menus pick up new .desktop files (best-effort)
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    fi
+
+    echo "Installed Alsa Sound Connect (mxeq) launcher and icons."
 
 else
-    echo "No bundled AlsaTune found in contrib/; skipping GUI installation."
+    echo "No bundled Alsa Sound Connect found in contrib/; skipping GUI installation."
 fi
 
 # Install apulse wrappers (always; do not remove)
@@ -152,36 +197,6 @@ echo "Installed apulse-chromium to ${BIN_DIR}/apulse-chromium"
 # Create .desktop launcher overrides so desktop environments launch apulse-wrapped browsers
 DESKTOP_DIR="/usr/share/applications"
 mkdir -p "$DESKTOP_DIR"
-
-# Firefox desktop wrapper (non-destructive: only write if not present or if --force later)
-FIREFOX_DESKTOP="${DESKTOP_DIR}/apulse-firefox.desktop"
-cat > "$FIREFOX_DESKTOP" <<'EOF'
-[Desktop Entry]
-Name=Firefox (apulse)
-Comment=Run Firefox under apulse so web audio routes to ALSA->JACK
-Exec=/usr/bin/apulse-firefox %u
-Terminal=false
-Type=Application
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
-EOF
-chmod 644 "$FIREFOX_DESKTOP"
-echo "Installed desktop launcher $FIREFOX_DESKTOP"
-
-# Chromium desktop wrapper
-CHROMIUM_DESKTOP="${DESKTOP_DIR}/apulse-chromium.desktop"
-cat > "$CHROMIUM_DESKTOP" <<'EOF'
-[Desktop Entry]
-Name=Chromium (apulse)
-Comment=Run Chromium under apulse so web audio routes to ALSA->JACK
-Exec=/usr/bin/apulse-chromium %U
-Terminal=false
-Type=Application
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
-EOF
-chmod 644 "$CHROMIUM_DESKTOP"
-echo "Installed desktop launcher $CHROMIUM_DESKTOP"
 
 # Install realtime limits template (force-install; overwrite without backup)
 LIMITS_DST="${ETC_DIR}/security/limits.d/audio.conf"
@@ -343,14 +358,13 @@ fi
 # Leave distro bluetoothd service untouched; no installer-managed init for bluetoothd
 echo "Leaving distro bluetoothd service as-is (no custom init script installed or modified)."
 
-# Optionally install bluealsad init script and defaults if provided in contrib
+# Install bluealsad init script and defaults if provided in contrib (force overwrite)
 if [ -f "contrib/init.d/bluealsad" ]; then
-    echo "Installing contrib init script for bluealsad (optional)..."
-    cp -p contrib/init.d/bluealsad "${INIT_DIR}/bluealsad"
-    chmod 755 "${INIT_DIR}/bluealsad"
+    echo "Installing contrib init script for bluealsad..."
+    install -m 0755 contrib/init.d/bluealsad "${INIT_DIR}/bluealsad"
     # Install defaults file if provided
     if [ -f "contrib/default/bluealsad" ]; then
-        install -m 0644 contrib/default/bluealsad "${DEFAULTS_DIR}/bluealsad" || true
+        install -m 0644 contrib/default/bluealsad "${DEFAULTS_DIR}/bluealsad"
         echo "Installed defaults to ${DEFAULTS_DIR}/bluealsad"
     fi
 
@@ -503,6 +517,34 @@ PREFERRED_OUTPUT="internal"
 DEVCONF
 chmod 0644 /etc/jack-bridge/devices.conf
 echo "Installed (replaced) /etc/jack-bridge/devices.conf"
+
+# Seed per-user defaults so the GUI (non-root) has an override file on first run (non-destructive)
+SKEL_DIR="/etc/skel/.config/jack-bridge"
+mkdir -p "$SKEL_DIR"
+cat > "$SKEL_DIR/devices.conf" <<'UCONF'
+# ~/.config/jack-bridge/devices.conf (user override)
+# Initial preferred output; the GUI/helper updates this without root.
+PREFERRED_OUTPUT="internal"
+# Optional: BLUETOOTH_DEVICE will be written automatically when you select a BT device.
+UCONF
+chmod 0644 "$SKEL_DIR/devices.conf" || true
+echo "Seeded skeleton per-user config at $SKEL_DIR/devices.conf"
+
+# Create for existing desktop users (UID>=1000) if missing (non-destructive)
+for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
+    home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
+    if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
+        user_conf_dir="$home_dir/.config/jack-bridge"
+        user_conf="$user_conf_dir/devices.conf"
+        if [ ! -f "$user_conf" ]; then
+            mkdir -p "$user_conf_dir"
+            cp -f "$SKEL_DIR/devices.conf" "$user_conf"
+            chown -R "$u:$u" "$user_conf_dir" 2>/dev/null || true
+            chmod 0644 "$user_conf" 2>/dev/null || true
+            echo "Seeded $user_conf for user $u"
+        fi
+    fi
+done
 
 echo "Installation complete. Please reboot the system to start JACK, bluetoothd (distro), and bluealsad (if installed)."
 
