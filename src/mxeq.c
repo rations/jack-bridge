@@ -1496,6 +1496,15 @@ static gboolean is_usb_present(void) {
 }
 static gboolean is_hdmi_present(void) {
     if (file_contains_substr("/proc/asound/cards", "HDMI")) return TRUE;
+    /* Fallback: check aplay -l for HDMI devices (e.g. on HDA Intel cards) */
+    gchar *out = NULL;
+    if (g_spawn_command_line_sync("aplay -l", &out, NULL, NULL, NULL)) {
+        if (out && strstr(out, "HDMI")) {
+            g_free(out);
+            return TRUE;
+        }
+        g_free(out);
+    }
     return FALSE;
 }
 static gboolean is_bt_present(void) {

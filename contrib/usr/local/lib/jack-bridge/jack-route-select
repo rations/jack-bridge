@@ -198,43 +198,62 @@ kill_bridge_clients() {
   pkill -f "alsa_out -j bt_out" 2>/dev/null || true
 }
 
+wait_for_port() {
+  port="$1"
+  # Wait up to 5 seconds (50 * 0.1s)
+  for i in $(seq 1 50); do
+    if jack_lsp 2>/dev/null | grep -q "^$port"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  log "Timeout waiting for port $port"
+  return 1
+}
+
 ensure_usb_out() {
   # If client exists, nothing to do
   jack_lsp 2>/dev/null | grep -q '^usb_out:' && return 0
   # Detect first USB playback: use aplay -l to find card/device numbers
   if ! have aplay; then log "aplay not found; cannot detect USB"; return 1; fi
-  line="$(aplay -l 2>/dev/null | awk -F: '/card [0-9]+: .*USB/ {print $1; exit}')"
+  
+  # Find line containing "USB"
+  line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
   if [ -z "$line" ]; then log "No USB playback device found"; return 1; fi
-  # Extract numbers: "card N"
-  card="$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="card"){print $(i+1); exit}}')"
-  card="${card%,}" # strip trailing comma if present
-  dev="$(aplay -l 2>/dev/null | awk -v c="$card" '
-    $0 ~ ("card " c ":") && /device/ {
-      for (i=1;i<=NF;i++) if ($i=="device") { v=$(i+1); sub(/:$/,"",v); print v; exit }
-    }')"
-  dev="${dev%,}"
+  
+  # Extract card and device numbers directly from the line
+  # Format: card X: ... device Y: ...
+  card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+  dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+  
+  [ -z "$card" ] && card="1"
   [ -z "$dev" ] && dev="0"
+  
   rate="$(jack_rate)"; [ -z "$rate" ] && rate=48000
   log "Starting usb_out alsa_out -d plughw:${card},${dev} -r $rate"
   nohup alsa_out -j usb_out -d "plughw:${card},${dev}" -r "$rate" -n 3 -p 1024 >>"$LOGFILE" 2>&1 &
+  wait_for_port "usb_out:playback_1"
 }
 
 ensure_hdmi_out() {
   jack_lsp 2>/dev/null | grep -q '^hdmi_out:' && return 0
   if ! have aplay; then log "aplay not found; cannot detect HDMI"; return 1; fi
-  line="$(aplay -l 2>/dev/null | awk -F: '/card [0-9]+: .*HDMI/ {print $1; exit}')"
+  
+  # Find line containing "HDMI"
+  line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
   if [ -z "$line" ]; then log "No HDMI playback device found"; return 1; fi
-  card="$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="card"){print $(i+1); exit}}')"
-  card="${card%,}"
-  dev="$(aplay -l 2>/dev/null | awk -v c="$card" '
-    $0 ~ ("card " c ":") && /device/ {
-      for (i=1;i<=NF;i++) if ($i=="device") { v=$(i+1); sub(/:$/,"",v); print v; exit }
-    }')"
-  dev="${dev%,}"
-  [ -z "$dev" ] && dev="0"
+  
+  # Extract card and device numbers directly from the line
+  card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+  dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+  
+  [ -z "$card" ] && card="0"
+  [ -z "$dev" ] && dev="3" # Common default for HDMI
+  
   rate="$(jack_rate)"; [ -z "$rate" ] && rate=48000
   log "Starting hdmi_out alsa_out -d plughw:${card},${dev} -r $rate"
   nohup alsa_out -j hdmi_out -d "plughw:${card},${dev}" -r "$rate" -n 3 -p 1024 >>"$LOGFILE" 2>&1 &
+  wait_for_port "hdmi_out:playback_1"
 }
 
 ensure_bt_out() {
@@ -254,6 +273,7 @@ ensure_bt_out() {
   rate="$(jack_rate)"; [ -z "$rate" ] && rate=48000
   log "Starting bt_out alsa_out -d '$devstr' -r $rate -n ${BT_NPERIODS} -p ${BT_PERIOD}"
   nohup alsa_out -j bt_out -d "$devstr" -r "$rate" -n "${BT_NPERIODS}" -p "${BT_PERIOD}" >>"$LOGFILE" 2>&1 &
+  wait_for_port "bt_out:playback_1"
 }
 
 route() {
@@ -279,15 +299,11 @@ route() {
     usb)
       # Detect USB card/device as in ensure_usb_out
       if have aplay; then
-        line="$(aplay -l 2>/dev/null | awk -F: '/card [0-9]+: .*USB/ {print $1; exit}')"
+        line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
         if [ -n "$line" ]; then
-          card="$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="card"){print $(i+1); exit}}')"
-          card="${card%,}"
-          dev="$(aplay -l 2>/dev/null | awk -v c="$card" '
-            $0 ~ ("card " c ":") && /device/ {
-              for (i=1;i<=NF;i++) if ($i=="device") { v=$(i+1); sub(/:$/,"",v); print v; exit }
-            }')"
-          dev="${dev%,}"
+          card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+          dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+          [ -z "$card" ] && card="1"
           [ -z "$dev" ] && dev="0"
           out_pcm="plughw:${card},${dev}"
         else
@@ -299,16 +315,12 @@ route() {
       ;;
     hdmi)
       if have aplay; then
-        line="$(aplay -l 2>/dev/null | awk -F: '/card [0-9]+: .*HDMI/ {print $1; exit}')"
+        line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
         if [ -n "$line" ]; then
-          card="$(echo "$line" | awk '{for(i=1;i<=NF;i++) if($i=="card"){print $(i+1); exit}}')"
-          card="${card%,}"
-          dev="$(aplay -l 2>/dev/null | awk -v c="$card" '
-            $0 ~ ("card " c ":") && /device/ {
-              for (i=1;i<=NF;i++) if ($i=="device") { v=$(i+1); sub(/:$/,"",v); print v; exit }
-            }')"
-          dev="${dev%,}"
-          [ -z "$dev" ] && dev="0"
+          card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+          dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+          [ -z "$card" ] && card="0"
+          [ -z "$dev" ] && dev="3"
           out_pcm="plughw:${card},${dev}"
         else
           out_pcm="${HDMI_DEVICE:-plughw:2,0}"
@@ -390,12 +402,16 @@ route() {
 
   # Reconnect all previous sources to new sink
   echo "$sources" | while IFS= read -r src; do
-    # Guess channel mapping: if src ends with :out_1/:out_2 then map accordingly; else connect both
-    case "$src" in
-      *:out_1) jack_connect "$src" "${newpref}1" 2>/dev/null || true ;;
-      *:out_2) jack_connect "$src" "${newpref}2" 2>/dev/null || true ;;
-      *) jack_connect_pair "$src" "$src" "$newpref" ;;
-    esac
+    # Simple channel mapping using grep to avoid complex case patterns
+    if echo "$src" | grep -qE "(:out_1|:out_000|:left|:L)$"; then
+        jack_connect "$src" "${newpref}1" 2>/dev/null || true
+    elif echo "$src" | grep -qE "(:out_2|:out_001|:right|:R)$"; then
+        jack_connect "$src" "${newpref}2" 2>/dev/null || true
+    else
+        # Mono or unknown: connect to both
+        jack_connect "$src" "${newpref}1" 2>/dev/null || true
+        jack_connect "$src" "${newpref}2" 2>/dev/null || true
+    fi
   done
 }
 
