@@ -21,6 +21,7 @@
 
 . /lib/lsb/init-functions
 
+# Use jack-bridge prebuilt binary (we do not use distro bluez-alsa-utils)
 DAEMON="/usr/local/bin/bluealsad"
 PIDFILE="/var/run/bluealsad.pid"
 

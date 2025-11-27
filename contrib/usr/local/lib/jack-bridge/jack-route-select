@@ -16,7 +16,7 @@ mkdir -p "$(dirname "$USER_CONF")" 2>/dev/null || true
 # Defaults
 PREFERRED_OUTPUT="internal"
 BLUETOOTH_DEVICE=""
-BT_PERIOD="1024"
+BT_PERIOD="256"
 BT_NPERIODS="3"
 
 # Logging for diagnostics
@@ -34,7 +34,7 @@ load_conf() {
 # Write per-user current_output.conf and ensure ~/.asoundrc includes it inside
 # a managed block so non-JACK ALSA apps use the selected output.
 write_user_output_conf() {
-  out_pcm="$1" # e.g. plughw:0,0 or bluealsa:DEV=AA:BB:..,PROFILE=a2dp
+  out_pcm="$1" # e.g. plughw:0,0 or jackbridge_bluealsa:DEV=AA:BB:..,PROFILE=a2dp
   log "write_user_output_conf: writing user output fragment for pcm='$out_pcm'"
   out_dir="$(dirname "$USER_CONF")"
   mkdir -p "$out_dir" 2>/dev/null || true
@@ -56,6 +56,7 @@ EOF
   TMP="$(mktemp "${HOME}/.asoundrc.jb.XXXXXX" 2>/dev/null || mktemp /tmp/.asoundrc.jb.XXXXXX)"
   in_path="$out_dir/current_input.conf"
   jack_override="$out_dir/jack_playback_override.conf"
+  bluealsa_defs="$out_dir/bluealsa_defaults.conf"
   # Strip existing block between markers if present, then append our managed block.
   if [ -f "$ASOUND" ]; then
     awk '
@@ -71,16 +72,18 @@ EOF
     cat "$TMP".part
     echo
     echo "# BEGIN jack-bridge"
-    echo "# Managed by jack-bridge helper — include per-user current_input.conf, jack_playback_override.conf and current_output.conf"
+    echo "# Managed by jack-bridge helper — include per-user current_input.conf, jack_playback_override.conf, bluealsa defaults and current_output.conf"
     echo "include \"$in_path\""
     echo "include \"$jack_override\""
+    # Include BlueALSA defaults (written by write_bluealsa_defaults if Bluetooth selected)
+    echo "include \"$bluealsa_defs\""
     echo "include \"$out_path\""
     echo "# END jack-bridge"
   } > "$TMP"
   if mv "$TMP" "$ASOUND"; then
     rm -f "$TMP".part 2>/dev/null || true
     chmod 644 "$ASOUND" 2>/dev/null || true
-    log "Updated $ASOUND to include $in_path and $out_path"
+    log "Updated $ASOUND to include $in_path, $jack_override, $bluealsa_defs and $out_path"
     return 0
   else
     log "ERROR: failed to install $ASOUND"
@@ -115,6 +118,30 @@ EOF
   fi
   chmod 644 "$ov_path" 2>/dev/null || true
   log "Updated per-user JACK playback override to sink '${sinkpref}{1,2}'"
+}
+
+# Write BlueALSA defaults so 'jackbridge_bluealsa' PCM can be used without inline parameters
+# $1 = MAC (or 00:00:00:00:00:00 for most-recent), $2 = PROFILE (e.g., a2dp), $3 = SRV (e.g., org.bluealsa)
+write_bluealsa_defaults() {
+ mac="${1:-00:00:00:00:00:00}"
+ prof="${2:-a2dp}"
+ srv="${3:-org.bluealsa}"
+ out_dir="$(dirname "$USER_CONF")"
+ mkdir -p "$out_dir" 2>/dev/null || true
+ defs_path="$out_dir/bluealsa_defaults.conf"
+ if ! cat > "$defs_path" <<EOF
+# Managed by jack-bridge — BlueALSA defaults for parameterless 'jackbridge_bluealsa' PCM
+# These match the @args names in 20-jack-bridge-bluealsa.conf
+defaults.jackbridge_bluealsa.DEV "$mac"
+defaults.jackbridge_bluealsa.PROFILE "$prof"
+defaults.jackbridge_bluealsa.SRV "$srv"
+EOF
+ then
+   log "ERROR: failed to write $defs_path"
+   return 1
+ fi
+ chmod 644 "$defs_path" 2>/dev/null || true
+ log "Wrote BlueALSA defaults (DEV=$mac PROFILE=$prof SRV=$srv) to $defs_path"
 }
  
 save_user_kv() {
@@ -192,10 +219,10 @@ jack_connect_pair() {
 }
 
 kill_bridge_clients() {
-  # best-effort
-  pkill -f "alsa_out -j usb_out" 2>/dev/null || true
-  pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
-  pkill -f "alsa_out -j bt_out" 2>/dev/null || true
+  # NOTE: With persistent ports (jack-bridge-ports init script), we NO LONGER kill bridge clients
+  # They remain running and just get disconnected/reconnected as needed
+  # This function is kept for backward compatibility but does nothing
+  return 0
 }
 
 wait_for_port() {
@@ -212,68 +239,54 @@ wait_for_port() {
 }
 
 ensure_usb_out() {
-  # If client exists, nothing to do
-  jack_lsp 2>/dev/null | grep -q '^usb_out:' && return 0
-  # Detect first USB playback: use aplay -l to find card/device numbers
-  if ! have aplay; then log "aplay not found; cannot detect USB"; return 1; fi
-  
-  # Find line containing "USB"
-  line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
-  if [ -z "$line" ]; then log "No USB playback device found"; return 1; fi
-  
-  # Extract card and device numbers directly from the line
-  # Format: card X: ... device Y: ...
-  card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-  dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-  
-  [ -z "$card" ] && card="1"
-  [ -z "$dev" ] && dev="0"
-  
-  rate="$(jack_rate)"; [ -z "$rate" ] && rate=48000
-  log "Starting usb_out alsa_out -d plughw:${card},${dev} -r $rate"
-  nohup alsa_out -j usb_out -d "plughw:${card},${dev}" -r "$rate" -n 3 -p 1024 >>"$LOGFILE" 2>&1 &
-  wait_for_port "usb_out:playback_1"
+  # With persistent ports, usb_out should already exist
+  # If not, log warning but don't fail (init script will handle it)
+  if ! jack_lsp 2>/dev/null | grep -q '^usb_out:'; then
+    log "WARNING: usb_out port not found (should be spawned by jack-bridge-ports init script)"
+    log "         Attempting to use it anyway; check /etc/init.d/jack-bridge-ports"
+  fi
+  return 0
 }
 
 ensure_hdmi_out() {
-  jack_lsp 2>/dev/null | grep -q '^hdmi_out:' && return 0
-  if ! have aplay; then log "aplay not found; cannot detect HDMI"; return 1; fi
-  
-  # Find line containing "HDMI"
-  line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
-  if [ -z "$line" ]; then log "No HDMI playback device found"; return 1; fi
-  
-  # Extract card and device numbers directly from the line
-  card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-  dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-  
-  [ -z "$card" ] && card="0"
-  [ -z "$dev" ] && dev="3" # Common default for HDMI
-  
-  rate="$(jack_rate)"; [ -z "$rate" ] && rate=48000
-  log "Starting hdmi_out alsa_out -d plughw:${card},${dev} -r $rate"
-  nohup alsa_out -j hdmi_out -d "plughw:${card},${dev}" -r "$rate" -n 3 -p 1024 >>"$LOGFILE" 2>&1 &
-  wait_for_port "hdmi_out:playback_1"
+  # With persistent ports, hdmi_out should already exist
+  # If not, log warning but don't fail (init script will handle it)
+  if ! jack_lsp 2>/dev/null | grep -q '^hdmi_out:'; then
+    log "WARNING: hdmi_out port not found (should be spawned by jack-bridge-ports init script)"
+    log "         Attempting to use it anyway; check /etc/init.d/jack-bridge-ports"
+  fi
+  return 0
 }
 
 ensure_bt_out() {
-  jack_lsp 2>/dev/null | grep -q '^bt_out:' && return 0
-  devstr="$1"
-  if [ -z "${devstr:-}" ]; then
-    devstr="$BLUETOOTH_DEVICE"
+  # With persistent ports, bt_out should already exist
+  # Just update the BlueALSA defaults so it routes to the correct device
+  mac_arg="$1"
+  
+  # Extract MAC if provided
+  bt_mac=""
+  if [ -n "${mac_arg}" ]; then
+    if echo "$mac_arg" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
+      bt_mac="$mac_arg"
+    fi
   fi
-  # If argument looks like a MAC, convert to bluealsa string
-  if echo "$devstr" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
-    devstr="bluealsa:DEV=${devstr},PROFILE=a2dp"
+  
+  # Write BlueALSA defaults so bt_out routes to the correct device
+  if [ -n "$bt_mac" ]; then
+    write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
+    log "Updated BlueALSA defaults for MAC: $bt_mac"
+  else
+    write_bluealsa_defaults "00:00:00:00:00:00" "a2dp" "org.bluealsa"
+    log "Updated BlueALSA defaults for most-recent device"
   fi
-  if [ -z "$devstr" ]; then
-    log "No BLUETOOTH_DEVICE configured; set it in ${USER_CONF} or pass MAC as 2nd arg"
-    return 1
+  
+  # Check if bt_out port exists
+  if ! jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
+    log "WARNING: bt_out port not found (should be spawned by jack-bridge-ports init script)"
+    log "         Attempting to use it anyway; check /etc/init.d/jack-bridge-ports"
   fi
-  rate="$(jack_rate)"; [ -z "$rate" ] && rate=48000
-  log "Starting bt_out alsa_out -d '$devstr' -r $rate -n ${BT_NPERIODS} -p ${BT_PERIOD}"
-  nohup alsa_out -j bt_out -d "$devstr" -r "$rate" -n "${BT_NPERIODS}" -p "${BT_PERIOD}" >>"$LOGFILE" 2>&1 &
-  wait_for_port "bt_out:playback_1"
+  
+  return 0
 }
 
 route() {
@@ -285,7 +298,7 @@ route() {
   # For bluetooth remember device if provided
   if [ "$target" = "bluetooth" ] && [ -n "$arg2" ]; then
     if echo "$arg2" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
-      save_user_kv "BLUETOOTH_DEVICE" "bluealsa:DEV=${arg2},PROFILE=a2dp"
+      save_user_kv "BLUETOOTH_DEVICE" "jackbridge_bluealsa:DEV=${arg2},PROFILE=a2dp"
     else
       save_user_kv "BLUETOOTH_DEVICE" "$arg2"
     fi
@@ -330,18 +343,21 @@ route() {
       fi
       ;;
     bluetooth)
-      # Prefer BLUETOOTH_DEVICE (from config) or arg2 MAC
+      # Extract MAC address from arg2 or BLUETOOTH_DEVICE
+      bt_mac=""
       if [ -n "${arg2}" ]; then
         if echo "$arg2" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
-          out_pcm="bluealsa:DEV=${arg2},PROFILE=a2dp"
-        else
-          out_pcm="${arg2}"
+          bt_mac="$arg2"
         fi
-      elif [ -n "${BLUETOOTH_DEVICE}" ]; then
-        out_pcm="${BLUETOOTH_DEVICE}"
-      else
-        out_pcm="bluealsa:PROFILE=a2dp"
       fi
+      # Write BlueALSA defaults so alsa_out can use short device name
+      if [ -n "$bt_mac" ]; then
+        write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
+      else
+        write_bluealsa_defaults "00:00:00:00:00:00" "a2dp" "org.bluealsa"
+      fi
+      # Use simple PCM name - parameters come from defaults
+      out_pcm="jackbridge_bluealsa"
       ;;
     *)
       out_pcm="${PREFERRED_OUTPUT:-internal}"
@@ -360,20 +376,19 @@ route() {
 
   case "$target" in
     internal)
-      # Kill other bridges
-      kill_bridge_clients
+      # With persistent ports, we don't kill clients - just disconnect from them
       newpref="system:playback_"
       ;;
     usb)
-      ensure_usb_out || true
+      ensure_usb_out || log "WARNING: ensure_usb_out failed"
       newpref="usb_out:playback_"
       ;;
     hdmi)
-      ensure_hdmi_out || true
+      ensure_hdmi_out || log "WARNING: ensure_hdmi_out failed"
       newpref="hdmi_out:playback_"
       ;;
     bluetooth)
-      ensure_bt_out "$arg2" || true
+      ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
       newpref="bt_out:playback_"
       ;;
     *)

@@ -20,7 +20,9 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick"
+# Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
+# We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez"
 
 echo "Installing jack-bridge contrib files"
 
@@ -46,6 +48,23 @@ for f in /etc/init.d/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autob
         echo "Removed obsolete $f"
     fi
 done
+
+# Remove old BlueALSA config if it was installed by jack-bridge (not by package manager)
+for D in /usr/share/alsa/alsa.conf.d /etc/alsa/conf.d; do
+    OLD_CONF="$D/20-bluealsa.conf"
+    if [ -f "$OLD_CONF" ]; then
+        # Check if it's ours (contains "jack-bridge" or "Installed by jack-bridge")
+        if grep -q "jack-bridge" "$OLD_CONF" 2>/dev/null; then
+            rm -f "$OLD_CONF"
+            echo "Removed old jack-bridge BlueALSA config: $OLD_CONF"
+        fi
+    fi
+done
+
+# Remove old contrib/etc/20-bluealsa.conf from repo if present (obsolete)
+if [ -f "contrib/etc/20-bluealsa.conf" ]; then
+    echo "Note: contrib/etc/20-bluealsa.conf is obsolete (replaced by 20-jack-bridge-bluealsa.conf)"
+fi
 
 # Install /etc/asound.conf template
 ASOUND_DST="${ETC_DIR}/asound.conf"
@@ -333,30 +352,89 @@ else
     chmod 0700 /var/lib/bluealsa 2>/dev/null || true
 fi
 
-# Install BlueALSA prebuilt binaries if provided in repo contrib/bin (prebuilt artifacts)
+# Install BlueALSA prebuilt binaries (required - we do not use distro bluez-alsa-utils)
+echo "Installing jack-bridge prebuilt BlueALSA binaries to /usr/local/bin..."
 if [ -f "contrib/bin/bluealsad" ]; then
-    echo "Installing prebuilt bluealsad to /usr/local/bin..."
     install -m 0755 contrib/bin/bluealsad /usr/local/bin/bluealsad || true
+    echo "  ✓ Installed bluealsad"
+else
+    echo "ERROR: contrib/bin/bluealsad not found! BlueALSA daemon required for Bluetooth audio."
+    exit 1
 fi
 if [ -f "contrib/bin/bluealsactl" ]; then
-    echo "Installing prebuilt bluealsactl to /usr/local/bin..."
     install -m 0755 contrib/bin/bluealsactl /usr/local/bin/bluealsactl || true
+    echo "  ✓ Installed bluealsactl"
 fi
 if [ -f "contrib/bin/bluealsa-aplay" ]; then
-    echo "Installing prebuilt bluealsa-aplay to /usr/local/bin..."
     install -m 0755 contrib/bin/bluealsa-aplay /usr/local/bin/bluealsa-aplay || true
+    echo "  ✓ Installed bluealsa-aplay"
 fi
 if [ -f "contrib/bin/bluealsa-rfcomm" ]; then
-    echo "Installing prebuilt bluealsa-rfcomm to /usr/local/bin..."
     install -m 0755 contrib/bin/bluealsa-rfcomm /usr/local/bin/bluealsa-rfcomm || true
+    echo "  ✓ Installed bluealsa-rfcomm"
 fi
 
+# Install matching ALSA plugins (Phase 2: Plugin Compatibility)
+# These must match the daemon version to ensure proper D-Bus communication
+echo "Installing matching BlueALSA ALSA plugins..."
+ALSA_PLUGIN_DIR="/usr/lib/x86_64-linux-gnu/alsa-lib"
+# Detect architecture for non-x86_64 systems
+if [ "$(uname -m)" != "x86_64" ]; then
+    # Try to detect correct architecture directory
+    for arch_dir in /usr/lib/*/alsa-lib; do
+        if [ -d "$arch_dir" ]; then
+            ALSA_PLUGIN_DIR="$arch_dir"
+            break
+        fi
+    done
+fi
+
+mkdir -p "$ALSA_PLUGIN_DIR"
+
+# Install PCM plugin (required for playback)
+if [ -f "contrib/bin/libasound_module_pcm_bluealsa.so" ]; then
+    # Backup distro version if it exists
+    if [ -f "$ALSA_PLUGIN_DIR/libasound_module_pcm_bluealsa.so" ]; then
+        mv "$ALSA_PLUGIN_DIR/libasound_module_pcm_bluealsa.so" \
+           "$ALSA_PLUGIN_DIR/libasound_module_pcm_bluealsa.so.distro-backup" 2>/dev/null || true
+        echo "  Backed up distro plugin to libasound_module_pcm_bluealsa.so.distro-backup"
+    fi
+    install -m 0644 contrib/bin/libasound_module_pcm_bluealsa.so "$ALSA_PLUGIN_DIR/libasound_module_pcm_bluealsa.so"
+    echo "  ✓ Installed libasound_module_pcm_bluealsa.so (PCM plugin)"
+else
+    echo "  ! libasound_module_pcm_bluealsa.so not found in contrib/bin/"
+    echo "    Using distro plugin (may cause version mismatch issues)"
+fi
+
+# Install CTL plugin (optional - provides mixer controls)
+if [ -f "contrib/bin/libasound_module_ctl_bluealsa.so" ]; then
+    # Backup distro version if it exists
+    if [ -f "$ALSA_PLUGIN_DIR/libasound_module_ctl_bluealsa.so" ]; then
+        mv "$ALSA_PLUGIN_DIR/libasound_module_ctl_bluealsa.so" \
+           "$ALSA_PLUGIN_DIR/libasound_module_ctl_bluealsa.so.distro-backup" 2>/dev/null || true
+    fi
+    install -m 0644 contrib/bin/libasound_module_ctl_bluealsa.so "$ALSA_PLUGIN_DIR/libasound_module_ctl_bluealsa.so"
+    echo "  ✓ Installed libasound_module_ctl_bluealsa.so (CTL plugin)"
+else
+    echo "  ! libasound_module_ctl_bluealsa.so not found (optional - mixer controls)"
+fi
 
 # Note: jack-bluealsa-autobridge has been removed from this project; no autobridge binary is installed.
 
-
-# Leave distro bluetoothd service untouched; no installer-managed init for bluetoothd
-echo "Leaving distro bluetoothd service as-is (no custom init script installed or modified)."
+# Install bluetoothd init script if provided (jack-bridge manages bluetoothd for SysVinit systems)
+if [ -f "contrib/init.d/bluetoothd" ]; then
+    echo "Installing jack-bridge bluetoothd init script..."
+    install -m 0755 contrib/init.d/bluetoothd "${INIT_DIR}/bluetoothd"
+    
+    # Register with update-rc.d (starts before bluealsad)
+    if command -v update-rc.d >/dev/null 2>&1; then
+        echo "Registering bluetoothd init script..."
+        update-rc.d -f bluetoothd remove >/dev/null 2>&1 || true
+        update-rc.d bluetoothd start 20 2 3 4 5 . stop 80 0 1 6 . || true
+    fi
+else
+    echo "No jack-bridge bluetoothd init script found; using distro bluetoothd"
+fi
 
 # Install bluealsad init script and defaults if provided in contrib (force overwrite)
 if [ -f "contrib/init.d/bluealsad" ]; then
@@ -395,6 +473,22 @@ BLUEALSAD_DEFAULT
     fi
 fi
 
+# Install persistent JACK bridge ports init script (Phase 4: Persistent Ports)
+if [ -f "contrib/init.d/jack-bridge-ports" ]; then
+    echo "Installing jack-bridge-ports init script (persistent JACK bridge clients)..."
+    install -m 0755 contrib/init.d/jack-bridge-ports "${INIT_DIR}/jack-bridge-ports"
+    
+    if command -v update-rc.d >/dev/null 2>&1; then
+        echo "Registering jack-bridge-ports init script..."
+        # Start after jackd-rt (which uses priority defaults ~20) - use 22 to ensure JACK is ready
+        update-rc.d -f jack-bridge-ports remove >/dev/null 2>&1 || true
+        update-rc.d jack-bridge-ports start 22 2 3 4 5 . stop 78 0 1 6 . || true
+        echo "  ✓ jack-bridge-ports will spawn usb_out, hdmi_out, bt_out at boot"
+    fi
+else
+    echo "Warning: contrib/init.d/jack-bridge-ports not found; persistent ports disabled"
+fi
+
 # (autobridge removed) No jack-bluealsa-autobridge init script is installed or registered.
 
 
@@ -411,6 +505,55 @@ if [ -f "$DBUS_POLICY_SRC" ]; then
     fi
 else
     echo "No bundled canonical D-Bus policy found at $DBUS_POLICY_SRC; assuming distro provides one."
+fi
+
+# Install BlueALSA ALSA configuration (PCM/CTL types)
+# We use a custom name (20-jack-bridge-bluealsa.conf) to avoid conflicts with distro packages
+# that might provide 20-bluealsa.conf.
+if [ -f "contrib/etc/20-jack-bridge-bluealsa.conf" ]; then
+    echo "Installing BlueALSA ALSA configuration..."
+    # Install to both common include locations to support older/newer ALSA layouts
+    ALSA_CONF_INSTALLED=0
+    for D in /usr/share/alsa/alsa.conf.d /etc/alsa/conf.d; do
+        mkdir -p "$D"
+        if install -m 0644 contrib/etc/20-jack-bridge-bluealsa.conf "$D/20-jack-bridge-bluealsa.conf"; then
+            echo "  ✓ Installed to $D/20-jack-bridge-bluealsa.conf"
+            ALSA_CONF_INSTALLED=1
+        else
+            echo "  ✗ Failed to install to $D/20-jack-bridge-bluealsa.conf"
+        fi
+        
+        # Remove old conflicting file if we previously installed it
+        if [ -f "$D/20-bluealsa.conf" ]; then
+            if grep -q "jack-bridge" "$D/20-bluealsa.conf" 2>/dev/null; then
+                rm -f "$D/20-bluealsa.conf"
+                echo "  Removed old jack-bridge config: $D/20-bluealsa.conf"
+            fi
+        fi
+    done
+    
+    if [ "$ALSA_CONF_INSTALLED" -eq 0 ]; then
+        echo "ERROR: Failed to install 20-jack-bridge-bluealsa.conf to any ALSA directory!"
+        echo "       Bluetooth audio will NOT work without this configuration."
+        exit 1
+    fi
+else
+    echo "ERROR: contrib/etc/20-jack-bridge-bluealsa.conf not found in repository!"
+    echo "       This file is required for Bluetooth audio support."
+    exit 1
+fi
+
+# Verify ALSA can see the jackbridge_bluealsa device
+echo "Verifying ALSA configuration..."
+if command -v aplay >/dev/null 2>&1; then
+    if aplay -L 2>/dev/null | grep -q "jackbridge_bluealsa"; then
+        echo "  ✓ ALSA recognizes 'jackbridge_bluealsa' device"
+    else
+        echo "  ✗ WARNING: ALSA does not recognize 'jackbridge_bluealsa' device"
+        echo "            Bluetooth audio may not work. Check ALSA configuration."
+    fi
+else
+    echo "  ! aplay not found; skipping ALSA verification"
 fi
 
 # Install polkit rule to authorize BlueZ Adapter/Device operations for users in 'audio' or 'bluetooth'
@@ -508,7 +651,7 @@ cat > /etc/jack-bridge/devices.conf <<'DEVCONF'
 INTERNAL_DEVICE="hw:0"
 USB_DEVICE="hw:1"
 HDMI_DEVICE="hw:2,3"
-BLUETOOTH_DEVICE="bluealsa:PROFILE=a2dp"
+BLUETOOTH_DEVICE="jackbridge_bluealsa:PROFILE=a2dp"
 # Default Bluetooth output latency (used by jack-route-select when spawning bt_out)
 BT_PERIOD="1024"
 BT_NPERIODS="3"

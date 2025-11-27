@@ -4,6 +4,8 @@
 # Prints a device like "hw:CARD=Name" or "hw:0" on stdout and exits 0.
 
 set -eu
+# Wait for devices to settle (helpful for slow hardware where USB might appear before Internal)
+sleep 5
 
 aplay_cmd=$(command -v aplay 2>/dev/null || true)
 arecord_cmd=$(command -v arecord 2>/dev/null || true)

@@ -1,0 +1,212 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          jack-bridge-ports
+# Required-Start:    jackd-rt
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Spawn persistent JACK bridge clients (usb_out, hdmi_out, bt_out)
+# Description:       Creates permanent JACK ports for USB, HDMI, and Bluetooth outputs
+#                    so they're always available without spawn delays. The jack-route-select
+#                    helper then just connects/disconnects them as needed.
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+LOGFILE="/var/log/jack-bridge-ports.log"
+PIDFILE_USB="/var/run/jack-bridge-usb_out.pid"
+PIDFILE_HDMI="/var/run/jack-bridge-hdmi_out.pid"
+PIDFILE_BT="/var/run/jack-bridge-bt_out.pid"
+
+# Load config
+if [ -f /etc/jack-bridge/devices.conf ]; then
+    . /etc/jack-bridge/devices.conf
+fi
+
+: ${BT_PERIOD:=256}
+: ${BT_NPERIODS:=3}
+
+wait_for_jack() {
+    log_daemon_msg "Waiting for JACK server to be ready" "jack-bridge-ports"
+    i=0
+    while [ $i -lt 30 ]; do
+        if command -v jack_lsp >/dev/null 2>&1; then
+            if jack_lsp >/dev/null 2>&1; then
+                log_end_msg 0
+                return 0
+            fi
+        fi
+        sleep 1
+        i=$((i+1))
+    done
+    log_end_msg 1
+    return 1
+}
+
+detect_device() {
+    # $1 = device type (USB or HDMI)
+    type="$1"
+    if ! command -v aplay >/dev/null 2>&1; then
+        echo "plughw:1,0"  # fallback
+        return
+    fi
+    
+    line="$(aplay -l 2>/dev/null | grep "$type" | head -n 1)"
+    if [ -z "$line" ]; then
+        if [ "$type" = "USB" ]; then
+            echo "plughw:1,0"
+        else
+            echo "plughw:0,3"
+        fi
+        return
+    fi
+    
+    card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+    dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    
+    [ -z "$card" ] && card="1"
+    [ -z "$dev" ] && dev="0"
+    
+    echo "plughw:${card},${dev}"
+}
+
+get_jack_rate() {
+    if command -v jack_samplerate >/dev/null 2>&1; then
+        rate=$(jack_samplerate 2>/dev/null | awk '/sample rate/ {print $3; exit}')
+        if [ -n "$rate" ]; then
+            echo "$rate"
+            return
+        fi
+    fi
+    echo "48000"
+}
+
+start_bridge_client() {
+    # $1=client_name $2=device $3=pidfile
+    client="$1"
+    device="$2"
+    pidfile="$3"
+    
+    rate=$(get_jack_rate)
+    
+    # Determine additional args based on client type
+    extra_args="-n 3 -p 1024"
+    if [ "$client" = "bt_out" ]; then
+        extra_args="-n ${BT_NPERIODS} -p ${BT_PERIOD}"
+    fi
+    
+    log_action_begin_msg "Starting $client"
+    start-stop-daemon --start --background --make-pidfile --pidfile "$pidfile" \
+        --startas /bin/sh -- -c "exec alsa_out -j $client -d $device -r $rate $extra_args >>$LOGFILE 2>&1" \
+        || { log_action_end_msg 1; return 1; }
+    
+    # Wait briefly for port to appear
+    i=0
+    while [ $i -lt 50 ]; do
+        if jack_lsp 2>/dev/null | grep -q "^${client}:"; then
+            log_action_end_msg 0
+            return 0
+        fi
+        sleep 0.1
+        i=$((i+1))
+    done
+    log_action_end_msg 1
+    return 1
+}
+
+start() {
+    if ! wait_for_jack; then
+        log_failure_msg "JACK server not ready; cannot start bridge clients"
+        return 1
+    fi
+    
+    # Detect devices
+    usb_dev=$(detect_device "USB")
+    hdmi_dev=$(detect_device "HDMI")
+    
+    # Start USB bridge
+    if ! jack_lsp 2>/dev/null | grep -q '^usb_out:'; then
+        start_bridge_client "usb_out" "$usb_dev" "$PIDFILE_USB" || log_warning_msg "usb_out failed to start"
+    else
+        log_success_msg "usb_out already running"
+    fi
+    
+    # Start HDMI bridge
+    if ! jack_lsp 2>/dev/null | grep -q '^hdmi_out:'; then
+        start_bridge_client "hdmi_out" "$hdmi_dev" "$PIDFILE_HDMI" || log_warning_msg "hdmi_out failed to start"
+    else
+        log_success_msg "hdmi_out already running"
+    fi
+    
+    # Start Bluetooth bridge
+    # Note: Uses jackbridge_bluealsa which reads defaults from ~/.asoundrc (written by jack-route-select)
+    if ! jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
+        start_bridge_client "bt_out" "jackbridge_bluealsa" "$PIDFILE_BT" || log_warning_msg "bt_out failed to start (will be available after first BT device selection)"
+    else
+        log_success_msg "bt_out already running"
+    fi
+    
+    return 0
+}
+
+stop() {
+    log_daemon_msg "Stopping jack-bridge persistent ports" "jack-bridge-ports"
+    
+    start-stop-daemon --stop --pidfile "$PIDFILE_USB" --retry 5 || true
+    start-stop-daemon --stop --pidfile "$PIDFILE_HDMI" --retry 5 || true
+    start-stop-daemon --stop --pidfile "$PIDFILE_BT" --retry 5 || true
+    
+    rm -f "$PIDFILE_USB" "$PIDFILE_HDMI" "$PIDFILE_BT" 2>/dev/null || true
+    
+    # Also kill any orphaned processes
+    pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+    pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
+    pkill -f "alsa_out -j bt_out" 2>/dev/null || true
+    
+    log_end_msg 0
+}
+
+status() {
+    echo "Checking jack-bridge persistent ports status:"
+    
+    if jack_lsp 2>/dev/null | grep -q '^usb_out:'; then
+        echo "  usb_out: running"
+    else
+        echo "  usb_out: not running"
+    fi
+    
+    if jack_lsp 2>/dev/null | grep -q '^hdmi_out:'; then
+        echo "  hdmi_out: running"
+    else
+        echo "  hdmi_out: not running"
+    fi
+    
+    if jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
+        echo "  bt_out: running"
+    else
+        echo "  bt_out: not running"
+    fi
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|force-reload)
+        stop
+        sleep 2
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0

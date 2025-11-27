@@ -52,6 +52,11 @@ static GtkWidget *g_eq_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
 /* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
 static GtkWidget *g_bt_tree = NULL;
+/* Phase 3: Global references to Devices panel radio buttons for state synchronization */
+static GtkWidget *g_rb_internal = NULL;
+static GtkWidget *g_rb_usb = NULL;
+static GtkWidget *g_rb_hdmi = NULL;
+static GtkWidget *g_rb_bt = NULL;
 /* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
 static char *mac_from_bluez_object(const char *s);
 
@@ -119,8 +124,8 @@ extern void gui_bt_populate_existing_devices(void);
 extern int gui_bt_bind_scan_buttons(GtkWidget *scan_btn, GtkWidget *stop_btn);
 /* Query Device1 state (Paired/Trusted/Connected) for button gating */
 extern int gui_bt_get_device_state(const char *object_path, gboolean *paired, gboolean *trusted, gboolean *connected);
-/* Forward declaration for Bluetooth "Set as input" action */
-static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data);
+/* Forward declaration for Bluetooth "Set as output" action */
+static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data);
 
 /* Safe wrappers return 0 on success, -1 on failure and show a GTK dialog when appropriate */
 static int bt_wrapper_start_discovery(GtkWindow *parent) {
@@ -1109,7 +1114,7 @@ static void create_bt_panel(GtkWidget *main_box) {
     GtkWidget *connect_btn = gtk_button_new_with_label("Connect");
     GtkWidget *remove_btn = gtk_button_new_with_label("Remove");
     /* Use clearer label for playback routing (this routes output to the selected device) */
-    GtkWidget *set_input_btn = gtk_button_new_with_label("Use for output");
+    GtkWidget *set_input_btn = gtk_button_new_with_label("Set as Output");
     gtk_box_pack_start(GTK_BOX(bt_action_row), pair_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), trust_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
@@ -1187,7 +1192,7 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_signal_connect(trust_btn, "clicked", G_CALLBACK(on_trust_clicked), NULL);
     g_signal_connect(connect_btn, "clicked", G_CALLBACK(on_connect_clicked), NULL);
     g_signal_connect(remove_btn, "clicked", G_CALLBACK(on_remove_clicked), NULL);
-    g_signal_connect(set_input_btn, "clicked", G_CALLBACK(on_bt_set_input_clicked), NULL);
+    g_signal_connect(set_input_btn, "clicked", G_CALLBACK(on_bt_set_output_clicked), NULL);
 }
 
 /* Main function starts here */
@@ -1905,6 +1910,12 @@ static void create_devices_panel(GtkWidget *main_box) {
     ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
     gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
 
+    /* Phase 3: Store global references for state synchronization from Bluetooth panel */
+    g_rb_internal = ui->rb_internal;
+    g_rb_usb = ui->rb_usb;
+    g_rb_hdmi = ui->rb_hdmi;
+    g_rb_bt = ui->rb_bt;
+
     /* Presence-based sensitivity (no hardcoding) */
     gtk_widget_set_sensitive(ui->rb_internal, TRUE);
     gtk_widget_set_sensitive(ui->rb_usb, is_usb_present());
@@ -2006,8 +2017,20 @@ static int __attribute__((unused)) write_bt_input_override(const char *mac) {
 }
 
 
-/* Button handler: set selected Bluetooth device as current input (writes MAC + switches to input_bt) */
-static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
+/* Phase 3: Idle callback to sync Devices panel state after Bluetooth routing completes */
+static gboolean sync_devices_panel_to_bluetooth_idle(gpointer user_data) {
+    (void)user_data;
+    /* Block the signal temporarily to prevent recursive routing calls */
+    if (g_rb_bt && GTK_IS_TOGGLE_BUTTON(g_rb_bt)) {
+        g_signal_handlers_block_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_bt), TRUE);
+        g_signal_handlers_unblock_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* Button handler: set selected Bluetooth device as current OUTPUT (routes playback) */
+static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data) {
     (void)user_data;
     GtkWidget *btnw = GTK_WIDGET(b);
     GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(btnw), "device_tree"));
@@ -2030,7 +2053,7 @@ static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
     gtk_tree_model_get(model, &iter, 1, &obj, -1);
     if (!obj) return;
 
-    /* Derive MAC and write overrides */
+    /* Derive MAC */
     char *mac = mac_from_bluez_object(obj);
     g_free(obj);
 
@@ -2043,24 +2066,25 @@ static void on_bt_set_input_clicked(GtkButton *b, gpointer user_data) {
         return;
     }
 
-    /* Per-user override: write managed block with BT MAC and set current_input to input_bt */
-    if (write_user_asoundrc_block("input_bt", mac) != 0) {
+    /* Call routing helper asynchronously */
+    gboolean ok = route_to_target_async_with_arg("bluetooth", mac);
+    
+    if (!ok) {
         GtkWindow *parent = get_parent_window_from_widget(btnw);
         GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Failed to update your ALSA configuration at ~/.asoundrc.\n"
-                                              "Please verify your home directory is writable.");
+                                              "Routing helper failed to start.");
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
-        g_free(mac);
-        return;
+    } else {
+        /* Phase 3: Update Devices panel to reflect Bluetooth selection */
+        g_idle_add(sync_devices_panel_to_bluetooth_idle, NULL);
+        
+        GtkWindow *parent = get_parent_window_from_widget(btnw);
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                              GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                              "Bluetooth output set to %s\nRouting to bt_out ports.", mac);
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
     }
-
-    GtkWindow *parent = get_parent_window_from_widget(btnw);
-    GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
-                                          GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                                          "Bluetooth input set to %s\n"
-                                          "Saved to ~/.config/jack-bridge/current_input.conf (pcm.current_input -> input_bt)", mac);
-    gtk_dialog_run(GTK_DIALOG(d));
-    gtk_widget_destroy(d);
     g_free(mac);
 }
