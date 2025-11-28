@@ -15,7 +15,6 @@ static void create_devices_panel(GtkWidget *main_box);
 
 /* Forward declarations needed by earlier callers */
 static int write_string_atomic(const char *path, const char *content);
-static gchar *read_current_input_effective(void);
 
 typedef struct {
     snd_mixer_t *mixer;
@@ -760,13 +759,11 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         g_free((gchar*)rate_text);
     }
 
-    /* Prefer per-user 'current_input' device; fallback to ALSA 'default' if not configured */
-    gchar *cur_pcm = read_current_input_effective();
+    /* Always use ALSA 'default' for recording - captures from system default input device.
+     * The Devices panel routes PLAYBACK (output), but recording needs CAPTURE (input).
+     * Using 'default' ensures recording works from the system's default microphone/line-in
+     * regardless of which output device is selected for playback. */
     const char *input_dev = "default";
-    if (cur_pcm && *cur_pcm) {
-        input_dev = "current_input";
-    }
-    if (cur_pcm) g_free(cur_pcm);
 
     /* Build argv for arecord */
     gchar *channels_s = g_strdup_printf("%d", channels);
@@ -1740,13 +1737,6 @@ static gchar *read_user_current_input(void) {
     return result;
 }
 
-/* Effective reader: prefer user override, fallback to system default */
-static gchar *read_current_input_effective(void) {
-    gchar *u = read_user_current_input();
-    if (u && *u) return u;
-    return read_current_input();
-}
-
 /* Bootstrap: ensure include exists and per-user fragment mirrors system default so apps can record immediately */
 void ensure_user_asoundrc_bootstrap(void) {
     gchar *u = read_user_current_input();
@@ -2082,7 +2072,7 @@ static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data) {
         GtkWindow *parent = get_parent_window_from_widget(btnw);
         GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
                                               GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                                              "Bluetooth output set to %s\nRouting to bt_out ports.", mac);
+                                              "Bluetooth output set to %s\nRouting to bluealsa ports.", mac);
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
     }

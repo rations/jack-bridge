@@ -26,6 +26,7 @@ fi
 : ${JACKD_PERIOD:=256}
 : ${JACKD_NPERIODS:=3}
 : ${JACKD_PRIORITY:=70}
+: ${JACKD_MIDI:="seq"}
 : ${JACKD_ARGS:=""}
 : ${JACKD_DAEMON:=/usr/bin/jackd}
 : ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
@@ -98,8 +99,12 @@ start() {
         DEVICE="hw:0"
     fi
 
-    # Build jackd args
-    ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+    # Build jackd args with MIDI support
+    if [ -n "$JACKD_MIDI" ] && [ "$JACKD_MIDI" != "none" ]; then
+        ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} -X ${JACKD_MIDI} ${JACKD_ARGS}"
+    else
+        ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+    fi
 
     # Ensure user exists
     if ! id "$USERNAME" >/dev/null 2>&1; then

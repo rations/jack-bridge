@@ -10,6 +10,7 @@
 # JACKD_PERIOD=256              # frames per period
 # JACKD_NPERIODS=3              # number of periods
 # JACKD_PRIORITY=70             # realtime priority to request
+# JACKD_MIDI="seq"              # MIDI driver: "seq" (ALSA sequencer), "raw" (raw MIDI), or "none" (disable MIDI)
 # JACKD_ARGS=""                 # any extra args to pass to jackd
 # JACK_AUTOCONNECT=0            # 1 to enable autoconnect after jackd starts (uses /usr/local/lib/jack-bridge/jack-autoconnect)
 # JACK_AUTOCONNECT_LOOPBACK=0   # 1 to enable mic -> speaker loopback in autoconnect

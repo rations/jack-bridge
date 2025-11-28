@@ -1,149 +1,200 @@
 #!/bin/sh
 ### BEGIN INIT INFO
 # Provides:          jack-bridge-ports
-# Required-Start:    jackd-rt
+# Required-Start:    $local_fs $remote_fs jackd-rt
 # Required-Stop:
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: Spawn persistent JACK bridge clients (usb_out, hdmi_out, bt_out)
-# Description:       Creates permanent JACK ports for USB, HDMI, and Bluetooth outputs
-#                    so they're always available without spawn delays. The jack-route-select
-#                    helper then just connects/disconnects them as needed.
+# Short-Description: Spawn persistent JACK bridge ports (usb_out, hdmi_out, bt_out)
+# Description:       Creates permanent alsa_out bridge clients for USB, HDMI, and Bluetooth
+#                    at boot. These remain running to eliminate spawn delays.
 ### END INIT INFO
 
 . /lib/lsb/init-functions
 
+DEVICES_CONF="/etc/jack-bridge/devices.conf"
+USER_DEVICES_CONF="${HOME}/.config/jack-bridge/devices.conf"
 LOGFILE="/var/log/jack-bridge-ports.log"
-PIDFILE_USB="/var/run/jack-bridge-usb_out.pid"
-PIDFILE_HDMI="/var/run/jack-bridge-hdmi_out.pid"
-PIDFILE_BT="/var/run/jack-bridge-bt_out.pid"
 
-# Load config
-if [ -f /etc/jack-bridge/devices.conf ]; then
-    . /etc/jack-bridge/devices.conf
+# Load system defaults
+if [ -r "$DEVICES_CONF" ]; then
+    . "$DEVICES_CONF"
 fi
 
-: ${BT_PERIOD:=256}
-: ${BT_NPERIODS:=3}
-
-wait_for_jack() {
-    log_daemon_msg "Waiting for JACK server to be ready" "jack-bridge-ports"
-    i=0
-    while [ $i -lt 30 ]; do
-        if command -v jack_lsp >/dev/null 2>&1; then
-            if jack_lsp >/dev/null 2>&1; then
-                log_end_msg 0
+# Detect user to run under (same logic as jackd-rt)
+detect_user() {
+    USERNAME=""
+    # Try SUDO_USER first
+    if [ -n "$SUDO_USER" ]; then
+        USERNAME="$SUDO_USER"
+        return 0
+    fi
+    
+    # Find first user with UID>=1000 in audio group
+    for user in $(cut -d: -f1 /etc/passwd); do
+        uid=$(id -u "$user" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+            groups=$(id -nG "$user" 2>/dev/null || true)
+            if printf '%s\n' " $groups " | grep -q ' audio '; then
+                USERNAME="$user"
                 return 0
             fi
         fi
-        sleep 1
-        i=$((i+1))
     done
-    log_end_msg 1
-    return 1
-}
-
-detect_device() {
-    # $1 = device type (USB or HDMI)
-    type="$1"
-    if ! command -v aplay >/dev/null 2>&1; then
-        echo "plughw:1,0"  # fallback
-        return
-    fi
     
-    line="$(aplay -l 2>/dev/null | grep "$type" | head -n 1)"
-    if [ -z "$line" ]; then
-        if [ "$type" = "USB" ]; then
-            echo "plughw:1,0"
-        else
-            echo "plughw:0,3"
-        fi
-        return
-    fi
-    
-    card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-    dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-    
-    [ -z "$card" ] && card="1"
-    [ -z "$dev" ] && dev="0"
-    
-    echo "plughw:${card},${dev}"
-}
-
-get_jack_rate() {
-    if command -v jack_samplerate >/dev/null 2>&1; then
-        rate=$(jack_samplerate 2>/dev/null | awk '/sample rate/ {print $3; exit}')
-        if [ -n "$rate" ]; then
-            echo "$rate"
-            return
-        fi
-    fi
-    echo "48000"
-}
-
-start_bridge_client() {
-    # $1=client_name $2=device $3=pidfile
-    client="$1"
-    device="$2"
-    pidfile="$3"
-    
-    rate=$(get_jack_rate)
-    
-    # Determine additional args based on client type
-    extra_args="-n 3 -p 1024"
-    if [ "$client" = "bt_out" ]; then
-        extra_args="-n ${BT_NPERIODS} -p ${BT_PERIOD}"
-    fi
-    
-    log_action_begin_msg "Starting $client"
-    start-stop-daemon --start --background --make-pidfile --pidfile "$pidfile" \
-        --startas /bin/sh -- -c "exec alsa_out -j $client -d $device -r $rate $extra_args >>$LOGFILE 2>&1" \
-        || { log_action_end_msg 1; return 1; }
-    
-    # Wait briefly for port to appear
-    i=0
-    while [ $i -lt 50 ]; do
-        if jack_lsp 2>/dev/null | grep -q "^${client}:"; then
-            log_action_end_msg 0
+    # Fallback: first UID>=1000
+    for user in $(cut -d: -f1 /etc/passwd); do
+        uid=$(id -u "$user" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+            USERNAME="$user"
             return 0
         fi
-        sleep 0.1
-        i=$((i+1))
     done
-    log_action_end_msg 1
+    
+    USERNAME="root"
+}
+
+# Detect card/device numbers from aplay -l
+detect_card_device() {
+    local search_pattern="$1"
+    local output=""
+    
+    if ! command -v aplay >/dev/null 2>&1; then
+        return 1
+    fi
+    
+    output=$(aplay -l 2>/dev/null | grep -i "$search_pattern" | head -1)
+    if [ -z "$output" ]; then
+        return 1
+    fi
+    
+    # Parse "card N: ... device M:"
+    card=$(echo "$output" | sed -n 's/^card \([0-9]\+\):.*$/\1/p')
+    device=$(echo "$output" | sed -n 's/^.*device \([0-9]\+\):.*$/\1/p')
+    
+    if [ -n "$card" ] && [ -n "$device" ]; then
+        echo "hw:${card},${device}"
+        return 0
+    elif [ -n "$card" ]; then
+        echo "hw:${card}"
+        return 0
+    fi
+    
     return 1
 }
 
 start() {
-    if ! wait_for_jack; then
-        log_failure_msg "JACK server not ready; cannot start bridge clients"
+    log_daemon_msg "Starting jack-bridge persistent ports" "jack-bridge-ports"
+    
+    # Detect user
+    detect_user
+    if [ -z "$USERNAME" ]; then
+        log_failure_msg "Could not determine user to run under"
         return 1
     fi
     
-    # Detect devices
-    usb_dev=$(detect_device "USB")
-    hdmi_dev=$(detect_device "HDMI")
+    # Wait for JACK to be ready (up to 10 seconds)
+    WAIT_SECS=10
+    waited=0
+    while [ $waited -lt $WAIT_SECS ]; do
+        if command -v jack_wait >/dev/null 2>&1; then
+            if jack_wait -w -t 1 >/dev/null 2>&1; then
+                break
+            fi
+        else
+            # Fallback: check if jackd is running
+            if pidof jackd >/dev/null 2>&1; then
+                sleep 1  # Give it a moment to initialize
+                break
+            fi
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
     
-    # Start USB bridge
-    if ! jack_lsp 2>/dev/null | grep -q '^usb_out:'; then
-        start_bridge_client "usb_out" "$usb_dev" "$PIDFILE_USB" || log_warning_msg "usb_out failed to start"
-    else
-        log_success_msg "usb_out already running"
+    if [ $waited -ge $WAIT_SECS ]; then
+        log_warning_msg "JACK not ready after ${WAIT_SECS}s; spawning ports anyway"
     fi
     
-    # Start HDMI bridge
-    if ! jack_lsp 2>/dev/null | grep -q '^hdmi_out:'; then
-        start_bridge_client "hdmi_out" "$hdmi_dev" "$PIDFILE_HDMI" || log_warning_msg "hdmi_out failed to start"
-    else
-        log_success_msg "hdmi_out already running"
+    # Prepare log file
+    touch "$LOGFILE" 2>/dev/null || true
+    chown "$USERNAME":"$USERNAME" "$LOGFILE" 2>/dev/null || true
+    echo "=== jack-bridge-ports started at $(date) ===" >> "$LOGFILE" 2>&1
+    
+    # Load user-specific overrides if present
+    USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
+    if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/jack-bridge/devices.conf" ]; then
+        . "$USER_HOME/.config/jack-bridge/devices.conf"
     fi
     
-    # Start Bluetooth bridge
-    # Note: Uses jackbridge_bluealsa which reads defaults from ~/.asoundrc (written by jack-route-select)
-    if ! jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
-        start_bridge_client "bt_out" "jackbridge_bluealsa" "$PIDFILE_BT" || log_warning_msg "bt_out failed to start (will be available after first BT device selection)"
+    # Get default values with fallbacks
+    : ${BT_PERIOD:=256}
+    : ${BT_NPERIODS:=3}
+    
+    # ALWAYS spawn USB port (even if no USB device - JACK will create silent ports)
+    USB_HW=$(detect_card_device "USB")
+    if [ -z "$USB_HW" ]; then
+        USB_HW="hw:99"  # Non-existent device - alsa_out creates ports but no audio flows until device connects
+        echo "No USB audio device detected; spawning usb_out with placeholder $USB_HW" >> "$LOGFILE" 2>&1
     else
-        log_success_msg "bt_out already running"
+        echo "USB audio device detected: $USB_HW" >> "$LOGFILE" 2>&1
+    fi
+    echo "Spawning usb_out for $USB_HW" >> "$LOGFILE" 2>&1
+    su -l "$USERNAME" -c "nohup alsa_out -j usb_out -d \"$USB_HW\" -r 48000 -p 256 -n 3 >>$LOGFILE 2>&1 &" || true
+    
+    # ALWAYS spawn HDMI port (even if no HDMI device)
+    HDMI_HW=$(detect_card_device "HDMI")
+    if [ -z "$HDMI_HW" ]; then
+        HDMI_HW="hw:98"  # Non-existent device
+        echo "No HDMI audio device detected; spawning hdmi_out with placeholder $HDMI_HW" >> "$LOGFILE" 2>&1
+    else
+        echo "HDMI audio device detected: $HDMI_HW" >> "$LOGFILE" 2>&1
+    fi
+    echo "Spawning hdmi_out for $HDMI_HW" >> "$LOGFILE" 2>&1
+    su -l "$USERNAME" -c "nohup alsa_out -j hdmi_out -d \"$HDMI_HW\" -r 48000 -p 256 -n 3 >>$LOGFILE 2>&1 &" || true
+    
+    # ALWAYS spawn bt_out using bluealsa-aplay in JACK mode
+    # This is the correct tool for BlueALSA -> JACK bridging (avoids alsa_out buffer overflow)
+    # bluealsa-aplay monitors BlueALSA and creates JACK ports when devices connect
+    # Without explicit MAC, accepts connections from any paired device (00:00:00:00:00:00)
+    echo "Spawning bluealsa-aplay for JACK output (period=$BT_PERIOD nperiods=$BT_NPERIODS)" >> "$LOGFILE" 2>&1
+    
+    # Use full path since init scripts don't have /usr/local/bin in PATH
+    BLUEALSA_APLAY="/usr/local/bin/bluealsa-aplay"
+    
+    if [ -x "$BLUEALSA_APLAY" ]; then
+        # Calculate PCM timing parameters in microseconds
+        # Period time = samples * 1000000 / sample_rate
+        # Buffer time = period_time * num_periods
+        PERIOD_TIME=$((BT_PERIOD * 1000000 / 48000))
+        BUFFER_TIME=$((PERIOD_TIME * BT_NPERIODS))
+        
+        # Use --pcm=jack to output to JACK server
+        # Creates ports named "bluealsa" when device connects
+        su -l "$USERNAME" -c "nohup $BLUEALSA_APLAY --verbose --pcm=jack --pcm-buffer-time=$BUFFER_TIME --pcm-period-time=$PERIOD_TIME >>$LOGFILE 2>&1 &" || true
+    else
+        echo "ERROR: bluealsa-aplay not found at $BLUEALSA_APLAY" >> "$LOGFILE" 2>&1
+        echo "       Run: sudo ./contrib/install.sh" >> "$LOGFILE" 2>&1
+    fi
+    
+    # Give ports a moment to register with JACK
+    sleep 2
+    
+    # Verify ports appeared
+    if command -v jack_lsp >/dev/null 2>&1; then
+        # Note: bluealsa-aplay creates ports named "bluealsa" (not bt_out)
+        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|bluealsa):' || true)
+        if [ -n "$PORTS" ]; then
+            echo "Active bridge ports:" >> "$LOGFILE" 2>&1
+            echo "$PORTS" | sed 's/^/  /' >> "$LOGFILE" 2>&1
+            log_end_msg 0
+        else
+            log_warning_msg "No bridge ports found after spawn; check $LOGFILE"
+            log_warning_msg "Note: bluealsa ports appear only when a device connects"
+            log_end_msg 1
+        fi
+    else
+        log_end_msg 0
     fi
     
     return 0
@@ -152,39 +203,33 @@ start() {
 stop() {
     log_daemon_msg "Stopping jack-bridge persistent ports" "jack-bridge-ports"
     
-    start-stop-daemon --stop --pidfile "$PIDFILE_USB" --retry 5 || true
-    start-stop-daemon --stop --pidfile "$PIDFILE_HDMI" --retry 5 || true
-    start-stop-daemon --stop --pidfile "$PIDFILE_BT" --retry 5 || true
+    # Kill alsa_out instances for USB/HDMI
+    for port in usb_out hdmi_out; do
+        pkill -f "alsa_out -j $port" 2>/dev/null || true
+    done
     
-    rm -f "$PIDFILE_USB" "$PIDFILE_HDMI" "$PIDFILE_BT" 2>/dev/null || true
-    
-    # Also kill any orphaned processes
-    pkill -f "alsa_out -j usb_out" 2>/dev/null || true
-    pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
-    pkill -f "alsa_out -j bt_out" 2>/dev/null || true
+    # Kill bluealsa-aplay (handles Bluetooth)
+    pkill -f "bluealsa-aplay.*--pcm=jack" 2>/dev/null || true
     
     log_end_msg 0
+    return 0
 }
 
 status() {
-    echo "Checking jack-bridge persistent ports status:"
-    
-    if jack_lsp 2>/dev/null | grep -q '^usb_out:'; then
-        echo "  usb_out: running"
+    if command -v jack_lsp >/dev/null 2>&1; then
+        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|bluealsa):' || true)
+        if [ -n "$PORTS" ]; then
+            echo "Active bridge ports:"
+            echo "$PORTS" | sed 's/^/  /'
+            return 0
+        else
+            echo "No bridge ports found"
+            echo "Note: bluealsa ports appear only when a Bluetooth device is connected"
+            return 1
+        fi
     else
-        echo "  usb_out: not running"
-    fi
-    
-    if jack_lsp 2>/dev/null | grep -q '^hdmi_out:'; then
-        echo "  hdmi_out: running"
-    else
-        echo "  hdmi_out: not running"
-    fi
-    
-    if jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
-        echo "  bt_out: running"
-    else
-        echo "  bt_out: not running"
+        echo "jack_lsp not available; cannot check port status"
+        return 1
     fi
 }
 

@@ -175,7 +175,7 @@ collect_current_sources() {
       sink["system:playback_1"]=1; sink["system:playback_2"]=1;
       sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
       sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
-      sink["bt_out:playback_1"]=1; sink["bt_out:playback_2"]=1;
+      sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
     }
     /^[^ \t]/ { cur=$1; next }
     /^[ \t]/ {
@@ -196,7 +196,7 @@ jack_disconnect_all_sinks() {
       sink["system:playback_1"]=1; sink["system:playback_2"]=1;
       sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
       sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
-      sink["bt_out:playback_1"]=1; sink["bt_out:playback_2"]=1;
+      sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
     }
     /^[^ \t]/ { cur=$1; next }
     /^[ \t]/ {
@@ -259,8 +259,8 @@ ensure_hdmi_out() {
 }
 
 ensure_bt_out() {
-  # With persistent ports, bt_out should already exist
-  # Just update the BlueALSA defaults so it routes to the correct device
+  # bluealsa-aplay creates ports dynamically named "bluealsa" when device connects
+  # Just update the BlueALSA defaults for ALSA app routing
   mac_arg="$1"
   
   # Extract MAC if provided
@@ -271,7 +271,7 @@ ensure_bt_out() {
     fi
   fi
   
-  # Write BlueALSA defaults so bt_out routes to the correct device
+  # Write BlueALSA defaults for ALSA apps
   if [ -n "$bt_mac" ]; then
     write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
     log "Updated BlueALSA defaults for MAC: $bt_mac"
@@ -280,10 +280,16 @@ ensure_bt_out() {
     log "Updated BlueALSA defaults for most-recent device"
   fi
   
-  # Check if bt_out port exists
-  if ! jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
-    log "WARNING: bt_out port not found (should be spawned by jack-bridge-ports init script)"
-    log "         Attempting to use it anyway; check /etc/init.d/jack-bridge-ports"
+  # Check if bluealsa-aplay is running
+  if ! pidof bluealsa-aplay >/dev/null 2>&1; then
+    log "WARNING: bluealsa-aplay not running (should be started by jack-bridge-ports)"
+    log "         Run: sudo service jack-bridge-ports restart"
+  fi
+  
+  # Check if bluealsa ports exist (only appear when device is connected)
+  if ! jack_lsp 2>/dev/null | grep -q '^bluealsa:'; then
+    log "NOTE: bluealsa ports not visible yet (device may not be connected)"
+    log "      Ports will appear automatically when Bluetooth device connects"
   fi
   
   return 0
@@ -389,7 +395,7 @@ route() {
       ;;
     bluetooth)
       ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
-      newpref="bt_out:playback_"
+      newpref="bluealsa:playback_"
       ;;
     *)
       echo "Usage: $0 {internal|usb|hdmi|bluetooth} [bluealsa-DEV or MAC]" >&2

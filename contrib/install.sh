@@ -483,7 +483,7 @@ if [ -f "contrib/init.d/jack-bridge-ports" ]; then
         # Start after jackd-rt (which uses priority defaults ~20) - use 22 to ensure JACK is ready
         update-rc.d -f jack-bridge-ports remove >/dev/null 2>&1 || true
         update-rc.d jack-bridge-ports start 22 2 3 4 5 . stop 78 0 1 6 . || true
-        echo "  ✓ jack-bridge-ports will spawn usb_out, hdmi_out, bt_out at boot"
+        echo "  ✓ jack-bridge-ports will spawn usb_out, hdmi_out, and bluealsa-aplay at boot"
     fi
 else
     echo "Warning: contrib/init.d/jack-bridge-ports not found; persistent ports disabled"
@@ -652,14 +652,14 @@ INTERNAL_DEVICE="hw:0"
 USB_DEVICE="hw:1"
 HDMI_DEVICE="hw:2,3"
 BLUETOOTH_DEVICE="jackbridge_bluealsa:PROFILE=a2dp"
-# Default Bluetooth output latency (used by jack-route-select when spawning bt_out)
-BT_PERIOD="1024"
+# Default Bluetooth output latency (period=256 samples @ 48kHz = 5.3ms)
+BT_PERIOD="256"
 BT_NPERIODS="3"
 # Initial preferred output
 PREFERRED_OUTPUT="internal"
 DEVCONF
 chmod 0644 /etc/jack-bridge/devices.conf
-echo "Installed (replaced) /etc/jack-bridge/devices.conf"
+echo "Installed (replaced) /etc/jack-bridge/devices.conf with BT_PERIOD=256"
 
 # Seed per-user defaults so the GUI (non-root) has an override file on first run (non-destructive)
 SKEL_DIR="/etc/skel/.config/jack-bridge"
@@ -689,6 +689,18 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     fi
 done
 
-echo "Installation complete. Please reboot the system to start JACK, bluetoothd (distro), and bluealsad (if installed)."
+echo ""
+echo "Installation complete!"
+echo ""
+echo "IMPORTANT: Services must be restarted for changes to take effect:"
+echo "  sudo service jack-bridge-ports restart"
+echo "  sudo service bluealsad restart"
+echo ""
+echo "OR simply reboot the system:"
+echo "  sudo reboot"
+echo ""
+echo "After restart, verify bluealsa-aplay is running:"
+echo "  ps aux | grep bluealsa-aplay"
+echo ""
 
 exit 0

@@ -105,15 +105,21 @@ if command -v jack_lsp >/dev/null 2>&1; then
         warn "hdmi_out ports NOT found"
     fi
     
-    if jack_lsp 2>/dev/null | grep -q '^bt_out:'; then
-        pass "bt_out ports exist"
+    # Check if bluealsa-aplay is running (creates ports dynamically when device connects)
+    if pidof bluealsa-aplay >/dev/null 2>&1; then
+        pass "bluealsa-aplay is running"
+        if jack_lsp 2>/dev/null | grep -q '^bluealsa:'; then
+            pass "bluealsa ports exist (device connected)"
+        else
+            warn "bluealsa ports not visible (no device connected yet)"
+        fi
     else
-        fail "bt_out ports NOT found - run: sudo service jack-bridge-ports restart"
+        fail "bluealsa-aplay NOT running - run: sudo service jack-bridge-ports restart"
     fi
     
     echo
     echo "All JACK ports:"
-    jack_lsp 2>/dev/null | grep "_out:" | sed 's/^/  /'
+    jack_lsp 2>/dev/null | grep -E '(usb_out|hdmi_out|bluealsa):' | sed 's/^/  /'
 else
     warn "jack_lsp not available"
 fi
@@ -192,8 +198,8 @@ if [ -n "$MAC" ] && command -v jack_lsp >/dev/null 2>&1; then
         pass "jack-route-select succeeded"
         sleep 1
         echo
-        echo "JACK connections to bt_out:"
-        jack_lsp -c 2>/dev/null | grep -A 5 "bt_out:" | sed 's/^/  /' || echo "  (none)"
+        echo "JACK connections to bluealsa:"
+        jack_lsp -c 2>/dev/null | grep -A 5 "bluealsa:" | sed 's/^/  /' || echo "  (none - device may need to be connected)"
     else
         fail "jack-route-select failed"
         echo "    Check: /tmp/jack-route-select.log"
