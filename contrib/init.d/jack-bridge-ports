@@ -1,13 +1,13 @@
 #!/bin/sh
 ### BEGIN INIT INFO
 # Provides:          jack-bridge-ports
-# Required-Start:    $local_fs $remote_fs jackd-rt
+# Required-Start:    $local_fs $remote_fs dbus bluetooth bluealsad jackd-rt
 # Required-Stop:
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: Spawn persistent JACK bridge ports (usb_out, hdmi_out, bt_out)
-# Description:       Creates permanent alsa_out bridge clients for USB, HDMI, and Bluetooth
-#                    at boot. These remain running to eliminate spawn delays.
+# Short-Description: Spawn persistent JACK bridge ports (usb_out, hdmi_out)
+# Description:       Creates permanent alsa_out bridge clients for USB and HDMI at boot.
+#                    Bluetooth ports are spawned on-demand by jack-route-select when selected.
 ### END INIT INFO
 
 . /lib/lsb/init-functions
@@ -153,44 +153,27 @@ start() {
     echo "Spawning hdmi_out for $HDMI_HW" >> "$LOGFILE" 2>&1
     su -l "$USERNAME" -c "nohup alsa_out -j hdmi_out -d \"$HDMI_HW\" -r 48000 -p 256 -n 3 >>$LOGFILE 2>&1 &" || true
     
-    # ALWAYS spawn bt_out using bluealsa-aplay in JACK mode
-    # This is the correct tool for BlueALSA -> JACK bridging (avoids alsa_out buffer overflow)
-    # bluealsa-aplay monitors BlueALSA and creates JACK ports when devices connect
-    # Without explicit MAC, accepts connections from any paired device (00:00:00:00:00:00)
-    echo "Spawning bluealsa-aplay for JACK output (period=$BT_PERIOD nperiods=$BT_NPERIODS)" >> "$LOGFILE" 2>&1
-    
-    # Use full path since init scripts don't have /usr/local/bin in PATH
-    BLUEALSA_APLAY="/usr/local/bin/bluealsa-aplay"
-    
-    if [ -x "$BLUEALSA_APLAY" ]; then
-        # Calculate PCM timing parameters in microseconds
-        # Period time = samples * 1000000 / sample_rate
-        # Buffer time = period_time * num_periods
-        PERIOD_TIME=$((BT_PERIOD * 1000000 / 48000))
-        BUFFER_TIME=$((PERIOD_TIME * BT_NPERIODS))
-        
-        # Use --pcm=jack to output to JACK server
-        # Creates ports named "bluealsa" when device connects
-        su -l "$USERNAME" -c "nohup $BLUEALSA_APLAY --verbose --pcm=jack --pcm-buffer-time=$BUFFER_TIME --pcm-period-time=$PERIOD_TIME >>$LOGFILE 2>&1 &" || true
-    else
-        echo "ERROR: bluealsa-aplay not found at $BLUEALSA_APLAY" >> "$LOGFILE" 2>&1
-        echo "       Run: sudo ./contrib/install.sh" >> "$LOGFILE" 2>&1
-    fi
+    # NOTE: Bluetooth ports are NOT spawned at boot (unlike USB/HDMI)
+    # Reason: 'jackbridge_bluealsa' PCM requires an ACTIVE Bluetooth connection.
+    # Unlike hw:X,Y devices (kernel nodes that exist regardless of connection),
+    # BlueALSA plugin queries daemon for active transports. If no device connected,
+    # alsa_out fails with "PCM not found". Bluetooth ports are spawned ON-DEMAND
+    # by jack-route-select when user selects Bluetooth output.
+    echo "Bluetooth ports will be spawned on-demand when user selects Bluetooth" >> "$LOGFILE" 2>&1
     
     # Give ports a moment to register with JACK
     sleep 2
     
     # Verify ports appeared
     if command -v jack_lsp >/dev/null 2>&1; then
-        # Note: bluealsa-aplay creates ports named "bluealsa" (not bt_out)
-        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|bluealsa):' || true)
+        # Only USB and HDMI are persistent; Bluetooth is on-demand
+        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
         if [ -n "$PORTS" ]; then
-            echo "Active bridge ports:" >> "$LOGFILE" 2>&1
+            echo "Active persistent bridge ports:" >> "$LOGFILE" 2>&1
             echo "$PORTS" | sed 's/^/  /' >> "$LOGFILE" 2>&1
             log_end_msg 0
         else
             log_warning_msg "No bridge ports found after spawn; check $LOGFILE"
-            log_warning_msg "Note: bluealsa ports appear only when a device connects"
             log_end_msg 1
         fi
     else
@@ -203,13 +186,13 @@ start() {
 stop() {
     log_daemon_msg "Stopping jack-bridge persistent ports" "jack-bridge-ports"
     
-    # Kill alsa_out instances for USB/HDMI
+    # Kill alsa_out instances for USB/HDMI (Bluetooth is on-demand, managed by jack-route-select)
     for port in usb_out hdmi_out; do
         pkill -f "alsa_out -j $port" 2>/dev/null || true
     done
     
-    # Kill bluealsa-aplay (handles Bluetooth)
-    pkill -f "bluealsa-aplay.*--pcm=jack" 2>/dev/null || true
+    # Also kill any on-demand bluealsa ports
+    pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
     
     log_end_msg 0
     return 0
@@ -217,16 +200,24 @@ stop() {
 
 status() {
     if command -v jack_lsp >/dev/null 2>&1; then
-        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|bluealsa):' || true)
-        if [ -n "$PORTS" ]; then
-            echo "Active bridge ports:"
-            echo "$PORTS" | sed 's/^/  /'
-            return 0
+        USB_HDMI=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
+        BT=$(jack_lsp 2>/dev/null | grep -E '^bluealsa:' || true)
+        
+        if [ -n "$USB_HDMI" ]; then
+            echo "Active persistent bridge ports:"
+            echo "$USB_HDMI" | sed 's/^/  /'
         else
-            echo "No bridge ports found"
-            echo "Note: bluealsa ports appear only when a Bluetooth device is connected"
-            return 1
+            echo "No persistent bridge ports found (usb_out, hdmi_out)"
         fi
+        
+        if [ -n "$BT" ]; then
+            echo "Active on-demand Bluetooth ports:"
+            echo "$BT" | sed 's/^/  /'
+        else
+            echo "No Bluetooth ports (spawned on-demand when user selects Bluetooth)"
+        fi
+        
+        [ -n "$USB_HDMI" ] && return 0 || return 1
     else
         echo "jack_lsp not available; cannot check port status"
         return 1

@@ -92,7 +92,7 @@ EOF
 }
  
 # Generate per-user override for ALSA JACK plugin to route playback to a chosen JACK sink
-# $1 = sink prefix (e.g., system:playback_ | usb_out:playback_ | hdmi_out:playback_ | bt_out:playback_)
+# $1 = sink prefix (e.g., system:playback_ | usb_out:playback_ | hdmi_out:playback_ | bluealsa:playback_)
 write_user_jack_override() {
   sinkpref="$1"
   out_dir="$(dirname "$USER_CONF")"
@@ -259,8 +259,9 @@ ensure_hdmi_out() {
 }
 
 ensure_bt_out() {
-  # bluealsa-aplay creates ports dynamically named "bluealsa" when device connects
-  # Just update the BlueALSA defaults for ALSA app routing
+  # ON-DEMAND spawning: Unlike USB/HDMI (which use hw:X,Y kernel nodes),
+  # Bluetooth uses 'jackbridge_bluealsa' ALSA plugin that requires an ACTIVE connection.
+  # This function spawns alsa_out ONLY when user selects Bluetooth output.
   mac_arg="$1"
   
   # Extract MAC if provided
@@ -271,7 +272,7 @@ ensure_bt_out() {
     fi
   fi
   
-  # Write BlueALSA defaults for ALSA apps
+  # Write BlueALSA defaults FIRST (alsa_out will read these)
   if [ -n "$bt_mac" ]; then
     write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
     log "Updated BlueALSA defaults for MAC: $bt_mac"
@@ -280,19 +281,31 @@ ensure_bt_out() {
     log "Updated BlueALSA defaults for most-recent device"
   fi
   
-  # Check if bluealsa-aplay is running
-  if ! pidof bluealsa-aplay >/dev/null 2>&1; then
-    log "WARNING: bluealsa-aplay not running (should be started by jack-bridge-ports)"
-    log "         Run: sudo service jack-bridge-ports restart"
+  # Kill any existing bluealsa alsa_out process (in case switching devices)
+  pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+  sleep 0.5  # Let process terminate
+  
+  # Spawn alsa_out reading from jackbridge_bluealsa PCM (uses defaults we just wrote)
+  log "Spawning bluealsa alsa_out (period=$BT_PERIOD nperiods=$BT_NPERIODS)"
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
   fi
   
-  # Check if bluealsa ports exist (only appear when device is connected)
-  if ! jack_lsp 2>/dev/null | grep -q '^bluealsa:'; then
-    log "NOTE: bluealsa ports not visible yet (device may not be connected)"
-    log "      Ports will appear automatically when Bluetooth device connects"
-  fi
+  # Spawn in background - alsa_out will create bluealsa:playback_1/2 ports
+  nohup alsa_out -j bluealsa -d jackbridge_bluealsa -r "$rate" -p "$BT_PERIOD" -n "$BT_NPERIODS" \
+    >>/tmp/jack-route-select-bluealsa.log 2>&1 &
   
-  return 0
+  # Wait for ports to appear
+  if wait_for_port "bluealsa:playback_1"; then
+    log "bluealsa ports spawned successfully"
+    return 0
+  else
+    log "ERROR: bluealsa ports failed to spawn (check /tmp/jack-route-select-bluealsa.log)"
+    log "       Device may not be connected or BlueALSA daemon not running"
+    return 1
+  fi
 }
 
 route() {
@@ -382,18 +395,24 @@ route() {
 
   case "$target" in
     internal)
-      # With persistent ports, we don't kill clients - just disconnect from them
+      # Kill on-demand Bluetooth client when switching away
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       newpref="system:playback_"
       ;;
     usb)
+      # Kill on-demand Bluetooth client when switching away
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       ensure_usb_out || log "WARNING: ensure_usb_out failed"
       newpref="usb_out:playback_"
       ;;
     hdmi)
+      # Kill on-demand Bluetooth client when switching away
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       ensure_hdmi_out || log "WARNING: ensure_hdmi_out failed"
       newpref="hdmi_out:playback_"
       ;;
     bluetooth)
+      # Spawn on-demand Bluetooth client (kills existing first if any)
       ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
       newpref="bluealsa:playback_"
       ;;

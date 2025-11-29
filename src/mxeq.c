@@ -998,8 +998,11 @@ static void on_latency_period_changed(GtkRange *range, gpointer user_data) {
     if (period > 1024) period = 1024;
     char val[32];
     snprintf(val, sizeof(val), "%d", period);
-    /* Write authoritative latency to devices.conf (no autobridge, no bluetooth.conf) */
-    upsert_kv_atomic("/etc/jack-bridge/devices.conf", "BT_PERIOD", val);
+    /* Write to per-user config (GUI runs as normal user, no root access) */
+    const char *home = g_get_home_dir();
+    char *user_conf = g_build_filename(home, ".config", "jack-bridge", "devices.conf", NULL);
+    upsert_kv_atomic(user_conf, "BT_PERIOD", val);
+    g_free(user_conf);
 }
 
 static void on_latency_nperiods_changed(GtkSpinButton *spin, gpointer user_data) {
@@ -1009,8 +1012,11 @@ static void on_latency_nperiods_changed(GtkSpinButton *spin, gpointer user_data)
     if (n > 4) n = 4;
     char val[16];
     snprintf(val, sizeof(val), "%d", n);
-    /* Persist in devices.conf for bt_out spawn parameters */
-    upsert_kv_atomic("/etc/jack-bridge/devices.conf", "BT_NPERIODS", val);
+    /* Write to per-user config for bluealsa alsa_out spawn parameters */
+    const char *home = g_get_home_dir();
+    char *user_conf = g_build_filename(home, ".config", "jack-bridge", "devices.conf", NULL);
+    upsert_kv_atomic(user_conf, "BT_NPERIODS", val);
+    g_free(user_conf);
 }
 
 /* Build Bluetooth panel once and bind to GUI BT helpers */
@@ -1135,9 +1141,9 @@ static void create_bt_panel(GtkWidget *main_box) {
     GtkWidget *n_spin = gtk_spin_button_new_with_range(2, 4, 1);
     gtk_box_pack_start(GTK_BOX(lat_box), n_spin, FALSE, FALSE, 0);
 
-    /* Initialize latency controls from config or defaults */
+    /* Initialize latency controls from config or defaults (match init script defaults) */
     char *v_period = read_kv_value("/etc/jack-bridge/devices.conf", "BT_PERIOD");
-    int init_period = v_period ? atoi(v_period) : 1024;
+    int init_period = v_period ? atoi(v_period) : 256;
     if (init_period < 128) init_period = 128;
     if (init_period > 1024) init_period = 1024;
     gtk_range_set_value(GTK_RANGE(lat_scale), init_period);
@@ -1841,7 +1847,9 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     const char *label = gtk_button_get_label(GTK_BUTTON(tb));
     if (!label) return;
 
+    GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
     gboolean ok = TRUE;
+    gchar *mac = NULL;
 
     if (g_strcmp0(label, "Internal") == 0) {
         ok = route_to_target_async("internal");
@@ -1850,24 +1858,83 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     } else if (g_strcmp0(label, "HDMI") == 0) {
         ok = route_to_target_async("hdmi");
     } else if (g_strcmp0(label, "Bluetooth") == 0) {
-        /* If a Bluetooth device is selected in the BT panel, pass its MAC to the helper */
+        /* Get MAC from BT panel selection */
         char *obj = NULL;
-        char *mac = NULL;
         if (g_bt_tree && GTK_IS_TREE_VIEW(g_bt_tree)) {
-            obj = (char*)tree_get_selected_obj(GTK_TREE_VIEW(g_bt_tree)); /* returns newly-allocated or NULL */
+            obj = (char*)tree_get_selected_obj(GTK_TREE_VIEW(g_bt_tree));
             if (obj) mac = mac_from_bluez_object(obj);
+            if (obj) g_free(obj);
         }
-        ok = route_to_target_async_with_arg("bluetooth", mac);
-        if (mac) g_free(mac);
-        if (obj) g_free(obj);
+        
+        if (!mac) {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                  "No Bluetooth device selected.\n\nPlease:\n1. Expand 'BLUETOOTH' panel\n2. Connect a device\n3. Try again");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+            /* Revert radio to previous selection (don't leave Bluetooth selected if it failed) */
+            g_signal_handlers_block_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            gtk_toggle_button_set_active(tb, FALSE);
+            if (g_rb_internal) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
+            g_signal_handlers_unblock_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            return;
+        }
+        
+        /* Call helper SYNCHRONOUSLY so we can verify result */
+        gchar *cmd = g_strdup_printf("%s bluetooth %s", ROUTE_HELPER, mac);
+        gint status = 0;
+        GError *err = NULL;
+        ok = g_spawn_command_line_sync(cmd, NULL, NULL, &status, &err);
+        g_free(cmd);
+        
+        if (!ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                  "Failed to set Bluetooth output.\n\nError: %s\n\nCheck that device is connected and BlueALSA daemon is running.",
+                                                  err ? err->message : "routing helper failed");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+            if (err) g_error_free(err);
+            /* Revert radio to Internal */
+            g_signal_handlers_block_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            gtk_toggle_button_set_active(tb, FALSE);
+            if (g_rb_internal) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
+            g_signal_handlers_unblock_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            g_free(mac);
+            return;
+        }
+        
+        /* Give ports time to spawn */
+        g_usleep(1000000); /* 1 second */
+        
+        /* Verify ports exist */
+        if (!bluealsa_ports_exist()) {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                  "Bluetooth ports failed to spawn.\n\nPossible causes:\n• Device disconnected\n• BlueALSA daemon not running\n• No A2DP transport available\n\nCheck /tmp/jack-route-select.log");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+            /* Revert radio to Internal */
+            g_signal_handlers_block_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            gtk_toggle_button_set_active(tb, FALSE);
+            if (g_rb_internal) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
+            g_signal_handlers_unblock_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            g_free(mac);
+            return;
+        }
+        
+        /* Success! Show confirmation */
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                              GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                              "Bluetooth output ready!\n\nDevice: %s\nPorts: bluealsa:playback_1/2\n\nAudio will play through Bluetooth.", mac);
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        g_free(mac);
+        return;
     } else {
         return;
     }
 
     if (!ok) {
-        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
         GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Routing helper is missing or failed.\nExpected at: %s\nRun install.sh or copy the helper to that path.",
+                                              "Routing helper is missing or failed.\nExpected at: %s\nRun: sudo ./contrib/install.sh",
                                               ROUTE_HELPER);
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
@@ -2019,6 +2086,25 @@ static gboolean sync_devices_panel_to_bluetooth_idle(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
+/* Helper: check if bluealsa JACK ports exist (returns TRUE if found) */
+static gboolean bluealsa_ports_exist(void) {
+    gchar *out = NULL;
+    gint status = 0;
+    
+    if (!g_spawn_command_line_sync("jack_lsp", &out, NULL, &status, NULL)) {
+        return FALSE;
+    }
+    
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (out) g_free(out);
+        return FALSE;
+    }
+    
+    gboolean found = (out && (strstr(out, "bluealsa:playback_1") != NULL));
+    if (out) g_free(out);
+    return found;
+}
+
 /* Button handler: set selected Bluetooth device as current OUTPUT (routes playback) */
 static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data) {
     (void)user_data;
@@ -2056,25 +2142,64 @@ static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data) {
         return;
     }
 
-    /* Call routing helper asynchronously */
-    gboolean ok = route_to_target_async_with_arg("bluetooth", mac);
+    GtkWindow *parent = get_parent_window_from_widget(btnw);
     
-    if (!ok) {
-        GtkWindow *parent = get_parent_window_from_widget(btnw);
+    /* Call routing helper SYNCHRONOUSLY so we can verify result */
+    if (!file_exists_readable(ROUTE_HELPER)) {
         GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Routing helper failed to start.");
+                                              "Routing helper missing: %s\nRun: sudo ./contrib/install.sh", ROUTE_HELPER);
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
-    } else {
-        /* Phase 3: Update Devices panel to reflect Bluetooth selection */
-        g_idle_add(sync_devices_panel_to_bluetooth_idle, NULL);
-        
-        GtkWindow *parent = get_parent_window_from_widget(btnw);
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
-                                              GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                                              "Bluetooth output set to %s\nRouting to bluealsa ports.", mac);
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
+        g_free(mac);
+        return;
     }
+    
+    gchar *cmd = g_strdup_printf("%s bluetooth %s", ROUTE_HELPER, mac);
+    gchar *stdout_data = NULL;
+    gchar *stderr_data = NULL;
+    gint exit_status = 0;
+    GError *err = NULL;
+    
+    gboolean spawn_ok = g_spawn_command_line_sync(cmd, &stdout_data, &stderr_data, &exit_status, &err);
+    g_free(cmd);
+    
+    if (!spawn_ok || !WIFEXITED(exit_status) || WEXITSTATUS(exit_status) != 0) {
+        /* Helper failed to run or exited with error */
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "Failed to set Bluetooth output.\n\nHelper error: %s\n\nCheck that:\n• Device is connected\n• BlueALSA daemon is running\n• You are in 'audio' and 'bluetooth' groups",
+                                              err ? err->message : (stderr_data ? stderr_data : "unknown"));
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        if (err) g_error_free(err);
+        if (stdout_data) g_free(stdout_data);
+        if (stderr_data) g_free(stderr_data);
+        g_free(mac);
+        return;
+    }
+    
+    if (stdout_data) g_free(stdout_data);
+    if (stderr_data) g_free(stderr_data);
+    
+    /* Give ports a moment to appear (helper spawns alsa_out in background) */
+    g_usleep(5000000); /* 5 seconds */
+    
+    /* Verify bluealsa ports actually appeared */
+    if (!bluealsa_ports_exist()) {
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                              "Bluetooth ports failed to spawn.\n\nPossible causes:\n• Device disconnected during setup\n• BlueALSA daemon not running\n• No active A2DP transport\n\nCheck /tmp/jack-route-select.log for details");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        g_free(mac);
+        return;
+    }
+    
+    /* Success! Update Devices panel and show confirmation */
+    g_idle_add(sync_devices_panel_to_bluetooth_idle, NULL);
+    
+    GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                          GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                          "Bluetooth output set to %s\n\nPorts: bluealsa:playback_1/2\nAudio will play through Bluetooth device.", mac);
+    gtk_dialog_run(GTK_DIALOG(d));
+    gtk_widget_destroy(d);
     g_free(mac);
 }

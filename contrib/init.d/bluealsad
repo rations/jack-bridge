@@ -28,8 +28,8 @@ PIDFILE="/var/run/bluealsad.pid"
 # Defaults
 BLUEALSAD_USER="${BLUEALSAD_USER:-bluealsa}"
 # --keep-alive=-1 maintains A2DP transport indefinitely (prevents port disappearance)
-# Profiles: a2dp-source (capture from device), a2dp-sink (playback to device)
-BLUEALSAD_ARGS="${BLUEALSAD_ARGS:---keep-alive=-1 -p a2dp-source -p a2dp-sink}"
+# Profiles: a2dp-source (capture from device), a2dp-sink (playback to device), hfp-hf, hsp-hs
+BLUEALSAD_ARGS="${BLUEALSAD_ARGS:---keep-alive=-1 -p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs}"
 BLUEALSAD_LOG="${BLUEALSAD_LOG:-/var/log/bluealsad.log}"
 
 # Load overrides if present

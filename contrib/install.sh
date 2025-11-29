@@ -446,14 +446,14 @@ if [ -f "contrib/init.d/bluealsad" ]; then
         echo "Installed defaults to ${DEFAULTS_DIR}/bluealsad"
     fi
 
-    # If no defaults file was provided, create a conservative /etc/default/bluealsad so
-    # bluealsad can be started with common profiles enabled (a2dp + sco/hfp).
-    if [ ! -f "${DEFAULTS_DIR}/bluealsad" ]; then
-        cat > "${DEFAULTS_DIR}/bluealsad" <<'BLUEALSAD_DEFAULT'
+    # Always overwrite /etc/default/bluealsad to ensure --keep-alive is present (critical fix)
+    # Previous versions were missing this parameter, causing ports to disappear
+    cat > "${DEFAULTS_DIR}/bluealsad" <<'BLUEALSAD_DEFAULT'
 # Created by jack-bridge installer - sensible defaults for BlueALSA daemon
 BLUEALSAD_USER=bluealsa
+# --keep-alive=-1 maintains A2DP transport indefinitely (required for persistent JACK ports)
 # Provide common profile options so audio profiles are available at start
-BLUEALSAD_ARGS="-p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs"
+BLUEALSAD_ARGS="--keep-alive=-1 -p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs"
 BLUEALSAD_LOG=/var/log/bluealsad.log
 BLUEALSAD_PIDFILE=/var/run/bluealsad.pid
 BLUEALSAD_RUNTIME_DIR=/var/lib/bluealsa
@@ -462,14 +462,13 @@ BLUEALSAD_VERBOSE=0
 BLUEALSAD_AUTOSTART=1
 BLUEALSAD_NOTES="Defaults provided by jack-bridge installer"
 BLUEALSAD_DEFAULT
-        chmod 644 "${DEFAULTS_DIR}/bluealsad" || true
-        echo "Wrote default ${DEFAULTS_DIR}/bluealsad with common profile args (a2dp/sco)."
-    fi
+    chmod 644 "${DEFAULTS_DIR}/bluealsad" || true
+    echo "Installed (force-overwrite) ${DEFAULTS_DIR}/bluealsad with --keep-alive=-1"
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering bluealsad init script with explicit priorities..."
-        # bluealsad after bluetoothd, before jackd-rt
+        # bluealsad must start BEFORE jack-bridge-ports (use defaults which creates S01)
         update-rc.d -f bluealsad remove >/dev/null 2>&1 || true
-        update-rc.d bluealsad start 21 2 3 4 5 . stop 79 0 1 6 . || true
+        update-rc.d bluealsad defaults 01 99 || true
     fi
 fi
 
@@ -480,10 +479,11 @@ if [ -f "contrib/init.d/jack-bridge-ports" ]; then
     
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering jack-bridge-ports init script..."
-        # Start after jackd-rt (which uses priority defaults ~20) - use 22 to ensure JACK is ready
+        # Start after jackd-rt (S02) and bluealsad (S01) - use priority 04 for proper ordering
         update-rc.d -f jack-bridge-ports remove >/dev/null 2>&1 || true
-        update-rc.d jack-bridge-ports start 22 2 3 4 5 . stop 78 0 1 6 . || true
-        echo "  ✓ jack-bridge-ports will spawn usb_out, hdmi_out, and bluealsa-aplay at boot"
+        update-rc.d jack-bridge-ports defaults 04 96 || true
+        echo "  ✓ jack-bridge-ports will spawn usb_out and hdmi_out at boot"
+        echo "  ✓ Bluetooth ports spawn on-demand when user selects Bluetooth output"
     fi
 else
     echo "Warning: contrib/init.d/jack-bridge-ports not found; persistent ports disabled"
@@ -690,17 +690,7 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
 done
 
 echo ""
-echo "Installation complete!"
-echo ""
-echo "IMPORTANT: Services must be restarted for changes to take effect:"
-echo "  sudo service jack-bridge-ports restart"
-echo "  sudo service bluealsad restart"
-echo ""
-echo "OR simply reboot the system:"
-echo "  sudo reboot"
-echo ""
-echo "After restart, verify bluealsa-aplay is running:"
-echo "  ps aux | grep bluealsa-aplay"
+echo "Installation complete, reboot for changes to take effect."
 echo ""
 
 exit 0
