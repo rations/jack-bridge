@@ -690,7 +690,7 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
 done
 
 echo ""
-echo "Installation complete, reboot for changes to take effect."
+echo "Installation complete, reboot for changes to take effect. sudo reboot"
 echo ""
 
 exit 0

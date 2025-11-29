@@ -15,6 +15,7 @@ static void create_devices_panel(GtkWidget *main_box);
 
 /* Forward declarations needed by earlier callers */
 static int write_string_atomic(const char *path, const char *content);
+static gboolean bluealsa_ports_exist(void);
 
 typedef struct {
     snd_mixer_t *mixer;
