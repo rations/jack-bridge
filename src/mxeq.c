@@ -760,11 +760,13 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         g_free((gchar*)rate_text);
     }
 
-    /* Always use ALSA 'default' for recording - captures from system default input device.
-     * The Devices panel routes PLAYBACK (output), but recording needs CAPTURE (input).
-     * Using 'default' ensures recording works from the system's default microphone/line-in
-     * regardless of which output device is selected for playback. */
-    const char *input_dev = "default";
+    /* Use ALSA 'plughw:0' for recording - direct hardware capture with format conversion.
+     * This accesses the hardware microphone/line-in directly via ALSA.
+     * Cannot use 'default' (routes through equal - playback only) or 'jack' (FLOAT_LE only).
+     * The 'plughw' device provides automatic format/rate conversion so arecord can
+     * record in S16_LE format to WAV files. This is the same microphone that feeds
+     * JACK's system:capture ports, so video calling apps using JACK still work. */
+    const char *input_dev = "plughw:0";
 
     /* Build argv for arecord */
     gchar *channels_s = g_strdup_printf("%d", channels);
@@ -884,142 +886,6 @@ static void create_recorder_ui(GtkWidget *main_box) {
     g_signal_connect(rec_ui->stop_btn, "clicked", G_CALLBACK(stop_recording), NULL);
 }
 
-/* ---- Bluetooth latency controls (period/number of periods) ---- */
-
-typedef struct {
-    GtkRange *period_slider;        /* frames (128..1024) */
-    GtkSpinButton *nperiods_spin;   /* 2..4 */
-} BtLatencyUI;
-
-/* Read a simple KEY=VALUE from a file; returns newly allocated string or NULL */
-static char *read_kv_value(const char *path, const char *key) {
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-    size_t klen = strlen(key);
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#') continue;
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        /* trim newline */
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        if ((size_t)(eq - line) == klen && strncmp(line, key, klen) == 0) {
-            char *val = eq + 1;
-            /* trim leading spaces */
-            while (*val == ' ' || *val == '\t') val++;
-            fclose(f);
-            return g_strdup(val);
-        }
-    }
-    fclose(f);
-    return NULL;
-}
-
-/* Atomically upsert KEY=VALUE into file */
-static int upsert_kv_atomic(const char *path, const char *key, const char *value) {
-    if (!path || !key || !value) return -1;
-
-    /* Ensure parent directory exists before writing */
-    char *dir = g_path_get_dirname(path);
-    if (dir && dir[0]) {
-        if (g_mkdir_with_parents(dir, 0755) != 0) {
-            g_free(dir);
-            return -1;
-        }
-    }
-    if (dir) g_free(dir);
-
-    FILE *in = fopen(path, "r");
-    GString *out = g_string_new(NULL);
-    gboolean replaced = FALSE;
-    size_t klen = strlen(key);
-
-    if (in) {
-        char line[1024];
-        while (fgets(line, sizeof(line), in)) {
-            char *orig = line;
-            char *nl = strchr(line, '\n');
-            if (nl) *nl = '\0';
-            if (line[0] != '#') {
-                char *eq = strchr(line, '=');
-                if (eq && (size_t)(eq - line) == klen && strncmp(line, key, klen) == 0) {
-                    g_string_append_printf(out, "%s=%s\n", key, value);
-                    replaced = TRUE;
-                    continue;
-                }
-            }
-            g_string_append_printf(out, "%s\n", orig);
-        }
-        fclose(in);
-    }
-    if (!replaced) {
-        g_string_append_printf(out, "%s=%s\n", key, value);
-    }
-
-    /* Write to temp and rename atomically */
-    char *tmp = g_strdup_printf("%s.tmp", path);
-    FILE *outf = fopen(tmp, "w");
-    if (!outf) {
-        g_string_free(out, TRUE);
-        g_free(tmp);
-        return -1;
-    }
-    if (fputs(out->str, outf) == EOF) {
-        fclose(outf);
-        g_string_free(out, TRUE);
-        g_unlink(tmp);
-        g_free(tmp);
-        return -1;
-    }
-    fclose(outf);
-
-    if (g_rename(tmp, path) != 0) {
-        g_unlink(tmp);
-        g_string_free(out, TRUE);
-        g_free(tmp);
-        return -1;
-    }
-
-    g_string_free(out, TRUE);
-    g_free(tmp);
-    return 0;
-}
-
-static void hup_autobridge(void) __attribute__((unused));
-static void hup_autobridge(void) {
-    /* Autobridge removed: no-op to avoid spurious file access */
-    (void)0;
-}
-
-static void on_latency_period_changed(GtkRange *range, gpointer user_data) {
-    (void)user_data;
-    int period = (int)gtk_range_get_value(range);
-    if (period < 128) period = 128;
-    if (period > 1024) period = 1024;
-    char val[32];
-    snprintf(val, sizeof(val), "%d", period);
-    /* Write to per-user config (GUI runs as normal user, no root access) */
-    const char *home = g_get_home_dir();
-    char *user_conf = g_build_filename(home, ".config", "jack-bridge", "devices.conf", NULL);
-    upsert_kv_atomic(user_conf, "BT_PERIOD", val);
-    g_free(user_conf);
-}
-
-static void on_latency_nperiods_changed(GtkSpinButton *spin, gpointer user_data) {
-    (void)user_data;
-    int n = gtk_spin_button_get_value_as_int(spin);
-    if (n < 2) n = 2;
-    if (n > 4) n = 4;
-    char val[16];
-    snprintf(val, sizeof(val), "%d", n);
-    /* Write to per-user config for bluealsa alsa_out spawn parameters */
-    const char *home = g_get_home_dir();
-    char *user_conf = g_build_filename(home, ".config", "jack-bridge", "devices.conf", NULL);
-    upsert_kv_atomic(user_conf, "BT_NPERIODS", val);
-    g_free(user_conf);
-}
-
 /* Build Bluetooth panel once and bind to GUI BT helpers */
 static void on_bt_selection_changed(GtkTreeSelection *sel, gpointer user_data) {
     (void)user_data;
@@ -1124,41 +990,6 @@ static void create_bt_panel(GtkWidget *main_box) {
     gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), remove_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), set_input_btn, FALSE, FALSE, 0);
-
-    /* Latency controls (A2DP/JACK bridge) */
-    GtkWidget *lat_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_box_pack_start(GTK_BOX(bt_vbox), lat_box, FALSE, FALSE, 0);
-
-    GtkWidget *lat_label = gtk_label_new("Bluetooth latency (period frames):");
-    gtk_box_pack_start(GTK_BOX(lat_box), lat_label, FALSE, FALSE, 0);
-
-    GtkWidget *lat_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 128, 1024, 64);
-    gtk_widget_set_size_request(lat_scale, 200, -1);
-    gtk_box_pack_start(GTK_BOX(lat_box), lat_scale, TRUE, TRUE, 0);
-
-    GtkWidget *n_label = gtk_label_new("nperiods:");
-    gtk_box_pack_start(GTK_BOX(lat_box), n_label, FALSE, FALSE, 0);
-
-    GtkWidget *n_spin = gtk_spin_button_new_with_range(2, 4, 1);
-    gtk_box_pack_start(GTK_BOX(lat_box), n_spin, FALSE, FALSE, 0);
-
-    /* Initialize latency controls from config or defaults (match init script defaults) */
-    char *v_period = read_kv_value("/etc/jack-bridge/devices.conf", "BT_PERIOD");
-    int init_period = v_period ? atoi(v_period) : 256;
-    if (init_period < 128) init_period = 128;
-    if (init_period > 1024) init_period = 1024;
-    gtk_range_set_value(GTK_RANGE(lat_scale), init_period);
-    if (v_period) g_free(v_period);
-
-    char *v_n = read_kv_value("/etc/jack-bridge/devices.conf", "BT_NPERIODS");
-    int init_n = v_n ? atoi(v_n) : 3;
-    if (init_n < 2) init_n = 2;
-    if (init_n > 4) init_n = 4;
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(n_spin), init_n);
-    if (v_n) g_free(v_n);
-
-    g_signal_connect(lat_scale, "value-changed", G_CALLBACK(on_latency_period_changed), NULL);
-    g_signal_connect(n_spin, "value-changed", G_CALLBACK(on_latency_nperiods_changed), NULL);
 
     /* Disable action buttons until a device is selected */
     gtk_widget_set_sensitive(pair_btn, FALSE);
@@ -2182,7 +2013,7 @@ static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data) {
     if (stderr_data) g_free(stderr_data);
     
     /* Give ports a moment to appear (helper spawns alsa_out in background) */
-    g_usleep(5000000); /* 5 seconds */
+    g_usleep(2000000); /* 2 seconds */
     
     /* Verify bluealsa ports actually appeared */
     if (!bluealsa_ports_exist()) {
