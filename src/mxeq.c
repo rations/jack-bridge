@@ -760,13 +760,12 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         g_free((gchar*)rate_text);
     }
 
-    /* Use ALSA 'plughw:0' for recording - direct hardware capture with format conversion.
-     * This accesses the hardware microphone/line-in directly via ALSA.
-     * Cannot use 'default' (routes through equal - playback only) or 'jack' (FLOAT_LE only).
-     * The 'plughw' device provides automatic format/rate conversion so arecord can
-     * record in S16_LE format to WAV files. This is the same microphone that feeds
-     * JACK's system:capture ports, so video calling apps using JACK still work. */
-    const char *input_dev = "plughw:0";
+    /* Use ALSA 'jack' device for recording - connects to JACK's system:capture ports.
+     * The 'jack' PCM is defined in /etc/asound.conf with capture_ports pointing to
+     * system:capture_1/2, which are created by jackd when opened with -C hw:0.
+     * This allows arecord to record from microphones/line-in through JACK.
+     * Cannot use 'plughw:0' (jackd has exclusive hw access) or 'default' (playback only). */
+    const char *input_dev = "jack";
 
     /* Build argv for arecord */
     gchar *channels_s = g_strdup_printf("%d", channels);

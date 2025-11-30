@@ -153,6 +153,11 @@ start() {
     echo "Spawning hdmi_out for $HDMI_HW" >> "$LOGFILE" 2>&1
     su -l "$USERNAME" -c "nohup alsa_out -j hdmi_out -d \"$HDMI_HW\" -r 48000 -p 256 -n 3 >>$LOGFILE 2>&1 &" || true
     
+    # NOTE: system:capture ports are created automatically by jackd with -D flag (duplex mode)
+    # jackd opens the detected device for BOTH playback and capture
+    # No alsa_in needed - it would conflict with jackd and cause process errors
+    echo "system:capture ports created by jackd in duplex mode (-D flag)" >> "$LOGFILE" 2>&1
+    
     # NOTE: Bluetooth ports are NOT spawned at boot (unlike USB/HDMI)
     # Reason: 'jackbridge_bluealsa' PCM requires an ACTIVE Bluetooth connection.
     # Unlike hw:X,Y devices (kernel nodes that exist regardless of connection),
@@ -166,8 +171,8 @@ start() {
     
     # Verify ports appeared
     if command -v jack_lsp >/dev/null 2>&1; then
-        # Only USB and HDMI are persistent; Bluetooth is on-demand
-        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
+        # USB, HDMI (output) and system capture (input from alsa_in) are persistent; Bluetooth is on-demand
+        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|system):' || true)
         if [ -n "$PORTS" ]; then
             echo "Active persistent bridge ports:" >> "$LOGFILE" 2>&1
             echo "$PORTS" | sed 's/^/  /' >> "$LOGFILE" 2>&1
@@ -191,6 +196,8 @@ stop() {
         pkill -f "alsa_out -j $port" 2>/dev/null || true
     done
     
+    # No alsa_in to kill - jackd handles capture in duplex mode
+    
     # Also kill any on-demand bluealsa ports
     pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
     
@@ -200,14 +207,22 @@ stop() {
 
 status() {
     if command -v jack_lsp >/dev/null 2>&1; then
-        USB_HDMI=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
+        OUTPUT=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
+        INPUT=$(jack_lsp 2>/dev/null | grep -E '^system:capture' || true)
         BT=$(jack_lsp 2>/dev/null | grep -E '^bluealsa:' || true)
         
-        if [ -n "$USB_HDMI" ]; then
-            echo "Active persistent bridge ports:"
-            echo "$USB_HDMI" | sed 's/^/  /'
+        if [ -n "$OUTPUT" ]; then
+            echo "Active persistent OUTPUT bridge ports:"
+            echo "$OUTPUT" | sed 's/^/  /'
         else
-            echo "No persistent bridge ports found (usb_out, hdmi_out)"
+            echo "No persistent OUTPUT bridge ports found (usb_out, hdmi_out)"
+        fi
+        
+        if [ -n "$INPUT" ]; then
+            echo "Active persistent INPUT bridge ports (from alsa_in):"
+            echo "$INPUT" | sed 's/^/  /'
+        else
+            echo "No persistent INPUT bridge ports found (system:capture from alsa_in)"
         fi
         
         if [ -n "$BT" ]; then
@@ -217,7 +232,7 @@ status() {
             echo "No Bluetooth ports (spawned on-demand when user selects Bluetooth)"
         fi
         
-        [ -n "$USB_HDMI" ] && return 0 || return 1
+        [ -n "$OUTPUT" ] || [ -n "$INPUT" ] && return 0 || return 1
     else
         echo "jack_lsp not available; cannot check port status"
         return 1

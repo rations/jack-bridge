@@ -99,11 +99,14 @@ start() {
         DEVICE="hw:0"
     fi
 
-    # Build jackd args with MIDI support
+    # Build jackd args with SEPARATE playback and capture devices
+    # -P: Playback uses detected device (can be hw:CARD=PCH, hw:CARD=HDMI, etc)
+    # -C: Capture ALWAYS uses hw:0 (numeric form ensures proper ALSA capture access)
+    # Some cards expose capture differently via hw:CARD=name vs hw:0 numeric syntax
     if [ -n "$JACKD_MIDI" ] && [ "$JACKD_MIDI" != "none" ]; then
-        ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} -X ${JACKD_MIDI} ${JACKD_ARGS}"
+        ARGS="-R -P${JACKD_PRIORITY} -d alsa -P ${DEVICE} -C hw:0 -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} -X ${JACKD_MIDI} ${JACKD_ARGS}"
     else
-        ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+        ARGS="-R -P${JACKD_PRIORITY} -d alsa -P ${DEVICE} -C hw:0 -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
     fi
 
     # Ensure user exists
