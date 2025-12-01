@@ -2,7 +2,7 @@
 ### BEGIN INIT INFO
 # Provides:          jack-bridge-ports
 # Required-Start:    $local_fs $remote_fs dbus bluetooth bluealsad jackd-rt
-# Required-Stop:
+# Required-Stop:     $local_fs $remote_fs dbus bluetooth bluealsad jackd-rt
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 # Short-Description: Spawn persistent JACK bridge ports (usb_out, hdmi_out)
@@ -191,15 +191,22 @@ start() {
 stop() {
     log_daemon_msg "Stopping jack-bridge persistent ports" "jack-bridge-ports"
     
-    # Kill alsa_out instances for USB/HDMI (Bluetooth is on-demand, managed by jack-route-select)
+    # Gracefully terminate alsa_out instances for USB/HDMI with proper signal handling
     for port in usb_out hdmi_out; do
-        pkill -f "alsa_out -j $port" 2>/dev/null || true
+        # First try SIGTERM, wait up to 5s, then SIGKILL if needed
+        pkill -TERM -f "alsa_out -j $port" 2>/dev/null || true
     done
     
-    # No alsa_in to kill - jackd handles capture in duplex mode
+    # Also gracefully terminate any on-demand bluealsa ports
+    pkill -TERM -f "alsa_out -j bluealsa" 2>/dev/null || true
     
-    # Also kill any on-demand bluealsa ports
-    pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+    # Wait for processes to exit gracefully
+    sleep 2
+    
+    # Force kill any remaining processes
+    for port in usb_out hdmi_out bluealsa; do
+        pkill -KILL -f "alsa_out -j $port" 2>/dev/null || true
+    done
     
     log_end_msg 0
     return 0

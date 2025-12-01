@@ -718,7 +718,7 @@ static void rebuild_mixer_for_card(int card_num) {
     /* Create slider for each control found */
     for (int i = 0; i < g_mixer_data->num_channels; i++) {
         GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), channel_box, TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), channel_box, TRUE, TRUE, 1);
 
         GtkWidget *label = gtk_label_new(g_mixer_data->channels[i].channel_name);
         gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
@@ -1270,10 +1270,10 @@ int main(int argc, char *argv[]) {
     GtkWidget *mixer_frame = gtk_frame_new(NULL);
     gtk_box_pack_start(GTK_BOX(main_box), mixer_frame, FALSE, FALSE, 0);
 
-    // Mixer horizontal box (homogeneous=TRUE ensures even spacing, zero gap for maximum compactness)
-    GtkWidget *mixer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    // Mixer horizontal box (homogeneous=TRUE ensures even spacing, reduced gap for compactness)
+    GtkWidget *mixer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
     gtk_box_set_homogeneous(GTK_BOX(mixer_box), TRUE);
-    gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 3);
+    gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 5);
     gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_box);
     
     /* Store mixer_box reference for dynamic rebuild */
@@ -1299,7 +1299,7 @@ int main(int argc, char *argv[]) {
     } else {
         for (int i = 0; i < mixer_data.num_channels; i++) {
             GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-            gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 0);
+            gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 1);
 
             GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
             gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
