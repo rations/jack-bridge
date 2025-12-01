@@ -6,7 +6,7 @@
 
 ## Features
 
-### 🎚️ Alsa Sound Connect GUI - Original mixer and eq GUI by mrgreenjeans **AlsaTune GUI** ([SourceForge](https://sourceforge.net/projects/vuu-do/files/Miscellaneous/apps/AlsaTune/))
+### Alsa Sound Connect GUI - Original mixer and eq GUI by mrgreenjeans **AlsaTune GUI** ([SourceForge](https://sourceforge.net/projects/vuu-do/files/Miscellaneous/apps/AlsaTune/))
 
 Professional audio control interface (`mxeq`) with:
 - **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB/HDMI/BLUETOOTH)
@@ -51,6 +51,9 @@ cd jack-bridge
 
 # Make installer executable
 sudo chmod +x ./contrib/install.sh
+
+# Update 
+sudo apt update
 
 # Run installer
 sudo ./contrib/install.sh
