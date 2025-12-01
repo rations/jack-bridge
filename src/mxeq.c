@@ -30,6 +30,8 @@ typedef struct {
     snd_mixer_t *mixer;
     MixerChannel *channels;
     int num_channels;
+    int current_card;  /* Track which card we're showing (0=internal, 1=USB, etc.) */
+    GtkWidget *mixer_box;  /* Reference to container for dynamic rebuild */
 } MixerData;
 
 typedef struct {
@@ -58,8 +60,12 @@ static GtkWidget *g_rb_internal = NULL;
 static GtkWidget *g_rb_usb = NULL;
 static GtkWidget *g_rb_hdmi = NULL;
 static GtkWidget *g_rb_bt = NULL;
+/* Global mixer data for dynamic card switching */
+static MixerData *g_mixer_data = NULL;
 /* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
 static char *mac_from_bluez_object(const char *s);
+/* Forward declaration for mixer rebuild */
+static void rebuild_mixer_for_card(int card_num);
 
 /* When both expanders are collapsed we want the main window to shrink back to a
    compact height so there is no wasted blank space. This handler watches the
@@ -469,89 +475,105 @@ static void eq_slider_changed(GtkRange *range, EQBand *band) {
     snd_ctl_elem_write(band->ctl, band->val);
 }
 
-static void init_alsa_mixer(MixerData *data) {
-    /* Try to find a mixer with known channel elements.
-     * Some systems route ALSA default through JACK/equal and do not expose mixer
-     * elements there. In that case try explicit hardware card attachments.
+static void init_alsa_mixer(MixerData *data, int card_num) {
+    /* Generic mixer initialization for specified card number.
+     * Enumerates ALL simple mixer elements (no hardcoded names).
+     * Works for any audio card: internal, USB, or external interfaces.
      */
-    const char *attach_list[] = {
-        "default",
-        "hw:0",
-        "plughw:0",
-        "hw:1",
-        "plughw:1",
-        NULL
-    };
-
-    const char *channel_names[] = {"Master", "Speaker", "PCM", "Headphone", "Capture", "Mic", "Mic Boost", "Internal Mic Boost", "Beep"};
-    int max_channels = G_N_ELEMENTS(channel_names);
-    data->channels = g_new(MixerChannel, max_channels);
+    
+    /* Close existing mixer if reinitializing */
+    if (data->mixer) {
+        snd_mixer_close(data->mixer);
+        data->mixer = NULL;
+    }
+    if (data->channels) {
+        g_free(data->channels);
+        data->channels = NULL;
+    }
     data->num_channels = 0;
-
-    for (const char **a = attach_list; *a != NULL; ++a) {
-        snd_mixer_t *m = NULL;
-        if (snd_mixer_open(&m, 0) < 0) {
-            /* try next attach point */
-            continue;
-        }
-        if (snd_mixer_attach(m, *a) < 0) {
-            snd_mixer_close(m);
-            continue;
-        }
-        if (snd_mixer_selem_register(m, NULL, NULL) < 0) {
-            snd_mixer_close(m);
-            continue;
-        }
-        if (snd_mixer_load(m) < 0) {
-            snd_mixer_close(m);
-            continue;
-        }
-
-        /* Probe for known controls on this mixer instance */
-        int found = 0;
-        for (int i = 0; i < max_channels; i++) {
-            snd_mixer_selem_id_t *sid;
-            snd_mixer_selem_id_alloca(&sid);
-            snd_mixer_selem_id_set_name(sid, channel_names[i]);
-            snd_mixer_elem_t *elem = snd_mixer_find_selem(m, sid);
-            if (elem) {
-                /* Detect if this is a capture-only control */
-                gboolean is_capture = FALSE;
-                if (snd_mixer_selem_has_capture_volume(elem) && !snd_mixer_selem_has_playback_volume(elem)) {
-                    is_capture = TRUE;
-                    /* Auto-enable capture switch if it exists and is currently off */
-                    if (snd_mixer_selem_has_capture_switch(elem)) {
-                        int sw = 0;
-                        snd_mixer_selem_get_capture_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                        if (!sw) {
-                            /* Unmute/enable capture automatically on startup */
-                            snd_mixer_selem_set_capture_switch_all(elem, 1);
-                            fprintf(stderr, "Auto-enabled capture for '%s'\n", channel_names[i]);
-                        }
-                    }
-                }
-                data->channels[found].elem = elem;
-                data->channels[found].channel_name = channel_names[i];
-                data->channels[found].is_capture = is_capture;
-                found++;
-            }
-        }
-
-        if (found > 0) {
-            /* Accept this mixer as the active mixer */
-            data->mixer = m;
-            data->num_channels = found;
-            return;
-        } else {
-            /* No useful elements on this mixer; close and try next */
-            snd_mixer_close(m);
+    data->current_card = card_num;
+    
+    /* Build card attach string */
+    gchar *card_str = g_strdup_printf("hw:%d", card_num);
+    
+    snd_mixer_t *m = NULL;
+    if (snd_mixer_open(&m, 0) < 0) {
+        fprintf(stderr, "init_alsa_mixer: failed to open mixer for card %d\n", card_num);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_attach(m, card_str) < 0) {
+        fprintf(stderr, "init_alsa_mixer: failed to attach to %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_selem_register(m, NULL, NULL) < 0) {
+        fprintf(stderr, "init_alsa_mixer: failed to register simple element class for %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_load(m) < 0) {
+        fprintf(stderr, "init_alsa_mixer: failed to load mixer elements for %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    
+    fprintf(stderr, "init_alsa_mixer: successfully opened card %d (%s)\n", card_num, card_str);
+    g_free(card_str);
+    
+    /* Count simple mixer elements */
+    int count = 0;
+    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
+        if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE) {
+            count++;
         }
     }
-
-    /* If we reach here, no usable mixer was found */
-    fprintf(stderr, "init_alsa_mixer: No mixer elements found on default or common hw devices\n");
-    data->num_channels = 0;
-    /* channels array remains allocated but empty; UI will show informative message */
+    
+    if (count == 0) {
+        fprintf(stderr, "init_alsa_mixer: no simple mixer elements found on card %d\n", card_num);
+        snd_mixer_close(m);
+        return;
+    }
+    
+    /* Allocate channel array */
+    data->channels = g_new0(MixerChannel, count);
+    data->mixer = m;
+    
+    /* Enumerate ALL simple mixer elements generically */
+    int idx = 0;
+    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
+        if (snd_mixer_elem_get_type(elem) != SND_MIXER_ELEM_SIMPLE) continue;
+        
+        const char *name = snd_mixer_selem_get_name(elem);
+        if (!name) continue;
+        
+        /* Detect if this is a capture-only control */
+        gboolean is_capture = FALSE;
+        if (snd_mixer_selem_has_capture_volume(elem) && !snd_mixer_selem_has_playback_volume(elem)) {
+            is_capture = TRUE;
+        }
+        
+        /* Auto-enable ALL capture switches on startup (generic for any interface) */
+        if (is_capture && snd_mixer_selem_has_capture_switch(elem)) {
+            int sw = 0;
+            snd_mixer_selem_get_capture_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+            if (!sw) {
+                snd_mixer_selem_set_capture_switch_all(elem, 1);
+                fprintf(stderr, "Auto-enabled capture for '%s' on card %d\n", name, card_num);
+            }
+        }
+        
+        data->channels[idx].elem = elem;
+        data->channels[idx].channel_name = g_strdup(name);  /* Allocate copy since elem names are transient */
+        data->channels[idx].is_capture = is_capture;
+        idx++;
+    }
+    
+    data->num_channels = idx;
+    fprintf(stderr, "init_alsa_mixer: found %d mixer controls on card %d\n", idx, card_num);
 }
 
 static void init_alsa_eq(EQData *data) {
@@ -633,6 +655,14 @@ static void init_alsa_eq(EQData *data) {
 static void cleanup_alsa(MixerData *mixer_data, EQData *eq_data) {
     if (mixer_data->mixer) {
         snd_mixer_close(mixer_data->mixer);
+    }
+    if (mixer_data->channels) {
+        /* Free dynamically allocated channel names */
+        for (int i = 0; i < mixer_data->num_channels; i++) {
+            if (mixer_data->channels[i].channel_name) {
+                g_free((char*)mixer_data->channels[i].channel_name);
+            }
+        }
         g_free(mixer_data->channels);
     }
     if (eq_data->ctl) {
@@ -645,6 +675,107 @@ static void cleanup_alsa(MixerData *mixer_data, EQData *eq_data) {
         snd_ctl_close(eq_data->ctl);
         g_free(eq_data->bands);
     }
+}
+
+/* Dynamic mixer rebuild: clear and repopulate mixer_box with controls from specified card */
+static void rebuild_mixer_for_card(int card_num) {
+    if (!g_mixer_data || !g_mixer_data->mixer_box) return;
+    
+    fprintf(stderr, "rebuild_mixer_for_card: switching to card %d\n", card_num);
+    
+    /* Clear existing mixer UI */
+    GList *children = gtk_container_get_children(GTK_CONTAINER(g_mixer_data->mixer_box));
+    for (GList *iter = children; iter != NULL; iter = g_list_next(iter)) {
+        gtk_widget_destroy(GTK_WIDGET(iter->data));
+    }
+    g_list_free(children);
+    
+    /* Reinitialize mixer for new card */
+    init_alsa_mixer(g_mixer_data, card_num);
+    
+    /* Rebuild UI with new controls */
+    if (g_mixer_data->num_channels == 0) {
+        GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+        gtk_widget_set_hexpand(no_mixer_box, TRUE);
+        gtk_widget_set_halign(no_mixer_box, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), no_mixer_box, TRUE, TRUE, 5);
+
+        gchar *msg = g_strdup_printf(
+            "No mixer controls detected on card %d.\n"
+            "Audio may still work, but mixer sliders are unavailable.\n\n"
+            "Try checking:\n"
+            "• Card is properly detected: cat /proc/asound/cards\n"
+            "• Mixer elements exist: alsamixer -c %d",
+            card_num, card_num);
+        GtkWidget *no_mixer_label = gtk_label_new(msg);
+        g_free(msg);
+        gtk_label_set_justify(GTK_LABEL(no_mixer_label), GTK_JUSTIFY_CENTER);
+        gtk_box_pack_start(GTK_BOX(no_mixer_box), no_mixer_label, TRUE, TRUE, 8);
+        gtk_widget_show_all(no_mixer_box);
+        return;
+    }
+    
+    /* Create slider for each control found */
+    for (int i = 0; i < g_mixer_data->num_channels; i++) {
+        GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), channel_box, TRUE, TRUE, 5);
+
+        GtkWidget *label = gtk_label_new(g_mixer_data->channels[i].channel_name);
+        gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
+        gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
+
+        g_mixer_data->channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
+        gtk_range_set_inverted(GTK_RANGE(g_mixer_data->channels[i].scale), TRUE);
+        gtk_scale_set_draw_value(GTK_SCALE(g_mixer_data->channels[i].scale), TRUE);
+        gtk_scale_set_value_pos(GTK_SCALE(g_mixer_data->channels[i].scale), GTK_POS_BOTTOM);
+        gtk_widget_set_size_request(g_mixer_data->channels[i].scale, -1, 150);
+        gtk_box_pack_start(GTK_BOX(channel_box), g_mixer_data->channels[i].scale, TRUE, TRUE, 0);
+        g_signal_connect(g_mixer_data->channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &g_mixer_data->channels[i]);
+
+        long min, max, value;
+        if (g_mixer_data->channels[i].is_capture) {
+            snd_mixer_selem_get_capture_volume_range(g_mixer_data->channels[i].elem, &min, &max);
+            snd_mixer_selem_get_capture_volume(g_mixer_data->channels[i].elem, 0, &value);
+        } else {
+            snd_mixer_selem_get_playback_volume_range(g_mixer_data->channels[i].elem, &min, &max);
+            snd_mixer_selem_get_playback_volume(g_mixer_data->channels[i].elem, 0, &value);
+        }
+        gtk_range_set_value(GTK_RANGE(g_mixer_data->channels[i].scale), (double)(value - min) / (max - min));
+
+        /* Add Mute (playback) or Enable (capture) checkbox if control supports it */
+        g_mixer_data->channels[i].mute_check = NULL;
+        if (g_mixer_data->channels[i].is_capture) {
+            /* Capture controls: expose Enable checkbox (checked=capture enabled) */
+            if (snd_mixer_selem_has_capture_switch(g_mixer_data->channels[i].elem)) {
+                int sw = 0;
+                snd_mixer_selem_get_capture_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                GtkWidget *enable = gtk_check_button_new_with_label("Enable");
+                gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
+                gtk_widget_set_margin_top(enable, 4);
+                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
+                gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
+                g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), &g_mixer_data->channels[i]);
+                g_mixer_data->channels[i].mute_check = enable;
+            }
+        } else {
+            /* Playback controls: expose Mute checkbox (checked=muted) */
+            if (snd_mixer_selem_has_playback_switch(g_mixer_data->channels[i].elem)) {
+                int sw = 1;
+                snd_mixer_selem_get_playback_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                GtkWidget *mute = gtk_check_button_new_with_label("Mute");
+                gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
+                gtk_widget_set_margin_top(mute, 4);
+                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
+                gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
+                g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &g_mixer_data->channels[i]);
+                g_mixer_data->channels[i].mute_check = mute;
+            }
+        }
+    }
+    
+    gtk_widget_show_all(g_mixer_data->mixer_box);
+    fprintf(stderr, "rebuild_mixer_for_card: rebuilt UI with %d controls for card %d\n",
+            g_mixer_data->num_channels, card_num);
 }
  
 /* Recorder support: enhanced UX, safe child lifecycle, XDG Music path handling */
@@ -1077,8 +1208,10 @@ int main(int argc, char *argv[]) {
 
     MixerData mixer_data = {0};
     EQData eq_data = {0};
-    init_alsa_mixer(&mixer_data);
+    init_alsa_mixer(&mixer_data, 0);  /* Start with card 0 (internal) */
     init_alsa_eq(&eq_data);
+    /* Store global reference for dynamic mixer switching */
+    g_mixer_data = &mixer_data;
     /* Ensure per-user ALSA override exists so Recorder works without root/system writes */
     extern void ensure_user_asoundrc_bootstrap(void);
     ensure_user_asoundrc_bootstrap();
@@ -1124,6 +1257,9 @@ int main(int argc, char *argv[]) {
     GtkWidget *mixer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 5);
     gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_box);
+    
+    /* Store mixer_box reference for dynamic rebuild */
+    mixer_data.mixer_box = mixer_box;
 
     // Add sliders for each mixer channel (if none found, show an informative message)
     if (mixer_data.num_channels == 0) {
@@ -1378,10 +1514,28 @@ static gboolean file_contains_substr(const char *path, const char *needle) {
     return found;
 }
 
+/* Detect USB card number (returns -1 if no USB found) */
+static int get_usb_card_number(void) {
+    FILE *f = fopen("/proc/asound/cards", "r");
+    if (!f) return -1;
+    char line[512];
+    int card = -1;
+    while (fgets(line, sizeof(line), f)) {
+        /* Look for "card N: ... [USB" or "card N: USB" */
+        if (strstr(line, "USB")) {
+            /* Extract card number from "card N:" prefix */
+            if (sscanf(line, " %d", &card) == 1) {
+                fclose(f);
+                return card;
+            }
+        }
+    }
+    fclose(f);
+    return -1;
+}
+
 static gboolean is_usb_present(void) {
-    if (file_contains_substr("/proc/asound/cards", "USB")) return TRUE;
-    if (file_contains_substr("/proc/asound/cards", "USB Audio")) return TRUE;
-    return FALSE;
+    return (get_usb_card_number() >= 0);
 }
 static gboolean is_hdmi_present(void) {
     if (file_contains_substr("/proc/asound/cards", "HDMI")) return TRUE;
@@ -1734,11 +1888,23 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
 
     if (g_strcmp0(label, "Internal") == 0) {
         ok = route_to_target_async("internal");
+        /* Switch mixer to show internal card (hw:0) controls */
+        rebuild_mixer_for_card(0);
     } else if (g_strcmp0(label, "USB") == 0) {
         ok = route_to_target_async("usb");
+        /* Switch mixer to show USB card controls */
+        int usb_card = get_usb_card_number();
+        if (usb_card >= 0) {
+            rebuild_mixer_for_card(usb_card);
+        }
     } else if (g_strcmp0(label, "HDMI") == 0) {
         ok = route_to_target_async("hdmi");
+        /* HDMI uses internal card for capture, so show internal mixer */
+        rebuild_mixer_for_card(0);
     } else if (g_strcmp0(label, "Bluetooth") == 0) {
+        /* Bluetooth uses internal card for capture, so show internal mixer */
+        rebuild_mixer_for_card(0);
+        
         /* Get MAC from BT panel selection */
         char *obj = NULL;
         if (g_bt_tree && GTK_IS_TREE_VIEW(g_bt_tree)) {
