@@ -23,6 +23,7 @@ typedef struct {
     GtkWidget *scale;
     GtkWidget *mute_check;
     const char *channel_name;
+    gboolean is_capture;  /* TRUE if this is a capture control, FALSE for playback */
 } MixerChannel;
 
 typedef struct {
@@ -434,18 +435,30 @@ static void load_presets(GtkComboBoxText *combo) {
 static void slider_changed(GtkRange *range, MixerChannel *channel) {
     gdouble value = gtk_range_get_value(range);
     long min, max;
-    snd_mixer_selem_get_playback_volume_range(channel->elem, &min, &max);
-    long alsa_value = (long)(value * (max - min) + min);
-    snd_mixer_selem_set_playback_volume_all(channel->elem, alsa_value);
+    if (channel->is_capture) {
+        snd_mixer_selem_get_capture_volume_range(channel->elem, &min, &max);
+        long alsa_value = (long)(value * (max - min) + min);
+        snd_mixer_selem_set_capture_volume_all(channel->elem, alsa_value);
+    } else {
+        snd_mixer_selem_get_playback_volume_range(channel->elem, &min, &max);
+        long alsa_value = (long)(value * (max - min) + min);
+        snd_mixer_selem_set_playback_volume_all(channel->elem, alsa_value);
+    }
 }
 
-/* Mute toggle handler — ALSA playback switch: 1=unmuted, 0=muted.
-   We expose a "Mute" checkbox; when checked, set switch=0 (mute). */
+/* Mute toggle handler — for playback: 1=unmuted, 0=muted; for capture: 1=enabled, 0=disabled.
+   We expose a "Mute" checkbox (or "Enable" for capture); when checked, set appropriate state. */
 static void on_mute_toggled(GtkToggleButton *btn, gpointer user_data) {
     MixerChannel *ch = (MixerChannel *)user_data;
     if (!ch || !ch->elem) return;
     int checked = gtk_toggle_button_get_active(btn) ? 1 : 0;
-    snd_mixer_selem_set_playback_switch_all(ch->elem, checked ? 0 : 1);
+    if (ch->is_capture) {
+        /* For capture: checked=enabled (1=capture on), unchecked=disabled (0=capture off) */
+        snd_mixer_selem_set_capture_switch_all(ch->elem, checked ? 1 : 0);
+    } else {
+        /* For playback: checked=muted (0=mute), unchecked=unmuted (1=unmute) */
+        snd_mixer_selem_set_playback_switch_all(ch->elem, checked ? 0 : 1);
+    }
 }
 
 static void eq_slider_changed(GtkRange *range, EQBand *band) {
@@ -470,7 +483,7 @@ static void init_alsa_mixer(MixerData *data) {
         NULL
     };
 
-    const char *channel_names[] = {"Master", "Speaker", "PCM", "Headphone", "Mic", "Mic Boost", "Beep"};
+    const char *channel_names[] = {"Master", "Speaker", "PCM", "Headphone", "Capture", "Mic", "Mic Boost", "Internal Mic Boost", "Beep"};
     int max_channels = G_N_ELEMENTS(channel_names);
     data->channels = g_new(MixerChannel, max_channels);
     data->num_channels = 0;
@@ -502,8 +515,24 @@ static void init_alsa_mixer(MixerData *data) {
             snd_mixer_selem_id_set_name(sid, channel_names[i]);
             snd_mixer_elem_t *elem = snd_mixer_find_selem(m, sid);
             if (elem) {
+                /* Detect if this is a capture-only control */
+                gboolean is_capture = FALSE;
+                if (snd_mixer_selem_has_capture_volume(elem) && !snd_mixer_selem_has_playback_volume(elem)) {
+                    is_capture = TRUE;
+                    /* Auto-enable capture switch if it exists and is currently off */
+                    if (snd_mixer_selem_has_capture_switch(elem)) {
+                        int sw = 0;
+                        snd_mixer_selem_get_capture_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                        if (!sw) {
+                            /* Unmute/enable capture automatically on startup */
+                            snd_mixer_selem_set_capture_switch_all(elem, 1);
+                            fprintf(stderr, "Auto-enabled capture for '%s'\n", channel_names[i]);
+                        }
+                    }
+                }
                 data->channels[found].elem = elem;
                 data->channels[found].channel_name = channel_names[i];
+                data->channels[found].is_capture = is_capture;
                 found++;
             }
         }
@@ -1131,22 +1160,43 @@ int main(int argc, char *argv[]) {
             g_signal_connect(mixer_data.channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &mixer_data.channels[i]);
 
             long min, max, value;
-            snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
-            snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
+            if (mixer_data.channels[i].is_capture) {
+                snd_mixer_selem_get_capture_volume_range(mixer_data.channels[i].elem, &min, &max);
+                snd_mixer_selem_get_capture_volume(mixer_data.channels[i].elem, 0, &value);
+            } else {
+                snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
+                snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
+            }
             gtk_range_set_value(GTK_RANGE(mixer_data.channels[i].scale), (double)(value - min) / (max - min));
 
-            /* Optional per-channel Mute (if the element exposes a playback switch) */
+            /* Optional per-channel Mute (playback) or Enable (capture) checkbox */
             mixer_data.channels[i].mute_check = NULL;
-            if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
-                int sw = 1;
-                snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                GtkWidget *mute = gtk_check_button_new_with_label("Mute");
-                gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
-                gtk_widget_set_margin_top(mute, 4);
-                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
-                gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
-                g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
-                mixer_data.channels[i].mute_check = mute;
+            if (mixer_data.channels[i].is_capture) {
+                /* Capture controls: expose Enable checkbox (checked=capture enabled) */
+                if (snd_mixer_selem_has_capture_switch(mixer_data.channels[i].elem)) {
+                    int sw = 0;
+                    snd_mixer_selem_get_capture_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                    GtkWidget *enable = gtk_check_button_new_with_label("Enable");
+                    gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
+                    gtk_widget_set_margin_top(enable, 4);
+                    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
+                    gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
+                    g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
+                    mixer_data.channels[i].mute_check = enable;
+                }
+            } else {
+                /* Playback controls: expose Mute checkbox (checked=muted) */
+                if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
+                    int sw = 1;
+                    snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                    GtkWidget *mute = gtk_check_button_new_with_label("Mute");
+                    gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
+                    gtk_widget_set_margin_top(mute, 4);
+                    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
+                    gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
+                    g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
+                    mixer_data.channels[i].mute_check = mute;
+                }
             }
             /* Removed padding label so the mute button sits directly under the slider */
         }

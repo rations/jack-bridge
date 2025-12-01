@@ -91,8 +91,10 @@ EOF
   fi
 }
  
-# Generate per-user override for ALSA JACK plugin to route playback to a chosen JACK sink
+# Generate per-user override for ALSA JACK plugin to route playback to chosen sink
 # $1 = sink prefix (e.g., system:playback_ | usb_out:playback_ | hdmi_out:playback_ | bluealsa:playback_)
+# Capture ALWAYS uses system:capture (standard JACK behavior - jackd provides this from -C hw:0)
+# Additional capture sources (usb_in) are spawned as separate clients for manual connection in qjackctl
 write_user_jack_override() {
   sinkpref="$1"
   out_dir="$(dirname "$USER_CONF")"
@@ -258,6 +260,57 @@ ensure_hdmi_out() {
   return 0
 }
 
+ensure_usb_in() {
+  # ON-DEMAND capture: spawn alsa_in reading from USB audio interface
+  # This creates usb_in:capture_1/2 ports for USB microphones/guitars
+  
+  # Kill any existing usb_in process
+  pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+  sleep 0.3
+  
+  # Detect USB capture device
+  usb_card=""
+  usb_dev=""
+  if have arecord; then
+    line="$(arecord -l 2>/dev/null | grep "USB" | head -n 1)"
+    if [ -n "$line" ]; then
+      usb_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+      usb_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    fi
+  fi
+  
+  if [ -z "$usb_card" ]; then
+    usb_card="1"
+    usb_dev="0"
+  fi
+  
+  hw_dev="hw:${usb_card}"
+  if [ -n "$usb_dev" ]; then
+    hw_dev="hw:${usb_card},${usb_dev}"
+  fi
+  
+  log "Spawning USB capture client: alsa_in from $hw_dev"
+  
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  # Spawn alsa_in for USB capture (creates usb_in:capture_1/2 ports)
+  nohup alsa_in -j usb_in -d "$hw_dev" -r "$rate" -p 256 -n 3 \
+    >>/tmp/jack-route-select-usb-in.log 2>&1 &
+  
+  # Wait for ports
+  if wait_for_port "usb_in:capture_1"; then
+    log "usb_in capture ports spawned successfully"
+    return 0
+  else
+    log "ERROR: usb_in capture ports failed to spawn (check /tmp/jack-route-select-usb-in.log)"
+    return 1
+  fi
+}
+
 ensure_bt_out() {
   # ON-DEMAND spawning: Unlike USB/HDMI (which use hw:X,Y kernel nodes),
   # Bluetooth uses 'jackbridge_bluealsa' ALSA plugin that requires an ACTIVE connection.
@@ -395,23 +448,30 @@ route() {
 
   case "$target" in
     internal)
-      # Kill on-demand Bluetooth client when switching away
+      # Kill on-demand Bluetooth and USB capture clients when switching to internal
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
       newpref="system:playback_"
       ;;
     usb)
       # Kill on-demand Bluetooth client when switching away
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       ensure_usb_out || log "WARNING: ensure_usb_out failed"
+      # Spawn usb_in for USB capture (usb_in:capture_1/2 ports for manual connection in qjackctl)
+      ensure_usb_in || log "WARNING: ensure_usb_in failed"
       newpref="usb_out:playback_"
       ;;
     hdmi)
-      # Kill on-demand Bluetooth client when switching away
+      # Kill on-demand Bluetooth and USB capture clients when switching to HDMI
+      # HDMI has no capture - system:capture (internal mic) remains available
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
       ensure_hdmi_out || log "WARNING: ensure_hdmi_out failed"
       newpref="hdmi_out:playback_"
       ;;
     bluetooth)
+      # Kill USB capture client when switching to Bluetooth
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
       # Spawn on-demand Bluetooth client (kills existing first if any)
       ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
       newpref="bluealsa:playback_"
@@ -422,7 +482,8 @@ route() {
       ;;
   esac
 
-  # Update per-user ALSA JACK plugin routing to chosen sink
+  # Update per-user ALSA JACK plugin routing to chosen playback sink
+  # (capture always uses system:capture - standard JACK behavior)
   write_user_jack_override "$newpref" || true
 
   # Disconnect from all known sinks
