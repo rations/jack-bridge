@@ -85,10 +85,10 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
 
     if (!eq_exp && !bt_exp) {
         /* both collapsed - shrink to compact height */
-        gtk_window_resize(GTK_WINDOW(g_main_window), 900, 260);
+        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 260);
     } else {
         /* one or both expanded - give more vertical space */
-        gtk_window_resize(GTK_WINDOW(g_main_window), 900, 480);
+        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 480);
     }
 }
 
@@ -718,7 +718,7 @@ static void rebuild_mixer_for_card(int card_num) {
     /* Create slider for each control found */
     for (int i = 0; i < g_mixer_data->num_channels; i++) {
         GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), channel_box, TRUE, TRUE, 5);
+        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), channel_box, TRUE, TRUE, 0);
 
         GtkWidget *label = gtk_label_new(g_mixer_data->channels[i].channel_name);
         gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
@@ -936,19 +936,24 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         "-D", (gchar*)input_dev,
         "-r", rate_s,
         "-c", channels_s,
-        "-f", "S16_LE",
+        "-f", "FLOAT_LE",  /* JACK plugin requires FLOAT_LE format */
+        "-t", "wav",  /* Explicitly specify WAV format */
         full_path,
         NULL
     };
 
     GError *err = NULL;
-    gboolean ok = g_spawn_async(
+    gchar *stderr_output = NULL;
+    gboolean ok = g_spawn_async_with_pipes(
         NULL,
         argv,
         NULL,
         G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
         NULL, NULL,
         &record_pid,
+        NULL,    /* stdin */
+        NULL,    /* stdout */
+        NULL,    /* stderr - we could capture this for debugging */
         &err
     );
 
@@ -956,11 +961,23 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
     g_free(rate_s);
 
     if (!ok) {
+        gchar *error_msg = g_strdup_printf(
+            "Failed to start recording.\n\n"
+            "Error: %s\n\n"
+            "Troubleshooting:\n"
+            "• Ensure JACK is running: ps aux | grep jackd\n"
+            "• Check ALSA config: aplay -L | grep jack\n"
+            "• Verify capture device: arecord -l\n"
+            "• Test manually: arecord -D jack -f S16_LE -r 48000 test.wav",
+            err ? err->message : "unknown");
+        
         GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL,
-            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to start arecord: %s", err ? err->message : "unknown");
+            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", error_msg);
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
+        g_free(error_msg);
         if (err) g_error_free(err);
+        if (stderr_output) g_free(stderr_output);
         g_free(full_path);
         return;
     }
@@ -1236,8 +1253,8 @@ int main(int argc, char *argv[]) {
     // Create window
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Alsa Sound Connect");
-    // Make window wider so mixer columns fit comfortably but keep height tight
-    gtk_window_set_default_size(GTK_WINDOW(window), 900, 260); // Wider and shorter default to avoid blank area underneath collapsed expanders
+    // Compact width for screen fit, homogeneous spacing keeps professional look
+    gtk_window_set_default_size(GTK_WINDOW(window), 600, 260);
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
@@ -1253,9 +1270,10 @@ int main(int argc, char *argv[]) {
     GtkWidget *mixer_frame = gtk_frame_new(NULL);
     gtk_box_pack_start(GTK_BOX(main_box), mixer_frame, FALSE, FALSE, 0);
 
-    // Mixer horizontal box
-    GtkWidget *mixer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 5);
+    // Mixer horizontal box (homogeneous=TRUE ensures even spacing, zero gap for maximum compactness)
+    GtkWidget *mixer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_set_homogeneous(GTK_BOX(mixer_box), TRUE);
+    gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 3);
     gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_box);
     
     /* Store mixer_box reference for dynamic rebuild */
@@ -1281,7 +1299,7 @@ int main(int argc, char *argv[]) {
     } else {
         for (int i = 0; i < mixer_data.num_channels; i++) {
             GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-            gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 5);
+            gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 0);
 
             GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
             gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
