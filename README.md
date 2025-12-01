@@ -6,9 +6,10 @@
 
 ## Features
 
-### 🎚️ Alsa Sound Connect GUI
+### 🎚️ Alsa Sound Connect GUI - Original mixer and eq GUI by mrgreenjeans **AlsaTune GUI** ([SourceForge](https://sourceforge.net/projects/vuu-do/files/Miscellaneous/apps/AlsaTune/))
+
 Professional audio control interface (`mxeq`) with:
-- **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB/HDMI)
+- **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB/HDMI/BLUETOOTH)
 - **10-band equalizer** with real-time adjustments and preset management
 - **Built-in recorder** - Record in mono/stereo at 44.1kHz or 48kHz, saves to ~/Music
 - **Bluetooth panel** - Scan, pair, trust, connect devices with visual feedback
@@ -18,7 +19,8 @@ Professional audio control interface (`mxeq`) with:
 - **ALSA → EQ → JACK pipeline** - All ALSA apps benefit from EQ without affecting native JACK clients
 - **Multi-device support** - Seamlessly switch between internal, USB, HDMI, and Bluetooth outputs
 - **Persistent bridge ports** - USB/HDMI ports available at boot (Bluetooth spawned on-demand)
-- **Capture-aware** - Records from JACK's `system:capture` ports (microphones, line-in)
+- **Capture-aware** - Records from JACK's `system:capture` `system:midi_capture` ports and custom `usb_in:capture` for external audio interface.
+- **Qjackctl Graph** - Visually route audio to and from multiple apps and sources using graph in qjackctl. 
 
 ### 🎵 Bluetooth Audio Integration
 - **BlueZ + BlueALSA** - Full A2DP/HFP/HSP support without PulseAudio/PipeWire
@@ -34,7 +36,7 @@ Professional audio control interface (`mxeq`) with:
 
 ## Requirements
 
-**Debian-based distributions** (Debian, Devuan, Ubuntu, Linux Mint, etc.)
+**Debian-based distributions** (Devuan, Debian, Ubuntu, Linux Mint, etc.)
 
 **Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts.
 
@@ -118,9 +120,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 
 jack-bridge integrates BlueZ (Bluetooth stack) and BlueALSA (audio bridge) into the ALSA+JACK pipeline:
 
-```
-Bluetooth Device ←→ bluetoothd ←→ bluealsad ←→ ALSA bluealsa plugin ←→ alsa_out ←→ JACK
-```
+Bluetooth Device ←→ bluetoothd ←→ bluealsad ←→ ALSA bluealsa plugin ←→ alsa_out ←→ JACK. Connections visible using graph in qjackctl.
 
 ### Requirements
 
@@ -148,7 +148,6 @@ When you select Bluetooth output:
 rfkill list                    # Check if Bluetooth blocked
 sudo rfkill unblock bluetooth  # Unblock if needed
 service bluetoothd status      # Ensure daemon running
-```
 
 **Cannot pair/connect:**
 - Verify user groups: `id -nG` (should show `audio`, optionally `bluetooth`)
@@ -160,11 +159,9 @@ service bluetoothd status      # Ensure daemon running
 jack_lsp | grep bluealsa       # Verify ports exist
 service bluealsad status       # Ensure daemon running
 ```
-
 Re-select Bluetooth in Devices panel or run:
 ```bash
 /usr/local/lib/jack-bridge/jack-route-select bluetooth
-```
 
 ## Building from Source
 
@@ -185,7 +182,6 @@ See detailed guides:
 ```bash
 sudo apt install -y build-essential autoconf automake libtool pkg-config \
   git libasound2-dev libbluetooth-dev libdbus-1-dev libglib2.0-dev libsbc-dev
-```
 
 2. **Clone and build BlueALSA:**
 ```bash
@@ -195,7 +191,6 @@ cd bluez-alsa
 autoreconf --install --force
 ./configure --enable-aplay --enable-rfcomm --enable-cli
 make -j$(nproc)
-```
 
 3. **Copy binaries to jack-bridge:**
 ```bash
@@ -205,14 +200,46 @@ cp utils/.libs/bluealsa-aplay ~/jack-bridge/contrib/bin/
 cp utils/.libs/bluealsa-rfcomm ~/jack-bridge/contrib/bin/
 cp src/.libs/libasound_module_pcm_bluealsa.so ~/jack-bridge/contrib/bin/
 cp src/.libs/libasound_module_ctl_bluealsa.so ~/jack-bridge/contrib/bin/
-```
+
+Recommended options for sysvinit (non-systemd) systems:
+- Do NOT enable systemd unit files: do not pass --enable-systemd
+- To include the RFCOMM tool: pass --enable-rfcomm
+- To set a non-root runtime user (useful when running without systemd):
+  ../configure --prefix=/usr/local --with-bluealsaduser=bluealsa --enable-rfcomm
+
+Example
+autoreconf --install
+mkdir build && cd build
+../configure --prefix=/usr/local --with-bluealsaduser=bluealsa --enable-rfcomm
+make
+
+Install (optional)
+- Install to the system:
+  sudo make install
+- Or stage into a directory for packaging:
+  sudo make DESTDIR=$(pwd)/BLUEALSA install
+
+Per-binary minimal compile commands (useful for producing a single utility if you have the relevant source file)
+- These are minimal gcc commands (assume src/ contains the single utility source and pkg-config is available):
+
+- bluealsactl (requires GLib/GIO and D-Bus):
+  gcc -Wall -Wextra -o contrib/bin/bluealsactl src/bluealsactl.c $(pkg-config --cflags --libs glib-2.0 gio-2.0 dbus-1)
+
+- bluealsa-aplay (requires GLib/GIO, D-Bus, and ALSA):
+  gcc -Wall -Wextra -o contrib/bin/bluealsa-aplay src/bluealsa-aplay.c $(pkg-config --cflags --libs glib-2.0 gio-2.0 dbus-1 alsa)
+
+- bluealsa-rfcomm (requires GLib/GIO, D-Bus, and readline):
+  gcc -Wall -Wextra -o contrib/bin/bluealsa-rfcomm src/bluealsa-rfcomm.c $(pkg-config --cflags --libs glib-2.0 gio-2.0 dbus-1) -lreadline
+
+- bluealsad (daemon)
+  - The daemon links multiple internal sources and should be built with the Autotools workflow (no supported single-file gcc command). Use the example configure+make sequence above.
 
 ### Building GUI (mxeq)
 
 ```bash
 cd ~/jack-bridge
-make clean && make
-```
+make -j
+
 
 The Makefile builds `mxeq` (GUI) and `bt_agent` (Bluetooth agent helper).
 
@@ -223,7 +250,6 @@ To completely remove jack-bridge:
 ```bash
 cd ~/jack-bridge
 sudo ./contrib/uninstall.sh
-```
 
 The uninstaller removes:
 - All init scripts and service registrations
@@ -243,12 +269,10 @@ To also remove packages:
 sudo apt remove --purge jackd2 qjackctl bluez bluez-tools libasound2-plugins \
   alsa-utils apulse libasound2-plugin-equal swh-plugins libgtk-3-0
 sudo apt autoremove
-```
 
 ## Architecture
 
 ### Service Stack (SysV Init)
-
 ```
 Boot Sequence:
 ├─ dbus (system)
