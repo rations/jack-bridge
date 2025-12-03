@@ -32,6 +32,7 @@ fi
 : ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
 : ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
+: ${WATCHDOG_PIDFILE:=/var/run/jack-watchdog.pid}
 
 # detect_user(): removed; detection is handled inline in start() for portability
 
@@ -39,9 +40,21 @@ fi
 
 start() {
     log_daemon_msg "Starting JACK (jackd) with realtime settings" "jackd-rt"
+    
+    # Check if already running
+    if [ -f /var/run/jackd-rt.pid ]; then
+        pid=$(cat /var/run/jackd-rt.pid 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_progress_msg "already running"
+            log_end_msg 0
+            return 0
+        fi
+        # Stale pidfile
+        rm -f /var/run/jackd-rt.pid 2>/dev/null || true
+    fi
 
-    # Wait up to 10s for ALSA devices to appear (helpful during boot where /dev/snd may be late)
-    WAIT_SECS=10
+    # Wait up to 15s for ALSA devices to appear and stabilize (USB interfaces need time)
+    WAIT_SECS=15
     waited=0
     while [ $waited -lt $WAIT_SECS ]; do
         if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
@@ -132,11 +145,11 @@ start() {
     # Start jackd as login user via start-stop-daemon (no --chuid; PID tracks exec chain)
     start-stop-daemon --start --background --make-pidfile --pidfile /var/run/jackd-rt.pid \
         --startas /bin/sh -- -c "$CMD" \
-        || { log_failure_msg "Failed to start jackd"; return 1; }
+        || { log_failure_msg "Failed to start jackd"; log_end_msg 1; return 1; }
 
     # Health check: prefer jack_wait, fallback to pid check
     if command -v jack_wait >/dev/null 2>&1; then
-        if ! jack_wait -w -t 8 >/dev/null 2>&1; then
+        if ! jack_wait -w -t 10 >/dev/null 2>&1; then
             log_warning_msg "jackd did not become ready in time; last 30 lines of $JACKD_LOG:"
             tail -n 30 "$JACKD_LOG" 2>/dev/null || true
             log_end_msg 1
@@ -149,6 +162,8 @@ start() {
         fi
         if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then
             /usr/local/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
+            # Save watchdog PID for clean shutdown
+            echo $! > "$WATCHDOG_PIDFILE" 2>/dev/null || true
         fi
     else
         sleep 1
@@ -166,10 +181,47 @@ start() {
 
 stop() {
     log_daemon_msg "Stopping JACK (jackd)" "jackd-rt"
-    # Send SIGTERM, wait up to 10s for graceful shutdown
-    start-stop-daemon --stop --pidfile /var/run/jackd-rt.pid --retry=TERM/10/KILL/2 --oknodo || true
+    
+    # Check if actually running
+    if [ ! -f /var/run/jackd-rt.pid ]; then
+        log_progress_msg "not running"
+        log_end_msg 0
+        return 0
+    fi
+    
+    pid=$(cat /var/run/jackd-rt.pid 2>/dev/null || true)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        log_progress_msg "not running"
+        rm -f /var/run/jackd-rt.pid 2>/dev/null || true
+        log_end_msg 0
+        return 0
+    fi
+    
+    # CRITICAL: Stop watchdog FIRST to prevent restart attempts
+    if [ -f "$WATCHDOG_PIDFILE" ]; then
+        watchdog_pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null || true)
+        if [ -n "$watchdog_pid" ] && kill -0 "$watchdog_pid" 2>/dev/null; then
+            log_progress_msg "stopping watchdog"
+            kill -TERM "$watchdog_pid" 2>/dev/null || true
+            sleep 1
+            kill -0 "$watchdog_pid" 2>/dev/null && kill -KILL "$watchdog_pid" 2>/dev/null || true
+        fi
+        rm -f "$WATCHDOG_PIDFILE" 2>/dev/null || true
+    fi
+    
+    # Now stop JACK with proper retry strategy
+    log_progress_msg "stopping jackd (pid $pid)"
+    start-stop-daemon --stop --pidfile /var/run/jackd-rt.pid --retry=TERM/10/KILL/2 --oknodo
+    STOP_STATUS=$?
     rm -f /var/run/jackd-rt.pid 2>/dev/null || true
-    log_end_msg 0
+    
+    if [ $STOP_STATUS -eq 0 ]; then
+        log_end_msg 0
+        return 0
+    else
+        log_end_msg 1
+        return 1
+    fi
 }
 
 status() {

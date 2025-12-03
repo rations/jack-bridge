@@ -251,6 +251,138 @@ static int ensure_adapter_powered(const char *adapter_path) {
     return 0;
 }
 
+/* Set adapter Discoverable AND Pairable properties (0=off, 1=on) for security
+ * Both properties must be controlled together:
+ * - Discoverable: controls whether devices can find you in scans
+ * - Pairable: controls whether devices can pair/bond even if they know your MAC
+ */
+int gui_bt_set_adapter_discoverable(gboolean discoverable) {
+    GError *err = NULL;
+    if (!ensure_system_bus(&err)) {
+        if (err) g_error_free(err);
+        return -1;
+    }
+    
+    gchar *adapter = get_default_adapter_path();
+    if (!adapter) {
+        fprintf(stderr, "gui_bt_set_adapter_discoverable: no adapter found\n");
+        return -1;
+    }
+    
+    /* Set Discoverable property */
+    GVariant *params = g_variant_new("(ssv)", "org.bluez.Adapter1", "Discoverable",
+                                     g_variant_new_boolean(discoverable ? TRUE : FALSE));
+    g_message("DBG: gui_bt_set_adapter_discoverable: Setting Discoverable=%d on %s",
+              discoverable ? 1 : 0, adapter);
+    
+    GVariant *res = g_dbus_connection_call_sync(
+        gui_system_bus,
+        "org.bluez",
+        adapter,
+        "org.freedesktop.DBus.Properties",
+        "Set",
+        params,
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        -1,
+        NULL,
+        &err
+    );
+    
+    if (!res) {
+        if (err) {
+            g_warning("gui_bt_set_adapter_discoverable(Set Discoverable): %s", err->message);
+            g_error_free(err);
+        }
+        g_free(adapter);
+        return -1;
+    }
+    g_variant_unref(res);
+    
+    /* Also set Pairable property to same value
+     * This prevents devices from pairing even if they know the MAC address */
+    params = g_variant_new("(ssv)", "org.bluez.Adapter1", "Pairable",
+                          g_variant_new_boolean(discoverable ? TRUE : FALSE));
+    g_message("DBG: gui_bt_set_adapter_discoverable: Setting Pairable=%d on %s",
+              discoverable ? 1 : 0, adapter);
+    
+    res = g_dbus_connection_call_sync(
+        gui_system_bus,
+        "org.bluez",
+        adapter,
+        "org.freedesktop.DBus.Properties",
+        "Set",
+        params,
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        -1,
+        NULL,
+        &err
+    );
+    
+    if (!res) {
+        if (err) {
+            g_warning("gui_bt_set_adapter_discoverable(Set Pairable): %s", err->message);
+            g_error_free(err);
+        }
+        g_free(adapter);
+        return -1;
+    }
+    g_variant_unref(res);
+    g_free(adapter);
+    return 0;
+}
+
+/* Query adapter Discoverable property for UI state */
+gboolean gui_bt_get_adapter_discoverable(void) {
+    GError *err = NULL;
+    if (!ensure_system_bus(&err)) {
+        if (err) g_error_free(err);
+        return TRUE; /* Default to discoverable on error */
+    }
+    
+    gchar *adapter = get_default_adapter_path();
+    if (!adapter) {
+        return TRUE; /* Default to discoverable */
+    }
+    
+    /* Get current Discoverable state */
+    g_message("DBG: gui_bt_get_adapter_discoverable: Get Discoverable on %s", adapter);
+    GVariant *res = g_dbus_connection_call_sync(
+        gui_system_bus,
+        "org.bluez",
+        adapter,
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        g_variant_new("(ss)", "org.bluez.Adapter1", "Discoverable"),
+        G_VARIANT_TYPE("(v)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        -1,
+        NULL,
+        &err
+    );
+    
+    if (!res) {
+        if (err) {
+            g_warning("gui_bt_get_adapter_discoverable(Get): %s", err->message);
+            g_error_free(err);
+        }
+        g_free(adapter);
+        return TRUE; /* Default to discoverable on error */
+    }
+    
+    GVariant *v = NULL;
+    g_variant_get(res, "(v)", &v);
+    gboolean discoverable = TRUE; /* Default */
+    if (v && g_variant_is_of_type(v, G_VARIANT_TYPE_BOOLEAN))
+        discoverable = g_variant_get_boolean(v);
+    if (v) g_variant_unref(v);
+    g_variant_unref(res);
+    g_free(adapter);
+    
+    return discoverable;
+}
+
 /* Apply a discovery filter focused on classic audio devices (BR/EDR)
  *
  * Disabled: constructing and passing container variants here has caused

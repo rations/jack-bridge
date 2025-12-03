@@ -223,10 +223,13 @@ mkdir -p "$(dirname "$LIMITS_DST")"
 install -m 0644 contrib/etc/security/limits.d/audio.conf "$LIMITS_DST" || true
 echo "Installed (replaced) realtime limits template to $LIMITS_DST"
 
-# Register init script with update-rc.d if available (defaults)
+# Register init script with update-rc.d if available
+# Use priority 02 for start, 98 for stop so jackd stops LAST (after bridge ports)
 if command -v update-rc.d >/dev/null 2>&1; then
-    echo "Registering jackd-rt init script with update-rc.d (defaults)..."
-    update-rc.d jackd-rt defaults || true
+    echo "Registering jackd-rt init script with update-rc.d..."
+    update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
+    update-rc.d jackd-rt defaults 02 98 || true
+    echo "  ✓ jackd-rt: starts at priority 02, stops at priority 98 (after dependent services)"
 else
     echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
 fi
@@ -480,9 +483,11 @@ if [ -f "contrib/init.d/jack-bridge-ports" ]; then
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering jack-bridge-ports init script..."
         # Start after jackd-rt (S02) and bluealsad (S01) - use priority 04 for proper ordering
+        # Stop at priority 02 so it stops BEFORE jackd-rt (K02 < K98)
         update-rc.d -f jack-bridge-ports remove >/dev/null 2>&1 || true
-        update-rc.d jack-bridge-ports defaults 04 96 || true
-        echo "  ✓ jack-bridge-ports will spawn usb_out and hdmi_out at boot"
+        update-rc.d jack-bridge-ports defaults 04 02 || true
+        echo "  ✓ jack-bridge-ports: starts at priority 04 (after JACK), stops at priority 02 (before JACK)"
+        echo "  ✓ Bridge ports will spawn usb_out and hdmi_out at boot"
         echo "  ✓ Bluetooth ports spawn on-demand when user selects Bluetooth output"
     fi
 else

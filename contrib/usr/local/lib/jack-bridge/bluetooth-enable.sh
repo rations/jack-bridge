@@ -85,11 +85,13 @@ main() {
      fi
    fi
 
-   # Pairable/Discoverable and timeouts
-   set_prop_bool "$A" "Pairable" "true" && log "Pairable=true" || log "Failed to set Pairable"
-   set_prop_bool "$A" "Discoverable" "true" && log "Discoverable=true" || log "Failed to set Discoverable"
+   # Pairable and Discoverable are controlled by GUI toggle for security
+   # Set PairableTimeout to 0 so when user enables pairing via GUI, it doesn't auto-disable
    set_prop_u32 "$A" "PairableTimeout" 0 && log "PairableTimeout=0" || log "Failed to set PairableTimeout"
-   set_prop_u32 "$A" "DiscoverableTimeout" 0 && log "DiscoverableTimeout=0" || log "Failed to set DiscoverableTimeout"
+   
+   # Note: Both Pairable and Discoverable default to false (secure).
+   # Users enable them via GUI toggle when they want to pair devices.
+   # This gives users full control over Bluetooth visibility and pairing.
 
    # Show final state summary
    STATE="$(gdbus call --system --dest org.bluez --object-path "$A" \

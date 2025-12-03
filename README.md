@@ -145,7 +145,7 @@ When you select Bluetooth output:
 ### Troubleshooting
 
 **Discovery finds nothing:**
-```bash
+bash
 rfkill list                    # Check if Bluetooth blocked
 sudo rfkill unblock bluetooth  # Unblock if needed
 service bluetoothd status      # Ensure daemon running
@@ -156,12 +156,12 @@ service bluetoothd status      # Ensure daemon running
 - Check D-Bus policy: `ls /usr/share/dbus-1/system.d/org.bluealsa.conf`
 
 **No audio on Bluetooth:**
-```bash
+bash
 jack_lsp | grep bluealsa       # Verify ports exist
 service bluealsad status       # Ensure daemon running
 ```
 Re-select Bluetooth in Devices panel or run:
-```bash
+bash
 /usr/local/lib/jack-bridge/jack-route-select bluetooth
 
 ## Building from Source
@@ -180,12 +180,12 @@ See detailed guides:
 #### Quick Steps
 
 1. **Install build dependencies:**
-```bash
+bash
 sudo apt install -y build-essential autoconf automake libtool pkg-config \
   git libasound2-dev libbluetooth-dev libdbus-1-dev libglib2.0-dev libsbc-dev
 
 2. **Clone and build BlueALSA:**
-```bash
+bash
 cd /tmp
 git clone https://github.com/Arkq/bluez-alsa.git
 cd bluez-alsa
@@ -194,7 +194,7 @@ autoreconf --install --force
 make -j$(nproc)
 
 3. **Copy binaries to jack-bridge:**
-```bash
+bash
 cp utils/.libs/bluealsad ~/jack-bridge/contrib/bin/
 cp utils/.libs/bluealsactl ~/jack-bridge/contrib/bin/
 cp utils/.libs/bluealsa-aplay ~/jack-bridge/contrib/bin/
@@ -237,7 +237,7 @@ Per-binary minimal compile commands (useful for producing a single utility if yo
 
 ### Building GUI (mxeq)
 
-```bash
+bash
 cd ~/jack-bridge
 make -j
 
@@ -248,7 +248,7 @@ The Makefile builds `mxeq` (GUI) and `bt_agent` (Bluetooth agent helper).
 
 To completely remove jack-bridge:
 
-```bash
+bash
 cd ~/jack-bridge
 sudo ./contrib/uninstall.sh
 
@@ -266,7 +266,7 @@ The uninstaller removes:
 - User-specific configs in ~/.config/jack-bridge/
 
 To also remove packages:
-```bash
+bash
 sudo apt remove --purge jackd2 qjackctl bluez bluez-tools libasound2-plugins \
   alsa-utils apulse libasound2-plugin-equal swh-plugins libgtk-3-0
 sudo apt autoremove
@@ -274,7 +274,7 @@ sudo apt autoremove
 ## Architecture
 
 ### Service Stack (SysV Init)
-```
+
 Boot Sequence:
 ├─ dbus (system)
 ├─ bluetoothd (BlueZ Bluetooth daemon)
@@ -283,11 +283,11 @@ Boot Sequence:
 └─ jack-bridge-ports (persistent USB/HDMI bridge ports)
 
 Shutdown Sequence (reverse order with graceful termination)
-```
+
 
 ### Audio Pipeline
 
-```
+
 Application (ALSA API)
     ↓
 /etc/asound.conf (routing config)
@@ -305,7 +305,7 @@ JACK Audio Server (jackd)
 ALSA Device (hw:X)
     ↓
 Audio Output
-```
+
 
 ### File Locations
 

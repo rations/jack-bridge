@@ -131,6 +131,10 @@ extern void gui_bt_populate_existing_devices(void);
 extern int gui_bt_bind_scan_buttons(GtkWidget *scan_btn, GtkWidget *stop_btn);
 /* Query Device1 state (Paired/Trusted/Connected) for button gating */
 extern int gui_bt_get_device_state(const char *object_path, gboolean *paired, gboolean *trusted, gboolean *connected);
+/* Set adapter Discoverable property (0=off, 1=on) */
+extern int gui_bt_set_adapter_discoverable(gboolean discoverable);
+/* Query adapter Discoverable property */
+extern gboolean gui_bt_get_adapter_discoverable(void);
 /* Forward declaration for Bluetooth "Set as output" action */
 static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data);
 
@@ -280,6 +284,20 @@ static void on_remove_clicked(GtkButton *b, gpointer user_data) {
     if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
     bt_wrapper_remove(parent, obj);
     g_free(obj);
+}
+
+/* Bluetooth Discoverable toggle callback */
+static void on_bt_discoverable_toggled(GtkSwitch *sw, gboolean state, gpointer user_data) {
+    (void)user_data;
+    /* state parameter is the NEW state (after toggle) */
+    if (gui_bt_set_adapter_discoverable(state) != 0) {
+        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(sw));
+        show_bt_error_dialog(parent, "Failed to change Bluetooth discovery state.\n\nYou may need to be in the 'bluetooth' group.");
+        /* Revert switch state on failure */
+        g_signal_handlers_block_by_func(sw, G_CALLBACK(on_bt_discoverable_toggled), NULL);
+        gtk_switch_set_active(sw, !state);
+        g_signal_handlers_unblock_by_func(sw, G_CALLBACK(on_bt_discoverable_toggled), NULL);
+    }
 }
 // Callback to save preset to ~/.local/share/mxeq/presets.csv
 static void save_preset(GtkWidget *button, gpointer user_data) {
@@ -698,7 +716,7 @@ static void rebuild_mixer_for_card(int card_num) {
         GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
         gtk_widget_set_hexpand(no_mixer_box, TRUE);
         gtk_widget_set_halign(no_mixer_box, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), no_mixer_box, TRUE, TRUE, 5);
+        gtk_grid_attach(GTK_GRID(g_mixer_data->mixer_box), no_mixer_box, 0, 0, 8, 1);
 
         gchar *msg = g_strdup_printf(
             "No mixer controls detected on card %d.\n"
@@ -715,10 +733,13 @@ static void rebuild_mixer_for_card(int card_num) {
         return;
     }
     
-    /* Create slider for each control found */
+    /* Create slider for each control found (max 8 per row, auto-wrap) */
     for (int i = 0; i < g_mixer_data->num_channels; i++) {
+        int col = i % 8;  // Max 8 columns per row
+        int row = i / 8;  // Automatic row wrapping
+        
         GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-        gtk_box_pack_start(GTK_BOX(g_mixer_data->mixer_box), channel_box, TRUE, TRUE, 1);
+        gtk_grid_attach(GTK_GRID(g_mixer_data->mixer_box), channel_box, col, row, 1, 1);
 
         GtkWidget *label = gtk_label_new(g_mixer_data->channels[i].channel_name);
         gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
@@ -1121,6 +1142,24 @@ static void create_bt_panel(GtkWidget *main_box) {
     GtkWidget *bt_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_add(GTK_CONTAINER(bt_expander), bt_vbox);
 
+    /* Discoverable toggle row (for security - disable when not pairing) */
+    GtkWidget *disc_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_pack_start(GTK_BOX(bt_vbox), disc_row, FALSE, FALSE, 0);
+    
+    GtkWidget *disc_label = gtk_label_new("Allow device discovery:");
+    gtk_box_pack_start(GTK_BOX(disc_row), disc_label, FALSE, FALSE, 0);
+    
+    GtkWidget *disc_switch = gtk_switch_new();
+    /* Initialize from current adapter state (default ON) */
+    gboolean current_state = gui_bt_get_adapter_discoverable();
+    gtk_switch_set_active(GTK_SWITCH(disc_switch), current_state);
+    gtk_box_pack_start(GTK_BOX(disc_row), disc_switch, FALSE, FALSE, 0);
+    g_signal_connect(disc_switch, "state-set", G_CALLBACK(on_bt_discoverable_toggled), NULL);
+    
+    GtkWidget *disc_info = gtk_label_new("(Disable when not pairing for security)");
+    gtk_widget_set_opacity(disc_info, 0.7);  /* Dim the hint text */
+    gtk_box_pack_start(GTK_BOX(disc_row), disc_info, FALSE, FALSE, 6);
+
     /* Discovery controls */
     GtkWidget *bt_ctrl_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_box_pack_start(GTK_BOX(bt_vbox), bt_ctrl_row, FALSE, FALSE, 0);
@@ -1270,11 +1309,20 @@ int main(int argc, char *argv[]) {
     GtkWidget *mixer_frame = gtk_frame_new(NULL);
     gtk_box_pack_start(GTK_BOX(main_box), mixer_frame, FALSE, FALSE, 0);
 
-    // Mixer horizontal box (homogeneous=TRUE ensures even spacing, reduced gap for compactness)
-    GtkWidget *mixer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    gtk_box_set_homogeneous(GTK_BOX(mixer_box), TRUE);
+    // Scrolled window for mixer (vertical scrolling only, max ~300px height)
+    GtkWidget *mixer_scroller = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(mixer_scroller), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(mixer_scroller, -1, 300);
+    gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_scroller);
+
+    // Mixer grid (homogeneous columns, max 8 per row, auto-wrap to new rows)
+    GtkWidget *mixer_box = gtk_grid_new();
+    gtk_grid_set_column_homogeneous(GTK_GRID(mixer_box), TRUE);
+    gtk_grid_set_row_homogeneous(GTK_GRID(mixer_box), FALSE);
+    gtk_grid_set_column_spacing(GTK_GRID(mixer_box), 2);
+    gtk_grid_set_row_spacing(GTK_GRID(mixer_box), 5);
     gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 5);
-    gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_box);
+    gtk_container_add(GTK_CONTAINER(mixer_scroller), mixer_box);
     
     /* Store mixer_box reference for dynamic rebuild */
     mixer_data.mixer_box = mixer_box;
@@ -1284,7 +1332,7 @@ int main(int argc, char *argv[]) {
         GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
         gtk_widget_set_hexpand(no_mixer_box, TRUE);
         gtk_widget_set_halign(no_mixer_box, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(mixer_box), no_mixer_box, TRUE, TRUE, 5);
+        gtk_grid_attach(GTK_GRID(mixer_box), no_mixer_box, 0, 0, 8, 1);
 
         GtkWidget *no_mixer_label = gtk_label_new(
             "No mixer controls were detected on the default ALSA device.\n"
@@ -1298,8 +1346,11 @@ int main(int argc, char *argv[]) {
         gtk_box_pack_start(GTK_BOX(no_mixer_box), no_mixer_label, TRUE, TRUE, 8);
     } else {
         for (int i = 0; i < mixer_data.num_channels; i++) {
+            int col = i % 8;  // Max 8 columns per row
+            int row = i / 8;  // Automatic row wrapping
+            
             GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-            gtk_box_pack_start(GTK_BOX(mixer_box), channel_box, TRUE, TRUE, 1);
+            gtk_grid_attach(GTK_GRID(mixer_box), channel_box, col, row, 1, 1);
 
             GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
             gtk_widget_set_halign(label, GTK_ALIGN_CENTER);

@@ -241,23 +241,105 @@ wait_for_port() {
 }
 
 ensure_usb_out() {
-  # With persistent ports, usb_out should already exist
-  # If not, log warning but don't fail (init script will handle it)
-  if ! jack_lsp 2>/dev/null | grep -q '^usb_out:'; then
-    log "WARNING: usb_out port not found (should be spawned by jack-bridge-ports init script)"
-    log "         Attempting to use it anyway; check /etc/init.d/jack-bridge-ports"
+  # RESPAWN usb_out with current USB device (handles hot-plug after boot)
+  # Kill existing usb_out process (may be pointing to placeholder hw:99)
+  pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+  sleep 0.3
+  
+  # Detect current USB audio device
+  usb_card=""
+  usb_dev=""
+  if have aplay; then
+    line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
+    if [ -n "$line" ]; then
+      usb_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+      usb_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    fi
   fi
-  return 0
+  
+  # Fallback if no USB found (spawn with placeholder)
+  if [ -z "$usb_card" ]; then
+    log "No USB audio device detected; spawning usb_out with placeholder hw:99"
+    usb_card="99"
+    usb_dev="0"
+  else
+    log "USB audio device detected: card=$usb_card device=$usb_dev"
+  fi
+  
+  hw_dev="hw:${usb_card}"
+  if [ -n "$usb_dev" ] && [ "$usb_dev" != "0" ]; then
+    hw_dev="hw:${usb_card},${usb_dev}"
+  fi
+  
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  log "Spawning usb_out for $hw_dev"
+  nohup alsa_out -j usb_out -d "$hw_dev" -r "$rate" -p 256 -n 3 \
+    >>/tmp/jack-route-select-usb-out.log 2>&1 &
+  
+  # Wait for ports
+  if wait_for_port "usb_out:playback_1"; then
+    log "usb_out ports spawned successfully"
+    return 0
+  else
+    log "ERROR: usb_out ports failed to spawn (check /tmp/jack-route-select-usb-out.log)"
+    return 1
+  fi
 }
 
 ensure_hdmi_out() {
-  # With persistent ports, hdmi_out should already exist
-  # If not, log warning but don't fail (init script will handle it)
-  if ! jack_lsp 2>/dev/null | grep -q '^hdmi_out:'; then
-    log "WARNING: hdmi_out port not found (should be spawned by jack-bridge-ports init script)"
-    log "         Attempting to use it anyway; check /etc/init.d/jack-bridge-ports"
+  # RESPAWN hdmi_out with current HDMI device (handles device changes)
+  # Kill existing hdmi_out process
+  pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
+  sleep 0.3
+  
+  # Detect current HDMI device
+  hdmi_card=""
+  hdmi_dev=""
+  if have aplay; then
+    line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
+    if [ -n "$line" ]; then
+      hdmi_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+      hdmi_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    fi
   fi
-  return 0
+  
+  # Fallback if no HDMI found (spawn with placeholder)
+  if [ -z "$hdmi_card" ]; then
+    log "No HDMI audio device detected; spawning hdmi_out with placeholder hw:98"
+    hdmi_card="98"
+    hdmi_dev="0"
+  else
+    log "HDMI audio device detected: card=$hdmi_card device=$hdmi_dev"
+  fi
+  
+  hw_dev="hw:${hdmi_card}"
+  if [ -n "$hdmi_dev" ] && [ "$hdmi_dev" != "0" ]; then
+    hw_dev="hw:${hdmi_card},${hdmi_dev}"
+  fi
+  
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  log "Spawning hdmi_out for $hw_dev"
+  nohup alsa_out -j hdmi_out -d "$hw_dev" -r "$rate" -p 256 -n 3 \
+    >>/tmp/jack-route-select-hdmi-out.log 2>&1 &
+  
+  # Wait for ports
+  if wait_for_port "hdmi_out:playback_1"; then
+    log "hdmi_out ports spawned successfully"
+    return 0
+  else
+    log "ERROR: hdmi_out ports failed to spawn (check /tmp/jack-route-select-hdmi-out.log)"
+    return 1
+  fi
 }
 
 ensure_usb_in() {
