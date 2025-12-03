@@ -47,16 +47,14 @@ Professional audio control interface (`mxeq`) with:
 ```bash
 # Clone repository
 git clone https://github.com/rations/jack-bridge.git
-cd jack-bridge
 
-# Make installer executable
-sudo chmod +x ./contrib/install.sh
+cd jack-bridge
 
 # Update 
 sudo apt update
 
 # Run installer
-sudo ./contrib/install.sh
+sudo sh contrib/install.sh
 
 # Reboot to activate
 sudo reboot
