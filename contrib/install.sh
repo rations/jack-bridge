@@ -106,6 +106,16 @@ if [ -f "contrib/usr/local/lib/jack-bridge/jack-route-select" ]; then
     install -m 0755 contrib/usr/local/lib/jack-bridge/jack-route-select "${USR_LIB_DIR}/jack-route-select"
     echo "Installed routing helper to ${USR_LIB_DIR}/jack-route-select"
 else
+    echo "WARNING: jack-route-select not found"
+fi
+
+# Install connection manager (event-driven C binary, not polling script)
+if [ -f "contrib/bin/jack-connection-manager" ]; then
+    install -m 0755 contrib/bin/jack-connection-manager /usr/local/bin/jack-connection-manager
+    echo "Installed event-driven connection manager to /usr/local/bin/jack-connection-manager"
+else
+    echo "WARNING: jack-connection-manager not found (run 'make manager' to build it)"
+else
     echo "Warning: routing helper not found at contrib/usr/local/lib/jack-bridge/jack-route-select; Devices panel may not route."
 fi
 

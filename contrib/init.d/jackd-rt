@@ -33,6 +33,7 @@ fi
 : ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
 : ${WATCHDOG_PIDFILE:=/var/run/jack-watchdog.pid}
+: ${MONITOR_PIDFILE:=/var/run/jack-connection-monitor.pid}
 
 # detect_user(): removed; detection is handled inline in start() for portability
 
@@ -156,10 +157,24 @@ start() {
             return 1
         fi
 
-        # Autoconnect (if present) and watchdog are started after jack_wait succeeds
+        # Autoconnect (if present) runs once at startup
         if [ -x /usr/local/lib/jack-bridge/jack-autoconnect ]; then
             /usr/local/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
         fi
+        
+        # Start event-driven connection manager as $USERNAME (zero CPU when idle)
+        if [ -x /usr/local/bin/jack-connection-manager ]; then
+            su -l "$USERNAME" -c 'nohup /usr/local/bin/jack-connection-manager >/tmp/jack-connection-manager.log 2>&1 &'
+            sleep 1
+            # Find and save the manager PID
+            MONITOR_PID=$(pgrep -f "jack-connection-manager" | head -1)
+            if [ -n "$MONITOR_PID" ]; then
+                echo "$MONITOR_PID" > "$MONITOR_PIDFILE" 2>/dev/null || true
+                log_progress_msg "connection-manager started"
+            fi
+        fi
+        
+        # Start watchdog last
         if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then
             /usr/local/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
             # Save watchdog PID for clean shutdown
@@ -197,7 +212,18 @@ stop() {
         return 0
     fi
     
-    # CRITICAL: Stop watchdog FIRST to prevent restart attempts
+    # CRITICAL: Stop monitor and watchdog FIRST to prevent restart/reconnect attempts
+    if [ -f "$MONITOR_PIDFILE" ]; then
+        monitor_pid=$(cat "$MONITOR_PIDFILE" 2>/dev/null || true)
+        if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
+            log_progress_msg "stopping monitor"
+            kill -TERM "$monitor_pid" 2>/dev/null || true
+            sleep 1
+            kill -0 "$monitor_pid" 2>/dev/null && kill -KILL "$monitor_pid" 2>/dev/null || true
+        fi
+        rm -f "$MONITOR_PIDFILE" 2>/dev/null || true
+    fi
+    
     if [ -f "$WATCHDOG_PIDFILE" ]; then
         watchdog_pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null || true)
         if [ -n "$watchdog_pid" ] && kill -0 "$watchdog_pid" 2>/dev/null; then

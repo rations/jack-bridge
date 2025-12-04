@@ -1,7 +1,8 @@
 # Makefile - build binaries for jack-bridge project
 # Usage:
-#   make        # builds mxeq (GUI)
+#   make        # builds mxeq (GUI) and jack-connection-manager
 #   make mxeq   # build GUI binary only
+#   make manager # build connection manager only
 #   make clean
 CC = gcc
 PKG_CONFIG = pkg-config
@@ -16,9 +17,14 @@ MOTR_PKGS = gtk+-3.0 glib-2.0 gio-2.0 alsa
 MOTR_CFLAGS = $(shell $(PKG_CONFIG) --cflags $(MOTR_PKGS))
 MOTR_LIBS   = $(shell $(PKG_CONFIG) --libs $(MOTR_PKGS))
 
+# Build jack-connection-manager (event-driven daemon) - only needs JACK
+MANAGER_TARGET = $(BIN_DIR)/jack-connection-manager
+MANAGER_SRCS = src/jack_connection_manager.c
+MANAGER_LIBS = -ljack
+
 CFLAGS_COMMON = -Wall -Wextra -std=c11
 
-all: mxeq
+all: mxeq manager
 
 $(BIN_DIR):
 	$(MKDIR_P) $(BIN_DIR)
@@ -28,7 +34,12 @@ mxeq: $(BIN_DIR) $(MOTR_TARGET)
 $(MOTR_TARGET): $(MOTR_SRCS) | $(BIN_DIR)
 	$(CC) $(CFLAGS_COMMON) $(MOTR_CFLAGS) -o $@ $(MOTR_SRCS) $(MOTR_LIBS)
 
-clean:
-	rm -f $(BIN_DIR)/mxeq
+manager: $(BIN_DIR) $(MANAGER_TARGET)
 
-.PHONY: all clean mxeq
+$(MANAGER_TARGET): $(MANAGER_SRCS) | $(BIN_DIR)
+	$(CC) $(CFLAGS_COMMON) -o $@ $(MANAGER_SRCS) $(MANAGER_LIBS)
+
+clean:
+	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager
+
+.PHONY: all clean mxeq manager
