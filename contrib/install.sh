@@ -115,8 +115,6 @@ if [ -f "contrib/bin/jack-connection-manager" ]; then
     echo "Installed event-driven connection manager to /usr/local/bin/jack-connection-manager"
 else
     echo "WARNING: jack-connection-manager not found (run 'make manager' to build it)"
-else
-    echo "Warning: routing helper not found at contrib/usr/local/lib/jack-bridge/jack-route-select; Devices panel may not route."
 fi
 
 # Install autoconnect and watchdog helpers (from contrib; force overwrite)
