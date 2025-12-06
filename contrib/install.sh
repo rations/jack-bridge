@@ -209,26 +209,6 @@ else
     echo "No bundled Alsa Sound Connect found in contrib/; skipping GUI installation."
 fi
 
-# Install apulse wrappers (always; do not remove)
-mkdir -p "$BIN_DIR"
-# /usr/bin/apulse-firefox
-cat > "${BIN_DIR}/apulse-firefox" <<'EOF'
-#!/bin/sh
-# wrapper to run firefox under apulse so PA apps use ALSA -> JACK
-exec apulse firefox "$@"
-EOF
-chmod 755 "${BIN_DIR}/apulse-firefox"
-echo "Installed apulse-firefox to ${BIN_DIR}/apulse-firefox"
-
-# /usr/bin/apulse-chromium
-cat > "${BIN_DIR}/apulse-chromium" <<'EOF'
-#!/bin/sh
-# wrapper to run chromium under apulse so PA apps use ALSA -> JACK
-exec apulse chromium "$@"
-EOF
-chmod 755 "${BIN_DIR}/apulse-chromium"
-echo "Installed apulse-chromium to ${BIN_DIR}/apulse-chromium"
-
 # Create .desktop launcher overrides so desktop environments launch apulse-wrapped browsers
 DESKTOP_DIR="/usr/share/applications"
 mkdir -p "$DESKTOP_DIR"
