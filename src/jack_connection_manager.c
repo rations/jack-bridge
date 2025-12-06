@@ -24,6 +24,7 @@
 static jack_client_t *client = NULL;
 static volatile int keep_running = 1;
 static volatile int needs_reconnect = 0; /* Flag for deferred connection */
+static volatile int is_processing = 0; /* Lock to prevent concurrent routing */
 static char preferred_output[64] = "internal";
 static char target_sink_prefix[64] = "system:playback_";
 
@@ -110,11 +111,11 @@ static int is_midi_port(const char *port_name) {
             strstr(port_name, "Midi-Through:") != NULL);
 }
 
-/* Disconnect source port from ALL known sinks */
-static void disconnect_from_all_sinks(const char *source_port) {
+/* Disconnect source port from ALL known sinks EXCEPT the target sink */
+static void disconnect_from_other_sinks(const char *source_port, const char *keep_prefix) {
     const char **connections;
     jack_port_t *port;
-    int i;
+    int i, ret;
     
     port = jack_port_by_name(client, source_port);
     if (!port) return;
@@ -122,10 +123,18 @@ static void disconnect_from_all_sinks(const char *source_port) {
     connections = jack_port_get_all_connections(client, port);
     if (!connections) return;
     
-    /* Disconnect from any known sink port */
+    /* Disconnect from any known sink port EXCEPT those matching keep_prefix */
     for (i = 0; connections[i]; i++) {
         if (is_sink_port(connections[i])) {
-            jack_disconnect(client, source_port, connections[i]);
+            /* Skip if this is our target sink */
+            if (keep_prefix && strstr(connections[i], keep_prefix) != NULL) {
+                continue;
+            }
+            ret = jack_disconnect(client, source_port, connections[i]);
+            if (ret == 0) {
+                fprintf(stderr, "jack-connection-manager: Disconnected '%s' from '%s'\n",
+                        source_port, connections[i]);
+            }
         }
     }
     
@@ -136,11 +145,6 @@ static void disconnect_from_all_sinks(const char *source_port) {
 static void connect_source_to_sink(const char *source_port) {
     char target1[128], target2[128];
     int ret;
-    
-    /* CRITICAL: Disconnect from all other sinks first
-     * Apps connect to system:playback via ALSA->JACK bridge by default.
-     * We must disconnect them before routing to user's preferred output. */
-    disconnect_from_all_sinks(source_port);
     
     snprintf(target1, sizeof(target1), "%s1", target_sink_prefix);
     snprintf(target2, sizeof(target2), "%s2", target_sink_prefix);
@@ -153,6 +157,10 @@ static void connect_source_to_sink(const char *source_port) {
         return;
     }
     
+    /* STEP 1: Disconnect from all sinks EXCEPT our target */
+    disconnect_from_other_sinks(source_port, target_sink_prefix);
+    
+    /* STEP 2: Connect to target sink */
     /* Smart channel mapping based on port name */
     if (strstr(source_port, ":out_1") || strstr(source_port, ":left") ||
         strstr(source_port, ":L") || strstr(source_port, "playback_1")) {
@@ -183,6 +191,9 @@ static void connect_source_to_sink(const char *source_port) {
                     source_port, target2, ret);
         }
     }
+    
+    /* STEP 3: Disconnect AGAIN from OTHER sinks (ALSA plugin may have reconnected) */
+    disconnect_from_other_sinks(source_port, target_sink_prefix);
 }
 
 /* Port registration callback - called when ports appear/disappear
@@ -202,6 +213,13 @@ static void port_registration_callback(jack_port_id_t port_id, int registered, v
 static void process_connections(void) {
     const char **ports;
     int i;
+    
+    /* Prevent concurrent execution - if already processing, skip this call */
+    if (is_processing) {
+        fprintf(stderr, "jack-connection-manager: Skipping concurrent process_connections call\n");
+        return;
+    }
+    is_processing = 1;
     
     /* Reload config to catch GUI changes */
     load_config();
@@ -239,6 +257,7 @@ static void process_connections(void) {
     }
     
     jack_free(ports);
+    is_processing = 0; /* Release lock */
 }
 
 /* JACK shutdown callback */
