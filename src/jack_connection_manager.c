@@ -161,22 +161,29 @@ static void connect_source_to_sink(const char *source_port) {
     disconnect_from_other_sinks(source_port, target_sink_prefix);
     
     /* STEP 2: Connect to target sink */
-    /* Smart channel mapping based on port name */
-    if (strstr(source_port, ":out_1") || strstr(source_port, ":left") ||
-        strstr(source_port, ":L") || strstr(source_port, "playback_1")) {
-        /* Left channel only */
-        ret = jack_connect(client, source_port, target1);
-        if (ret != 0 && ret != EEXIST) {
-            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
-                    source_port, target1, ret);
-        }
-    } else if (strstr(source_port, ":out_2") || strstr(source_port, ":right") ||
-               strstr(source_port, ":R") || strstr(source_port, "playback_2")) {
+    /* Smart channel mapping based on port name.
+     * CRITICAL: Check more specific patterns FIRST (e.g., :out_001 before :out_0)
+     * to avoid substring collision where ":out_001" matches ":out_0". */
+    
+    /* Right channel patterns - CHECK FIRST (more specific) */
+    if (strstr(source_port, ":out_2") || strstr(source_port, ":out_001") ||
+        strstr(source_port, ":right") || strstr(source_port, ":R") ||
+        strstr(source_port, "playback_2")) {
         /* Right channel only */
         ret = jack_connect(client, source_port, target2);
         if (ret != 0 && ret != EEXIST) {
             fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
                     source_port, target2, ret);
+        }
+    /* Left channel patterns - CHECK SECOND (less specific :out_0 can match :out_001) */
+    } else if (strstr(source_port, ":out_1") || strstr(source_port, ":out_0") ||
+               strstr(source_port, ":out_000") || strstr(source_port, ":left") ||
+               strstr(source_port, ":L") || strstr(source_port, "playback_1")) {
+        /* Left channel only */
+        ret = jack_connect(client, source_port, target1);
+        if (ret != 0 && ret != EEXIST) {
+            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
+                    source_port, target1, ret);
         }
     } else {
         /* Mono or unknown: connect to both */

@@ -49,10 +49,11 @@ typedef struct {
 
 /* UI globals used to keep window/expander references for compacting behavior.
    These are used by the expander 'notify::expanded' handler to shrink the
-   main window back to a compact size when both expanders are collapsed. */
+   main window back to a compact size when all expanders are collapsed. */
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_eq_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
+static GtkWidget *g_dev_expander = NULL;
 /* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
 static GtkWidget *g_bt_tree = NULL;
 /* Phase 3: Global references to Devices panel radio buttons for state synchronization */
@@ -78,16 +79,23 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
     (void)object;
     (void)pspec;
     (void)user_data;
-    if (!g_main_window || !g_eq_expander || !g_bt_expander) return;
+    if (!g_main_window || !g_eq_expander || !g_bt_expander || !g_dev_expander) return;
 
     gboolean eq_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_eq_expander));
     gboolean bt_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_bt_expander));
+    gboolean dev_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_dev_expander));
 
-    if (!eq_exp && !bt_exp) {
-        /* both collapsed - shrink to compact height */
+    if (!eq_exp && !bt_exp && !dev_exp) {
+        /* All collapsed - shrink to compact height */
         gtk_window_resize(GTK_WINDOW(g_main_window), 600, 260);
+    } else if ((eq_exp || bt_exp) && !dev_exp) {
+        /* EQ or Bluetooth expanded (large panels) */
+        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 480);
+    } else if (dev_exp && !eq_exp && !bt_exp) {
+        /* Only Devices expanded (small panel - just radio buttons) */
+        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 310);
     } else {
-        /* one or both expanded - give more vertical space */
+        /* Multiple panels expanded */
         gtk_window_resize(GTK_WINDOW(g_main_window), 600, 480);
     }
 }
@@ -2061,6 +2069,10 @@ static void create_devices_panel(GtkWidget *main_box) {
     GtkWidget *dev_expander = gtk_expander_new("Devices");
     gtk_expander_set_expanded(GTK_EXPANDER(dev_expander), FALSE);
     gtk_box_pack_start(GTK_BOX(main_box), dev_expander, FALSE, FALSE, 0);
+
+    /* Connect to window resize handler like other expanders */
+    g_dev_expander = dev_expander;
+    g_signal_connect(G_OBJECT(dev_expander), "notify::expanded", G_CALLBACK(on_any_expander_toggled), NULL);
 
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_add(GTK_CONTAINER(dev_expander), vbox);
