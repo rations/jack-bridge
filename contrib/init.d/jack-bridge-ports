@@ -101,8 +101,8 @@ start() {
         return 1
     fi
     
-    # Wait for JACK to be ready (up to 20 seconds for slow systems with USB devices)
-    WAIT_SECS=20
+    # Wait for JACK to be ready (reduced from 20s - USB hijacking fix allows faster startup)
+    WAIT_SECS=5
     waited=0
     while [ $waited -lt $WAIT_SECS ]; do
         if command -v jack_wait >/dev/null 2>&1; then
@@ -178,8 +178,8 @@ start() {
     # by jack-route-select when user selects Bluetooth output.
     echo "Bluetooth ports will be spawned on-demand when user selects Bluetooth" >> "$LOGFILE" 2>&1
     
-    # Give ports time to register with JACK (especially important for USB devices)
-    sleep 3
+    # Give ports time to register with JACK
+    sleep 2
     
     # Verify ports appeared
     if command -v jack_lsp >/dev/null 2>&1; then

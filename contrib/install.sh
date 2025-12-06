@@ -73,6 +73,14 @@ mkdir -p "$(dirname "$ASOUND_DST")"
 install -m 0644 contrib/etc/asound.conf "$ASOUND_DST"
 echo "Installed (replaced) $ASOUND_DST"
 
+# NOTE: We do NOT modify 50-jack.conf anymore
+# The distro's 50-jack.conf stays as-is (system:playback always)
+# Device switching is handled by jack-connection-manager (JACK graph routing)
+# This is the correct architecture - ALSA->JACK bridge is stable,
+# routing happens inside JACK graph (event-driven, instant, reliable)
+echo "ALSA->JACK bridge uses distro's 50-jack.conf (system:playback)"
+echo "Device switching handled by jack-connection-manager (JACK graph routing)"
+
 # Install init script
 mkdir -p "$INIT_DIR"
 install -m 0755 contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
@@ -657,6 +665,22 @@ else
     echo "update-rc.d not available; please register ${INIT_HELPER} to run at boot if desired."
 fi
 
+# Install jack-connection-manager init script (auto-routes based on saved preference)
+if [ -f "contrib/init.d/jack-connection-manager" ]; then
+    echo "Installing jack-connection-manager init script..."
+    install -m 0755 contrib/init.d/jack-connection-manager "${INIT_DIR}/jack-connection-manager"
+    
+    if command -v update-rc.d >/dev/null 2>&1; then
+        echo "Registering jack-connection-manager init script..."
+        update-rc.d -f jack-connection-manager remove >/dev/null 2>&1 || true
+        # Must run AFTER jack-bridge-ports (priority 04), so use 05
+        update-rc.d jack-connection-manager start 05 2 3 4 5 . stop 01 0 1 6 . || true
+        echo "  ✓ jack-connection-manager will auto-route based on saved preference"
+    fi
+else
+    echo "WARNING: contrib/init.d/jack-connection-manager not found"
+fi
+
 # Install jack-bridge devices config (authoritative; overwrite without backup)
 mkdir -p /etc/jack-bridge
 cat > /etc/jack-bridge/devices.conf <<'DEVCONF'
@@ -686,19 +710,28 @@ UCONF
 chmod 0644 "$SKEL_DIR/devices.conf" || true
 echo "Seeded skeleton per-user config at $SKEL_DIR/devices.conf"
 
-# Create for existing desktop users (UID>=1000) if missing (non-destructive)
+# NOTE: Per-user jack_playback_override.conf is NO LONGER NEEDED
+# jack-bridge now updates system-wide 50-jack.conf directly (made writable by audio group)
+# Seed per-user devices.conf for backward compatibility
 for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
     if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
         user_conf_dir="$home_dir/.config/jack-bridge"
         user_conf="$user_conf_dir/devices.conf"
+        
+        # Create config directory if needed
+        mkdir -p "$user_conf_dir"
+        
+        # Seed devices.conf if missing
         if [ ! -f "$user_conf" ]; then
-            mkdir -p "$user_conf_dir"
             cp -f "$SKEL_DIR/devices.conf" "$user_conf"
-            chown -R "$u:$u" "$user_conf_dir" 2>/dev/null || true
+            chown "$u:$u" "$user_conf" 2>/dev/null || true
             chmod 0644 "$user_conf" 2>/dev/null || true
             echo "Seeded $user_conf for user $u"
         fi
+        
+        # Ensure ownership
+        chown -R "$u:$u" "$user_conf_dir" 2>/dev/null || true
     fi
 done
 

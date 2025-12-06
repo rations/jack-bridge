@@ -52,10 +52,10 @@ EOF
   fi
 
   # Ensure ~/.asoundrc contains an include for this fragment inside managed markers.
+  # NOTE: jack_playback_override.conf is OBSOLETE - we now update 50-jack.conf directly
   ASOUND="$HOME/.asoundrc"
   TMP="$(mktemp "${HOME}/.asoundrc.jb.XXXXXX" 2>/dev/null || mktemp /tmp/.asoundrc.jb.XXXXXX)"
   in_path="$out_dir/current_input.conf"
-  jack_override="$out_dir/jack_playback_override.conf"
   bluealsa_defs="$out_dir/bluealsa_defaults.conf"
   # Strip existing block between markers if present, then append our managed block.
   if [ -f "$ASOUND" ]; then
@@ -72,10 +72,9 @@ EOF
     cat "$TMP".part
     echo
     echo "# BEGIN jack-bridge"
-    echo "# Managed by jack-bridge helper — include per-user current_input.conf, jack_playback_override.conf, bluealsa defaults and current_output.conf"
+    echo "# Managed by jack-bridge helper — include per-user current_input.conf, bluealsa defaults and current_output.conf"
+    echo "# Note: Playback routing is managed system-wide via /usr/share/alsa/alsa.conf.d/50-jack.conf"
     echo "include \"$in_path\""
-    echo "include \"$jack_override\""
-    # Include BlueALSA defaults (written by write_bluealsa_defaults if Bluetooth selected)
     echo "include \"$bluealsa_defs\""
     echo "include \"$out_path\""
     echo "# END jack-bridge"
@@ -83,7 +82,7 @@ EOF
   if mv "$TMP" "$ASOUND"; then
     rm -f "$TMP".part 2>/dev/null || true
     chmod 644 "$ASOUND" 2>/dev/null || true
-    log "Updated $ASOUND to include $in_path, $jack_override, $bluealsa_defs and $out_path"
+    log "Updated $ASOUND to include $in_path, $bluealsa_defs and $out_path"
     return 0
   else
     log "ERROR: failed to install $ASOUND"
@@ -91,37 +90,6 @@ EOF
   fi
 }
  
-# Generate per-user override for ALSA JACK plugin to route playback to chosen sink
-# $1 = sink prefix (e.g., system:playback_ | usb_out:playback_ | hdmi_out:playback_ | bluealsa:playback_)
-# Capture ALWAYS uses system:capture (standard JACK behavior - jackd provides this from -C hw:0)
-# Additional capture sources (usb_in) are spawned as separate clients for manual connection in qjackctl
-write_user_jack_override() {
-  sinkpref="$1"
-  out_dir="$(dirname "$USER_CONF")"
-  mkdir -p "$out_dir" 2>/dev/null || true
-  ov_path="$out_dir/jack_playback_override.conf"
-  if ! cat > "$ov_path" <<EOF
-# Managed per-user override for ALSA JACK plugin routing (jack-bridge)
-pcm.jack {
-    type jack
-    playback_ports {
-        0 ${sinkpref}1
-        1 ${sinkpref}2
-    }
-    capture_ports {
-        0 system:capture_1
-        1 system:capture_2
-    }
-}
-EOF
-  then
-    log "ERROR: failed to write $ov_path"
-    return 1
-  fi
-  chmod 644 "$ov_path" 2>/dev/null || true
-  log "Updated per-user JACK playback override to sink '${sinkpref}{1,2}'"
-}
-
 # Write BlueALSA defaults so 'jackbridge_bluealsa' PCM can be used without inline parameters
 # $1 = MAC (or 00:00:00:00:00:00 for most-recent), $2 = PROFILE (e.g., a2dp), $3 = SRV (e.g., org.bluealsa)
 write_bluealsa_defaults() {
@@ -564,9 +532,12 @@ route() {
       ;;
   esac
 
-  # Update per-user ALSA JACK plugin routing to chosen playback sink
-  # (capture always uses system:capture - standard JACK behavior)
-  write_user_jack_override "$newpref" || true
+  # Update system-wide ALSA JACK plugin config (primary method)
+  # Falls back to per-user override if system update fails
+  if ! update_system_jack_conf "$newpref"; then
+    log "System config update failed; using per-user override"
+    write_user_jack_override "$newpref" || true
+  fi
 
   # Disconnect from all known sinks
   jack_disconnect_all_sinks

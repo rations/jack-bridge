@@ -21,6 +21,7 @@ MOTR_LIBS   = $(shell $(PKG_CONFIG) --libs $(MOTR_PKGS))
 MANAGER_TARGET = $(BIN_DIR)/jack-connection-manager
 MANAGER_SRCS = src/jack_connection_manager.c
 MANAGER_LIBS = -ljack
+MANAGER_CFLAGS = -D_POSIX_C_SOURCE=200809L -Wall -Wextra -std=c11
 
 CFLAGS_COMMON = -Wall -Wextra -std=c11
 
@@ -37,7 +38,7 @@ $(MOTR_TARGET): $(MOTR_SRCS) | $(BIN_DIR)
 manager: $(BIN_DIR) $(MANAGER_TARGET)
 
 $(MANAGER_TARGET): $(MANAGER_SRCS) | $(BIN_DIR)
-	$(CC) $(CFLAGS_COMMON) -o $@ $(MANAGER_SRCS) $(MANAGER_LIBS)
+	$(CC) $(MANAGER_CFLAGS) -o $@ $(MANAGER_SRCS) $(MANAGER_LIBS)
 
 clean:
 	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager

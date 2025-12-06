@@ -54,8 +54,8 @@ start() {
         rm -f /var/run/jackd-rt.pid 2>/dev/null || true
     fi
 
-    # Wait up to 15s for ALSA devices to appear and stabilize (USB interfaces need time)
-    WAIT_SECS=15
+    # Wait up to 5s for ALSA devices to appear (reduced from 15s - USB hijacking is now fixed)
+    WAIT_SECS=5
     waited=0
     while [ $waited -lt $WAIT_SECS ]; do
         if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
@@ -162,17 +162,8 @@ start() {
             /usr/local/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
         fi
         
-        # Start event-driven connection manager as $USERNAME (zero CPU when idle)
-        if [ -x /usr/local/bin/jack-connection-manager ]; then
-            su -l "$USERNAME" -c 'nohup /usr/local/bin/jack-connection-manager >/tmp/jack-connection-manager.log 2>&1 &'
-            sleep 1
-            # Find and save the manager PID
-            MONITOR_PID=$(pgrep -f "jack-connection-manager" | head -1)
-            if [ -n "$MONITOR_PID" ]; then
-                echo "$MONITOR_PID" > "$MONITOR_PIDFILE" 2>/dev/null || true
-                log_progress_msg "connection-manager started"
-            fi
-        fi
+        # NOTE: jack-connection-manager is now started by separate init script
+        # (contrib/init.d/jack-connection-manager) for cleaner service management
         
         # Start watchdog last
         if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then

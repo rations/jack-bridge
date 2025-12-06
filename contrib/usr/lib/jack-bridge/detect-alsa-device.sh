@@ -2,10 +2,14 @@
 # contrib/usr/lib/jack-bridge/detect-alsa-device.sh
 # Strict POSIX sh, no here-docs into functions, no eval. Works under /bin/sh (dash).
 # Prints a device like "hw:CARD=Name" or "hw:0" on stdout and exits 0.
+#
+# CRITICAL: This script chooses the MAIN JACK device (what jackd opens with -d alsa -D).
+# USB interfaces must NEVER be selected here - they should only be used via alsa_out bridges.
+# If USB hijacks the main device, it blocks alsa_out and causes "Device or resource busy" errors.
 
 set -eu
-# Wait for devices to settle (helpful for slow hardware where USB might appear before Internal)
-sleep 5
+# Brief wait for udev to settle (2s is sufficient now that we force internal detection)
+sleep 2
 
 aplay_cmd=$(command -v aplay 2>/dev/null || true)
 arecord_cmd=$(command -v arecord 2>/dev/null || true)
@@ -70,13 +74,23 @@ if [ -s /tmp/jb_detect_choice.$$ ]; then
     FOUND_NAME=$(echo "$choice" | cut -d'|' -f2)
 else
     rm -f /tmp/jb_detect_choice.$$ 2>/dev/null || true
-    # Fallback: try to find non-USB non-loopback first
-    # Check both name and desc for "USB"
-    first=$(printf '%s\n' "$aplay_cards" | grep -vi "USB" | sed -n '/Loopback/!{/Loop Back/!p;}' | sed -n '1p')
+    # Fallback: MUST find non-USB device for JACK main device
+    # Try multiple patterns for internal/builtin audio
+    first=$(printf '%s\n' "$aplay_cards" | grep -viE "USB|Loopback|Loop Back" | grep -iE "PCH|HDA|Intel|Analog|HDMI" | sed -n '1p')
+    
     if [ -z "$first" ]; then
-        # If no non-USB, take any non-loopback (e.g. USB)
-        first=$(printf '%s\n' "$aplay_cards" | sed -n '/Loopback/!{/Loop Back/!p;}' | sed -n '1p')
+        # Try any non-USB, non-loopback
+        first=$(printf '%s\n' "$aplay_cards" | grep -viE "USB|Loopback|Loop Back" | sed -n '1p')
     fi
+    
+    if [ -z "$first" ]; then
+        # LAST RESORT: Take card 0 if it exists (should be internal)
+        first=$(printf '%s\n' "$aplay_cards" | grep "^0|" | sed -n '1p')
+    fi
+    
+    # NEVER fallback to USB for JACK's main device - it causes "Device busy" errors
+    # USB devices should ONLY be used via alsa_out bridges spawned by jack-bridge-ports
+    
     if [ -n "$first" ]; then
         FOUND_IDX=$(echo "$first" | cut -d'|' -f1)
         FOUND_NAME=$(echo "$first" | cut -d'|' -f2)

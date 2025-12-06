@@ -1,0 +1,136 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          jack-connection-manager
+# Required-Start:    $local_fs jackd-rt jack-bridge-ports
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Event-driven JACK connection manager
+# Description:       Automatically routes new JACK clients to user's
+#                    preferred output device (internal/USB/HDMI/Bluetooth)
+#                    based on ~/.config/jack-bridge/devices.conf
+### END INIT INFO
+
+# Start jack-connection-manager as daemon after JACK and bridge ports are ready
+# This ensures apps auto-route to saved preference WITHOUT needing GUI
+
+set -e
+
+DAEMON="/usr/local/bin/jack-connection-manager"
+PIDFILE="/var/run/jack-connection-manager.pid"
+LOGFILE="/var/log/jack-connection-manager.log"
+
+# Determine the login user (prefer SUDO_USER, fallback to first desktop user)
+LOGIN_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-}")
+if [ -z "$LOGIN_USER" ]; then
+    # Fallback: get first user with UID >= 1000
+    LOGIN_USER=$(awk -F: '$3>=1000 && $3<65534 {print $1; exit}' /etc/passwd)
+fi
+
+if [ -z "$LOGIN_USER" ]; then
+    echo "ERROR: Could not determine desktop user" >&2
+    exit 1
+fi
+
+start_daemon() {
+    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+        echo "jack-connection-manager already running (PID $(cat "$PIDFILE"))"
+        return 0
+    fi
+    
+    if [ ! -x "$DAEMON" ]; then
+        echo "ERROR: $DAEMON not found or not executable" >&2
+        return 1
+    fi
+    
+    # Wait for JACK to be ready (max 30 seconds)
+    echo "Waiting for JACK server..."
+    for i in $(seq 1 30); do
+        if su - "$LOGIN_USER" -c "jack_lsp >/dev/null 2>&1"; then
+            break
+        fi
+        sleep 1
+    done
+    
+    # Wait for bridge ports to spawn (max 10 seconds)
+    echo "Waiting for bridge ports..."
+    for i in $(seq 1 10); do
+        if su - "$LOGIN_USER" -c "jack_lsp 2>/dev/null | grep -q 'usb_out\\|hdmi_out'"; then
+            break
+        fi
+        sleep 1
+    done
+    
+    # Create log file with proper permissions
+    touch "$LOGFILE" 2>/dev/null || true
+    chown "$LOGIN_USER":"$LOGIN_USER" "$LOGFILE" 2>/dev/null || true
+    
+    # Start connection manager as the desktop user (not root)
+    echo "Starting jack-connection-manager as user $LOGIN_USER..."
+    su - "$LOGIN_USER" -c "$DAEMON >>$LOGFILE 2>&1 &"
+    
+    # Get PID (approximate - find process owned by user)
+    sleep 1
+    PID=$(pgrep -u "$LOGIN_USER" -f "jack-connection-manager" | head -1)
+    if [ -n "$PID" ]; then
+        echo "$PID" > "$PIDFILE"
+        echo "jack-connection-manager started (PID $PID)"
+        return 0
+    else
+        echo "ERROR: Failed to start jack-connection-manager" >&2
+        return 1
+    fi
+}
+
+stop_daemon() {
+    if [ ! -f "$PIDFILE" ]; then
+        echo "jack-connection-manager not running"
+        return 0
+    fi
+    
+    PID=$(cat "$PIDFILE")
+    if kill -0 "$PID" 2>/dev/null; then
+        echo "Stopping jack-connection-manager (PID $PID)..."
+        kill "$PID" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -9 "$PID" 2>/dev/null || true
+        fi
+    fi
+    
+    rm -f "$PIDFILE"
+    echo "jack-connection-manager stopped"
+    return 0
+}
+
+status_daemon() {
+    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+        echo "jack-connection-manager is running (PID $(cat "$PIDFILE"))"
+        return 0
+    else
+        echo "jack-connection-manager is not running"
+        return 1
+    fi
+}
+
+case "$1" in
+    start)
+        start_daemon
+        ;;
+    stop)
+        stop_daemon
+        ;;
+    restart)
+        stop_daemon
+        start_daemon
+        ;;
+    status)
+        status_daemon
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0
