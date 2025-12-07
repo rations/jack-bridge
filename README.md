@@ -36,7 +36,7 @@ Professional audio control interface (`mxeq`) with:
 
 ## Requirements
 
-**Debian-based distributions** (Devuan, Debian, Ubuntu, Linux Mint, etc.)
+**Debian-based distributions** Without systemd. Using sysVinit. Testing done on Devuan 5 
 
 **Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts.
 
