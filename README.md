@@ -30,7 +30,7 @@ Professional audio control interface (`mxeq`) with:
 
 ### ⚙️ System Integration
 - **SysV init scripts** - Clean startup/shutdown (no systemd required)
-- **Graceful shutdown** - Daemons stop cleanly on reboot/shutdown (no warnings)
+- **Graceful shutdown** - Daemons stop cleanly on reboot/shutdown (still need to fix warnings)
 - **Auto-detection** - Finds audio devices, detects users automatically
 - **Non-root operation** - GUI runs as regular user with polkit for Bluetooth
 
