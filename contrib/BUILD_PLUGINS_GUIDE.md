@@ -20,8 +20,8 @@ Your daemon is custom-built from commit `b0dd89b`, but the distro ALSA plugin is
 The easiest way is to use the provided script:
 
 ```bash
-cd ~/build_a_bridge/jack-bridge
-sh contrib/build-bluealsa-plugins.sh
+cd ~/jack-bridge
+sh build-bluealsa-plugins.sh
 ```
 
 The script will:
