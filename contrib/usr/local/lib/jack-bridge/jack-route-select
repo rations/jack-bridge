@@ -1,0 +1,583 @@
+#!/bin/sh
+# jack-route-select - Runtime JACK routing helper for jack-bridge
+# Routes JACK graph to Internal, USB, HDMI, or Bluetooth without restarting JACK.
+# Reads user config ~/.config/jack-bridge/devices.conf (overrides) and system /etc/jack-bridge/devices.conf.
+# Persists PREFERRED_OUTPUT (and BLUETOOTH_DEVICE if provided) to per-user config without root.
+
+set -e
+set -u
+
+# Config precedence: user overrides system
+USER_CONF="${HOME}/.config/jack-bridge/devices.conf"
+SYS_CONF="/etc/jack-bridge/devices.conf"
+
+mkdir -p "$(dirname "$USER_CONF")" 2>/dev/null || true
+
+# Defaults
+PREFERRED_OUTPUT="internal"
+BLUETOOTH_DEVICE=""
+BT_PERIOD="256"
+BT_NPERIODS="3"
+
+# Logging for diagnostics
+LOGFILE="/tmp/jack-route-select.log"
+log() {
+  # timestamped append
+  printf "%s: %s\n" "$(date --iso-8601=seconds)" "$*" >>"$LOGFILE"
+}
+
+load_conf() {
+  [ -f "$SYS_CONF" ] && . "$SYS_CONF"
+  [ -f "$USER_CONF" ] && . "$USER_CONF"
+}
+ 
+# Write per-user current_output.conf and ensure ~/.asoundrc includes it inside
+# a managed block so non-JACK ALSA apps use the selected output.
+write_user_output_conf() {
+  out_pcm="$1" # e.g. plughw:0,0 or jackbridge_bluealsa:DEV=AA:BB:..,PROFILE=a2dp
+  log "write_user_output_conf: writing user output fragment for pcm='$out_pcm'"
+  out_dir="$(dirname "$USER_CONF")"
+  mkdir -p "$out_dir" 2>/dev/null || true
+  out_path="$out_dir/current_output.conf"
+  if ! cat > "$out_path" <<EOF
+# Managed user output fragment for jack-bridge
+pcm.current_output {
+    type plug
+    slave.pcm "$out_pcm"
+}
+EOF
+  then
+    log "ERROR: failed to write $out_path"
+    return 1
+  fi
+
+  # Ensure ~/.asoundrc contains an include for this fragment inside managed markers.
+  # NOTE: jack_playback_override.conf is OBSOLETE - we now update 50-jack.conf directly
+  ASOUND="$HOME/.asoundrc"
+  TMP="$(mktemp "${HOME}/.asoundrc.jb.XXXXXX" 2>/dev/null || mktemp /tmp/.asoundrc.jb.XXXXXX)"
+  in_path="$out_dir/current_input.conf"
+  bluealsa_defs="$out_dir/bluealsa_defaults.conf"
+  # Strip existing block between markers if present, then append our managed block.
+  if [ -f "$ASOUND" ]; then
+    awk '
+      BEGIN { skip=0 }
+      /^# BEGIN jack-bridge/ { skip=1; next }
+      /^# END jack-bridge/ { skip=0; next }
+      { if (!skip) print }
+    ' "$ASOUND" > "$TMP".part || cp -f "$ASOUND" "$TMP".part
+  else
+    echo "" > "$TMP".part
+  fi
+  {
+    cat "$TMP".part
+    echo
+    echo "# BEGIN jack-bridge"
+    echo "# Managed by jack-bridge helper — include per-user current_input.conf, bluealsa defaults and current_output.conf"
+    echo "# Note: Playback routing is managed system-wide via /usr/share/alsa/alsa.conf.d/50-jack.conf"
+    echo "include \"$in_path\""
+    echo "include \"$bluealsa_defs\""
+    echo "include \"$out_path\""
+    echo "# END jack-bridge"
+  } > "$TMP"
+  if mv "$TMP" "$ASOUND"; then
+    rm -f "$TMP".part 2>/dev/null || true
+    chmod 644 "$ASOUND" 2>/dev/null || true
+    log "Updated $ASOUND to include $in_path, $bluealsa_defs and $out_path"
+    return 0
+  else
+    log "ERROR: failed to install $ASOUND"
+    return 1
+  fi
+}
+ 
+# Write BlueALSA defaults so 'jackbridge_bluealsa' PCM can be used without inline parameters
+# $1 = MAC (or 00:00:00:00:00:00 for most-recent), $2 = PROFILE (e.g., a2dp), $3 = SRV (e.g., org.bluealsa)
+write_bluealsa_defaults() {
+ mac="${1:-00:00:00:00:00:00}"
+ prof="${2:-a2dp}"
+ srv="${3:-org.bluealsa}"
+ out_dir="$(dirname "$USER_CONF")"
+ mkdir -p "$out_dir" 2>/dev/null || true
+ defs_path="$out_dir/bluealsa_defaults.conf"
+ if ! cat > "$defs_path" <<EOF
+# Managed by jack-bridge — BlueALSA defaults for parameterless 'jackbridge_bluealsa' PCM
+# These match the @args names in 20-jack-bridge-bluealsa.conf
+defaults.jackbridge_bluealsa.DEV "$mac"
+defaults.jackbridge_bluealsa.PROFILE "$prof"
+defaults.jackbridge_bluealsa.SRV "$srv"
+EOF
+ then
+   log "ERROR: failed to write $defs_path"
+   return 1
+ fi
+ chmod 644 "$defs_path" 2>/dev/null || true
+ log "Wrote BlueALSA defaults (DEV=$mac PROFILE=$prof SRV=$srv) to $defs_path"
+}
+ 
+save_user_kv() {
+  # $1=KEY $2=VALUE
+  key="$1"; val="$2"
+  tmp="${USER_CONF}.tmp"
+  touch "$USER_CONF" 2>/dev/null || true
+  { grep -v -E "^${key}=" "$USER_CONF" 2>/dev/null || true; echo "${key}=${val}"; } > "$tmp"
+  mv "$tmp" "$USER_CONF"
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+jack_rate() {
+  if have jack_samplerate; then
+    r=$(jack_samplerate 2>/dev/null | awk '/sample rate/ {print $3; exit}')
+    if [ -n "$r" ]; then
+      echo "$r"
+      return
+    fi
+  fi
+  # Fallback
+  echo 48000
+}
+
+# Parse jack_lsp -c and collect sources connected to any known sink ports
+collect_current_sources() {
+  have jack_lsp || return
+  jack_lsp -c 2>/dev/null | awk '
+    BEGIN {
+      sink["system:playback_1"]=1; sink["system:playback_2"]=1;
+      sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
+      sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
+      sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
+    }
+    /^[^ \t]/ { cur=$1; next }
+    /^[ \t]/ {
+      to=$1;
+      if (to in sink) {
+        if (!(cur in seen)) { print cur; seen[cur]=1; }
+      }
+    }
+  '
+}
+
+jack_disconnect_all_sinks() {
+  have jack_lsp || return
+  have jack_disconnect || return
+  # Disconnect all connections to our known sinks
+  jack_lsp -c 2>/dev/null | awk '
+    BEGIN {
+      sink["system:playback_1"]=1; sink["system:playback_2"]=1;
+      sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
+      sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
+      sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
+    }
+    /^[^ \t]/ { cur=$1; next }
+    /^[ \t]/ {
+      to=$1;
+      if (to in sink) {
+        print cur, to
+      }
+    }
+  ' | while read -r src dst; do
+    jack_disconnect "$src" "$dst" 2>/dev/null || true
+  done
+}
+
+jack_connect_pair() {
+  # $1=srcL $2=srcR $3=sink_prefix (e.g., system:playback_ or usb_out:playback_)
+  have jack_connect || return
+  srcL="$1"; srcR="$2"; pref="$3"
+  jack_connect "$srcL" "${pref}1" 2>/dev/null || true
+  jack_connect "$srcR" "${pref}2" 2>/dev/null || true
+}
+
+kill_bridge_clients() {
+  # NOTE: With persistent ports (jack-bridge-ports init script), we NO LONGER kill bridge clients
+  # They remain running and just get disconnected/reconnected as needed
+  # This function is kept for backward compatibility but does nothing
+  return 0
+}
+
+wait_for_port() {
+  port="$1"
+  # Wait up to 5 seconds (50 * 0.1s)
+  for i in $(seq 1 50); do
+    if jack_lsp 2>/dev/null | grep -q "^$port"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  log "Timeout waiting for port $port"
+  return 1
+}
+
+ensure_usb_out() {
+  # RESPAWN usb_out with current USB device (handles hot-plug after boot)
+  # Kill existing usb_out process (may be pointing to placeholder hw:99)
+  pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+  sleep 0.3
+  
+  # Detect current USB audio device
+  usb_card=""
+  usb_dev=""
+  if have aplay; then
+    line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
+    if [ -n "$line" ]; then
+      usb_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+      usb_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    fi
+  fi
+  
+  # Fallback if no USB found (spawn with placeholder)
+  if [ -z "$usb_card" ]; then
+    log "No USB audio device detected; spawning usb_out with placeholder hw:99"
+    usb_card="99"
+    usb_dev="0"
+  else
+    log "USB audio device detected: card=$usb_card device=$usb_dev"
+  fi
+  
+  hw_dev="hw:${usb_card}"
+  if [ -n "$usb_dev" ] && [ "$usb_dev" != "0" ]; then
+    hw_dev="hw:${usb_card},${usb_dev}"
+  fi
+  
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  log "Spawning usb_out for $hw_dev"
+  nohup alsa_out -j usb_out -d "$hw_dev" -r "$rate" -p 256 -n 3 \
+    >>/tmp/jack-route-select-usb-out.log 2>&1 &
+  
+  # Wait for ports
+  if wait_for_port "usb_out:playback_1"; then
+    log "usb_out ports spawned successfully"
+    return 0
+  else
+    log "ERROR: usb_out ports failed to spawn (check /tmp/jack-route-select-usb-out.log)"
+    return 1
+  fi
+}
+
+ensure_hdmi_out() {
+  # RESPAWN hdmi_out with current HDMI device (handles device changes)
+  # Kill existing hdmi_out process
+  pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
+  sleep 0.3
+  
+  # Detect current HDMI device
+  hdmi_card=""
+  hdmi_dev=""
+  if have aplay; then
+    line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
+    if [ -n "$line" ]; then
+      hdmi_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+      hdmi_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    fi
+  fi
+  
+  # Fallback if no HDMI found (spawn with placeholder)
+  if [ -z "$hdmi_card" ]; then
+    log "No HDMI audio device detected; spawning hdmi_out with placeholder hw:98"
+    hdmi_card="98"
+    hdmi_dev="0"
+  else
+    log "HDMI audio device detected: card=$hdmi_card device=$hdmi_dev"
+  fi
+  
+  hw_dev="hw:${hdmi_card}"
+  if [ -n "$hdmi_dev" ] && [ "$hdmi_dev" != "0" ]; then
+    hw_dev="hw:${hdmi_card},${hdmi_dev}"
+  fi
+  
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  log "Spawning hdmi_out for $hw_dev"
+  nohup alsa_out -j hdmi_out -d "$hw_dev" -r "$rate" -p 256 -n 3 \
+    >>/tmp/jack-route-select-hdmi-out.log 2>&1 &
+  
+  # Wait for ports
+  if wait_for_port "hdmi_out:playback_1"; then
+    log "hdmi_out ports spawned successfully"
+    return 0
+  else
+    log "ERROR: hdmi_out ports failed to spawn (check /tmp/jack-route-select-hdmi-out.log)"
+    return 1
+  fi
+}
+
+ensure_usb_in() {
+  # ON-DEMAND capture: spawn alsa_in reading from USB audio interface
+  # This creates usb_in:capture_1/2 ports for USB microphones/guitars
+  
+  # Kill any existing usb_in process
+  pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+  sleep 0.3
+  
+  # Detect USB capture device
+  usb_card=""
+  usb_dev=""
+  if have arecord; then
+    line="$(arecord -l 2>/dev/null | grep "USB" | head -n 1)"
+    if [ -n "$line" ]; then
+      usb_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+      usb_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+    fi
+  fi
+  
+  if [ -z "$usb_card" ]; then
+    usb_card="1"
+    usb_dev="0"
+  fi
+  
+  hw_dev="hw:${usb_card}"
+  if [ -n "$usb_dev" ]; then
+    hw_dev="hw:${usb_card},${usb_dev}"
+  fi
+  
+  log "Spawning USB capture client: alsa_in from $hw_dev"
+  
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  # Spawn alsa_in for USB capture (creates usb_in:capture_1/2 ports)
+  nohup alsa_in -j usb_in -d "$hw_dev" -r "$rate" -p 256 -n 3 \
+    >>/tmp/jack-route-select-usb-in.log 2>&1 &
+  
+  # Wait for ports
+  if wait_for_port "usb_in:capture_1"; then
+    log "usb_in capture ports spawned successfully"
+    return 0
+  else
+    log "ERROR: usb_in capture ports failed to spawn (check /tmp/jack-route-select-usb-in.log)"
+    return 1
+  fi
+}
+
+ensure_bt_out() {
+  # ON-DEMAND spawning: Unlike USB/HDMI (which use hw:X,Y kernel nodes),
+  # Bluetooth uses 'jackbridge_bluealsa' ALSA plugin that requires an ACTIVE connection.
+  # This function spawns alsa_out ONLY when user selects Bluetooth output.
+  mac_arg="$1"
+  
+  # Extract MAC if provided
+  bt_mac=""
+  if [ -n "${mac_arg}" ]; then
+    if echo "$mac_arg" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
+      bt_mac="$mac_arg"
+    fi
+  fi
+  
+  # Write BlueALSA defaults FIRST (alsa_out will read these)
+  if [ -n "$bt_mac" ]; then
+    write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
+    log "Updated BlueALSA defaults for MAC: $bt_mac"
+  else
+    write_bluealsa_defaults "00:00:00:00:00:00" "a2dp" "org.bluealsa"
+    log "Updated BlueALSA defaults for most-recent device"
+  fi
+  
+  # Kill any existing bluealsa alsa_out process (in case switching devices)
+  pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+  sleep 0.5  # Let process terminate
+  
+  # Spawn alsa_out reading from jackbridge_bluealsa PCM (uses defaults we just wrote)
+  log "Spawning bluealsa alsa_out (period=$BT_PERIOD nperiods=$BT_NPERIODS)"
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+  
+  # Spawn in background - alsa_out will create bluealsa:playback_1/2 ports
+  nohup alsa_out -j bluealsa -d jackbridge_bluealsa -r "$rate" -p "$BT_PERIOD" -n "$BT_NPERIODS" \
+    >>/tmp/jack-route-select-bluealsa.log 2>&1 &
+  
+  # Wait for ports to appear
+  if wait_for_port "bluealsa:playback_1"; then
+    log "bluealsa ports spawned successfully"
+    return 0
+  else
+    log "ERROR: bluealsa ports failed to spawn (check /tmp/jack-route-select-bluealsa.log)"
+    log "       Device may not be connected or BlueALSA daemon not running"
+    return 1
+  fi
+}
+
+route() {
+  target="$1"
+  arg2="${2:-}"
+  load_conf
+  # Remember selection per user
+  save_user_kv "PREFERRED_OUTPUT" "$target"
+  # For bluetooth remember device if provided
+  if [ "$target" = "bluetooth" ] && [ -n "$arg2" ]; then
+    if echo "$arg2" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
+      save_user_kv "BLUETOOTH_DEVICE" "jackbridge_bluealsa:DEV=${arg2},PROFILE=a2dp"
+    else
+      save_user_kv "BLUETOOTH_DEVICE" "$arg2"
+    fi
+  fi
+  # Determine and write per-user ALSA output fragment so non-JACK apps have the chosen output
+  out_pcm=""
+  case "$target" in
+    internal)
+      out_pcm="${INTERNAL_DEVICE:-hw:0}"
+      ;;
+    usb)
+      # Detect USB card/device as in ensure_usb_out
+      if have aplay; then
+        line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
+        if [ -n "$line" ]; then
+          card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+          dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+          [ -z "$card" ] && card="1"
+          [ -z "$dev" ] && dev="0"
+          out_pcm="plughw:${card},${dev}"
+        else
+          out_pcm="${USB_DEVICE:-plughw:1,0}"
+        fi
+      else
+        out_pcm="${USB_DEVICE:-plughw:1,0}"
+      fi
+      ;;
+    hdmi)
+      if have aplay; then
+        line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
+        if [ -n "$line" ]; then
+          card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+          dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+          [ -z "$card" ] && card="0"
+          [ -z "$dev" ] && dev="3"
+          out_pcm="plughw:${card},${dev}"
+        else
+          out_pcm="${HDMI_DEVICE:-plughw:2,0}"
+        fi
+      else
+        out_pcm="${HDMI_DEVICE:-plughw:2,0}"
+      fi
+      ;;
+    bluetooth)
+      # Extract MAC address from arg2 or BLUETOOTH_DEVICE
+      bt_mac=""
+      if [ -n "${arg2}" ]; then
+        if echo "$arg2" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
+          bt_mac="$arg2"
+        fi
+      fi
+      # Write BlueALSA defaults so alsa_out can use short device name
+      if [ -n "$bt_mac" ]; then
+        write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
+      else
+        write_bluealsa_defaults "00:00:00:00:00:00" "a2dp" "org.bluealsa"
+      fi
+      # Use simple PCM name - parameters come from defaults
+      out_pcm="jackbridge_bluealsa"
+      ;;
+    *)
+      out_pcm="${PREFERRED_OUTPUT:-internal}"
+      ;;
+  esac
+  if [ -n "$out_pcm" ]; then
+    if write_user_output_conf "$out_pcm"; then
+      log "Wrote per-user output fragment for '$out_pcm'"
+    else
+      log "Failed to write per-user output fragment for '$out_pcm'"
+    fi
+  fi
+
+  # Determine sources currently feeding any sink
+  sources="$(collect_current_sources || true)"
+
+  case "$target" in
+    internal)
+      # Kill on-demand Bluetooth and USB capture clients when switching to internal
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      newpref="system:playback_"
+      ;;
+    usb)
+      # Kill on-demand Bluetooth client when switching away
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+      ensure_usb_out || log "WARNING: ensure_usb_out failed"
+      # Spawn usb_in for USB capture (usb_in:capture_1/2 ports for manual connection in qjackctl)
+      ensure_usb_in || log "WARNING: ensure_usb_in failed"
+      newpref="usb_out:playback_"
+      ;;
+    hdmi)
+      # Kill on-demand Bluetooth and USB capture clients when switching to HDMI
+      # HDMI has no capture - system:capture (internal mic) remains available
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      ensure_hdmi_out || log "WARNING: ensure_hdmi_out failed"
+      newpref="hdmi_out:playback_"
+      ;;
+    bluetooth)
+      # Kill USB capture client when switching to Bluetooth
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      # Spawn on-demand Bluetooth client (kills existing first if any)
+      ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
+      newpref="bluealsa:playback_"
+      ;;
+    *)
+      echo "Usage: $0 {internal|usb|hdmi|bluetooth} [bluealsa-DEV or MAC]" >&2
+      exit 1
+      ;;
+  esac
+
+  # Update system-wide ALSA JACK plugin config (primary method)
+  # Falls back to per-user override if system update fails
+  if ! update_system_jack_conf "$newpref"; then
+    log "System config update failed; using per-user override"
+    write_user_jack_override "$newpref" || true
+  fi
+
+  # Disconnect from all known sinks
+  jack_disconnect_all_sinks
+
+  # If we have no sources, attempt a sensible default: connect system:capture*? Not applicable for playback.
+  # Use ports that commonly drive output: try "mxeq:out_1/2" then "system:playback_*" sources if present.
+  if [ -z "$sources" ]; then
+    # Try mxeq first
+    if jack_lsp 2>/dev/null | grep -q '^mxeq:out_1'; then
+      jack_connect_pair "mxeq:out_1" "mxeq:out_2" "$newpref"
+      exit 0
+    fi
+    # Else try "system:playback_*" sources are not sources; fallback no-op
+    exit 0
+  fi
+
+  # Reconnect all previous sources to new sink
+  echo "$sources" | while IFS= read -r src; do
+    # Simple channel mapping using grep to avoid complex case patterns
+    if echo "$src" | grep -qE "(:out_1|:out_000|:left|:L)$"; then
+        jack_connect "$src" "${newpref}1" 2>/dev/null || true
+    elif echo "$src" | grep -qE "(:out_2|:out_001|:right|:R)$"; then
+        jack_connect "$src" "${newpref}2" 2>/dev/null || true
+    else
+        # Mono or unknown: connect to both
+        jack_connect "$src" "${newpref}1" 2>/dev/null || true
+        jack_connect "$src" "${newpref}2" 2>/dev/null || true
+    fi
+  done
+}
+
+main() {
+  tgt="${1:-${PREFERRED_OUTPUT}}"
+  arg2="${2:-}"
+  if [ -z "${tgt}" ]; then
+    echo "Usage: $0 {internal|usb|hdmi|bluetooth} [bluealsa-DEV or MAC]" >&2
+    exit 1
+  fi
+  route "$tgt" "$arg2"
+}
+
+load_conf
+main "$@"

@@ -1,8 +1,8 @@
 #!/bin/sh
 ### BEGIN INIT INFO
 # Provides:          jackd-rt
-# Required-Start:    $local_fs $remote_fs $alsa
-# Required-Stop:
+# Required-Start:    $local_fs $remote_fs
+# Required-Stop:     $local_fs $remote_fs
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 # Short-Description: Start JACK (classic jackd) at boot with realtime tuning
@@ -26,11 +26,14 @@ fi
 : ${JACKD_PERIOD:=256}
 : ${JACKD_NPERIODS:=3}
 : ${JACKD_PRIORITY:=70}
+: ${JACKD_MIDI:="seq"}
 : ${JACKD_ARGS:=""}
 : ${JACKD_DAEMON:=/usr/bin/jackd}
-: ${DETECT_SCRIPT:=/usr/lib/jack-bridge/detect-alsa-device.sh}
-: ${DETECT_USER_SCRIPT:=/usr/lib/jack-bridge/detect-user.sh}
+: ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
+: ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
+: ${WATCHDOG_PIDFILE:=/var/run/jack-watchdog.pid}
+: ${MONITOR_PIDFILE:=/var/run/jack-connection-monitor.pid}
 
 # detect_user(): removed; detection is handled inline in start() for portability
 
@@ -38,9 +41,21 @@ fi
 
 start() {
     log_daemon_msg "Starting JACK (jackd) with realtime settings" "jackd-rt"
+    
+    # Check if already running
+    if [ -f /var/run/jackd-rt.pid ]; then
+        pid=$(cat /var/run/jackd-rt.pid 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_progress_msg "already running"
+            log_end_msg 0
+            return 0
+        fi
+        # Stale pidfile
+        rm -f /var/run/jackd-rt.pid 2>/dev/null || true
+    fi
 
-    # Wait up to 10s for ALSA devices to appear (helpful during boot where /dev/snd may be late)
-    WAIT_SECS=10
+    # Wait up to 5s for ALSA devices to appear (reduced from 15s - USB hijacking is now fixed)
+    WAIT_SECS=5
     waited=0
     while [ $waited -lt $WAIT_SECS ]; do
         if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
@@ -98,8 +113,15 @@ start() {
         DEVICE="hw:0"
     fi
 
-    # Build jackd args
-    ARGS="-R -P${JACKD_PRIORITY} -d alsa -d ${DEVICE} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+    # Build jackd args with SEPARATE playback and capture devices
+    # -P: Playback uses detected device (can be hw:CARD=PCH, hw:CARD=HDMI, etc)
+    # -C: Capture ALWAYS uses hw:0 (provides baseline internal mic via system:capture)
+    #     Additional capture sources (USB, etc) are spawned as alsa_in clients by jack-route-select
+    if [ -n "$JACKD_MIDI" ] && [ "$JACKD_MIDI" != "none" ]; then
+        ARGS="-R -P${JACKD_PRIORITY} -d alsa -P ${DEVICE} -C hw:0 -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} -X ${JACKD_MIDI} ${JACKD_ARGS}"
+    else
+        ARGS="-R -P${JACKD_PRIORITY} -d alsa -P ${DEVICE} -C hw:0 -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
+    fi
 
     # Ensure user exists
     if ! id "$USERNAME" >/dev/null 2>&1; then
@@ -124,23 +146,30 @@ start() {
     # Start jackd as login user via start-stop-daemon (no --chuid; PID tracks exec chain)
     start-stop-daemon --start --background --make-pidfile --pidfile /var/run/jackd-rt.pid \
         --startas /bin/sh -- -c "$CMD" \
-        || { log_failure_msg "Failed to start jackd"; return 1; }
+        || { log_failure_msg "Failed to start jackd"; log_end_msg 1; return 1; }
 
     # Health check: prefer jack_wait, fallback to pid check
     if command -v jack_wait >/dev/null 2>&1; then
-        if ! jack_wait -w -t 8 >/dev/null 2>&1; then
+        if ! jack_wait -w -t 10 >/dev/null 2>&1; then
             log_warning_msg "jackd did not become ready in time; last 30 lines of $JACKD_LOG:"
             tail -n 30 "$JACKD_LOG" 2>/dev/null || true
             log_end_msg 1
             return 1
         fi
 
-        # Autoconnect (if present) and watchdog are started after jack_wait succeeds
-        if [ -x /usr/lib/jack-bridge/jack-autoconnect ]; then
-            /usr/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
+        # Autoconnect (if present) runs once at startup
+        if [ -x /usr/local/lib/jack-bridge/jack-autoconnect ]; then
+            /usr/local/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
         fi
-        if [ -x /usr/lib/jack-bridge/jack-watchdog ]; then
-            /usr/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
+        
+        # NOTE: jack-connection-manager is now started by separate init script
+        # (contrib/init.d/jack-connection-manager) for cleaner service management
+        
+        # Start watchdog last
+        if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then
+            /usr/local/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
+            # Save watchdog PID for clean shutdown
+            echo $! > "$WATCHDOG_PIDFILE" 2>/dev/null || true
         fi
     else
         sleep 1
@@ -158,9 +187,58 @@ start() {
 
 stop() {
     log_daemon_msg "Stopping JACK (jackd)" "jackd-rt"
-    start-stop-daemon --stop --pidfile /var/run/jackd-rt.pid --retry 5 || true
+    
+    # Check if actually running
+    if [ ! -f /var/run/jackd-rt.pid ]; then
+        log_progress_msg "not running"
+        log_end_msg 0
+        return 0
+    fi
+    
+    pid=$(cat /var/run/jackd-rt.pid 2>/dev/null || true)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        log_progress_msg "not running"
+        rm -f /var/run/jackd-rt.pid 2>/dev/null || true
+        log_end_msg 0
+        return 0
+    fi
+    
+    # CRITICAL: Stop monitor and watchdog FIRST to prevent restart/reconnect attempts
+    if [ -f "$MONITOR_PIDFILE" ]; then
+        monitor_pid=$(cat "$MONITOR_PIDFILE" 2>/dev/null || true)
+        if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
+            log_progress_msg "stopping monitor"
+            kill -TERM "$monitor_pid" 2>/dev/null || true
+            sleep 1
+            kill -0 "$monitor_pid" 2>/dev/null && kill -KILL "$monitor_pid" 2>/dev/null || true
+        fi
+        rm -f "$MONITOR_PIDFILE" 2>/dev/null || true
+    fi
+    
+    if [ -f "$WATCHDOG_PIDFILE" ]; then
+        watchdog_pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null || true)
+        if [ -n "$watchdog_pid" ] && kill -0 "$watchdog_pid" 2>/dev/null; then
+            log_progress_msg "stopping watchdog"
+            kill -TERM "$watchdog_pid" 2>/dev/null || true
+            sleep 1
+            kill -0 "$watchdog_pid" 2>/dev/null && kill -KILL "$watchdog_pid" 2>/dev/null || true
+        fi
+        rm -f "$WATCHDOG_PIDFILE" 2>/dev/null || true
+    fi
+    
+    # Now stop JACK with proper retry strategy
+    log_progress_msg "stopping jackd (pid $pid)"
+    start-stop-daemon --stop --pidfile /var/run/jackd-rt.pid --retry=TERM/10/KILL/2 --oknodo
+    STOP_STATUS=$?
     rm -f /var/run/jackd-rt.pid 2>/dev/null || true
-    log_end_msg 0
+    
+    if [ $STOP_STATUS -eq 0 ]; then
+        log_end_msg 0
+        return 0
+    else
+        log_end_msg 1
+        return 1
+    fi
 }
 
 status() {

@@ -1,0 +1,161 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          bluealsad
+# Required-Start:    $local_fs $remote_fs dbus bluetooth
+# Required-Stop:     $local_fs $remote_fs dbus bluetooth
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start BlueALSA daemon (bluealsad) without systemd
+# Description:       Runs bluealsad on the system D-Bus as the 'bluealsa' user.
+### END INIT INFO
+
+# contrib/init.d/bluealsad - SysV init script for BlueALSA daemon.
+# This script assumes:
+#  - a system user 'bluealsa' exists (nologin)
+#  - /var/lib/bluealsa exists and is owned by bluealsa:bluealsa (0700)
+#  - D-Bus policy allows 'bluealsa' to own org.bluealsa on the system bus
+# Optional overrides in /etc/default/bluealsad:
+#   BLUEALSAD_USER=bluealsa
+#   BLUEALSAD_ARGS=""          # e.g. "-p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs"
+#   BLUEALSAD_LOG=/var/log/bluealsad.log
+
+. /lib/lsb/init-functions
+
+# Use jack-bridge prebuilt binary (we do not use distro bluez-alsa-utils)
+DAEMON="/usr/local/bin/bluealsad"
+PIDFILE="/var/run/bluealsad.pid"
+
+# Defaults
+BLUEALSAD_USER="${BLUEALSAD_USER:-bluealsa}"
+# --keep-alive=-1 maintains A2DP transport indefinitely (prevents port disappearance)
+# Profiles: a2dp-source (capture from device), a2dp-sink (playback to device), hfp-hf, hsp-hs
+BLUEALSAD_ARGS="${BLUEALSAD_ARGS:---keep-alive=-1 -p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs}"
+BLUEALSAD_LOG="${BLUEALSAD_LOG:-/var/log/bluealsad.log}"
+
+# Load overrides if present
+if [ -r /etc/default/bluealsad ]; then
+    . /etc/default/bluealsad
+fi
+
+ensure_runtime_dirs() {
+    # Ensure state dir exists with strict perms
+    if [ ! -d /var/lib/bluealsa ]; then
+        mkdir -p /var/lib/bluealsa 2>/dev/null || true
+        chown "$BLUEALSAD_USER":"$BLUEALSAD_USER" /var/lib/bluealsa 2>/dev/null || true
+        chmod 0700 /var/lib/bluealsa 2>/dev/null || true
+    fi
+    # Ensure log file exists and is owned properly
+    touch "$BLUEALSAD_LOG" 2>/dev/null || true
+    chown "$BLUEALSAD_USER":"$BLUEALSAD_USER" "$BLUEALSAD_LOG" 2>/dev/null || true
+}
+
+wait_for_dbus() {
+    # Wait up to 10s for system D-Bus to be available
+    i=0
+    while [ $i -lt 10 ]; do
+        if command -v gdbus >/dev/null 2>&1; then
+            # simple ping of the bus; NameHasOwner for org.freedesktop.DBus should always be true
+            if gdbus call --system --dest org.freedesktop.DBus \
+                  --object-path /org/freedesktop/DBus \
+                  --method org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+                return 0
+            fi
+        else
+            # fallback: assume dbus is up after a short delay
+            sleep 1
+            return 0
+        fi
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
+
+start() {
+    log_daemon_msg "Starting BlueALSA daemon" "bluealsad"
+
+    if [ ! -x "$DAEMON" ]; then
+        log_failure_msg "Binary not found: $DAEMON"
+        log_end_msg 1
+        return 1
+    fi
+
+    # Ensure user exists
+    if ! id "$BLUEALSAD_USER" >/dev/null 2>&1; then
+        log_failure_msg "User '$BLUEALSAD_USER' does not exist"
+        log_end_msg 1
+        return 1
+    fi
+
+    ensure_runtime_dirs
+
+    # Wait for system bus & bluetoothd to be usable
+    wait_for_dbus || log_warning_msg "D-Bus not confirmed ready; continuing"
+    # Give bluetoothd a moment if present
+    sleep 1
+
+    # Build final command
+    DAEMON_ARGS="$BLUEALSAD_ARGS"
+    CMD="exec \"$DAEMON\" $DAEMON_ARGS >>\"$BLUEALSAD_LOG\" 2>&1"
+
+    # Start as bluealsa user; create pidfile
+    start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" \
+        --chuid "$BLUEALSAD_USER" \
+        --startas /bin/sh -- -c "$CMD" \
+        || { log_failure_msg "Failed to start bluealsad"; log_end_msg 1; return 1; }
+
+    # Optional light check: wait briefly and see if PID is alive
+    sleep 1
+    if [ -s "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -z "$pid" ] || ! kill -0 "$pid" >/dev/null 2>&1; then
+            log_warning_msg "bluealsad may not be running; check $BLUEALSAD_LOG"
+        fi
+    fi
+
+    log_end_msg 0
+    return 0
+}
+
+stop() {
+    log_daemon_msg "Stopping BlueALSA daemon" "bluealsad"
+    # Send SIGTERM, wait up to 10s for graceful shutdown
+    start-stop-daemon --stop --pidfile "$PIDFILE" --retry=TERM/10/KILL/2 --oknodo || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    log_end_msg 0
+}
+
+status() {
+    if [ -f "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            echo "bluealsad running (pid $pid)"
+            return 0
+        fi
+    fi
+    echo "bluealsad not running"
+    return 1
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|force-reload)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0

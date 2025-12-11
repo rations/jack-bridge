@@ -1,9 +1,9 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=AlsaTune - sound settings
-Comment=Control sound in ALSA
+Name=Alsa Sound Connect
+Comment=Bluetooth & sound control in ALSA
 Exec=/usr/local/bin/mxeq
-Icon=audio-speakers
+Icon=alsa-sound-connect
 Terminal=false
 Categories=AudioVideo;Audio;

@@ -3,15 +3,23 @@
 # Lightweight watchdog: monitor jackd and restart the SysV service if it exits.
 # Runs as a background task started by the init script (only one instance expected).
 # Safe: checks for existing PID file and uses invoke-rc.d/service if available.
+# Gracefully exits on TERM/INT signals (sent during system shutdown).
 
 WATCH_INTERVAL=5
 PIDFILE="/var/run/jackd-rt.pid"
 SERVICE_NAME="jackd-rt"
 LOGTAG="jack-watchdog"
+SHUTDOWN_FLAG=0
 
 # Minimal logging helper
 log() {
     printf '%s: %s\n' "$LOGTAG" "$1" >/dev/null 2>&1 || true
+}
+
+# Signal handler for graceful shutdown (TERM, INT)
+handle_shutdown() {
+    SHUTDOWN_FLAG=1
+    log "received shutdown signal; exiting gracefully"
 }
 
 # Ensure only a single watchdog runs by using a lockfile in /var/run
@@ -28,17 +36,34 @@ fi
 
 # Write our PID to lockfile
 printf '%s' "$$" > "$LOCKFILE" 2>/dev/null || true
-# Ensure lockfile is removed on exit
-trap 'rm -f "$LOCKFILE" 2>/dev/null || true; exit 0' EXIT INT TERM
 
-while true; do
+# Cleanup handler: remove lockfile and pidfile on exit
+cleanup() {
+    rm -f "$LOCKFILE" 2>/dev/null || true
+    rm -f /var/run/jack-watchdog.pid 2>/dev/null || true
+    exit 0
+}
+
+# Register signal handlers BEFORE main loop
+trap 'handle_shutdown' TERM INT
+trap 'cleanup' EXIT
+
+# Main monitoring loop - exits cleanly when SHUTDOWN_FLAG is set
+while [ "$SHUTDOWN_FLAG" -eq 0 ]; do
     # If jackd pidfile exists and process alive, just sleep
     if [ -s "$PIDFILE" ]; then
         pid=$(cat "$PIDFILE" 2>/dev/null || true)
         if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
-            sleep "$WATCH_INTERVAL"
+            sleep "$WATCH_INTERVAL" &
+            wait $!  # Interruptible sleep for quick signal response
             continue
         fi
+    fi
+
+    # Exit immediately if shutdown was requested (don't restart during shutdown)
+    if [ "$SHUTDOWN_FLAG" -ne 0 ]; then
+        log "shutdown requested; not restarting jackd"
+        break
     fi
 
     # jackd not running: attempt to restart via invoke-rc.d / service / init script
@@ -54,6 +79,10 @@ while true; do
         fi
     fi
 
-    # Give it a moment before next check
-    sleep "$WATCH_INTERVAL"
+    # Give it a moment before next check (interruptible)
+    sleep "$WATCH_INTERVAL" &
+    wait $!
 done
+
+# Clean exit (cleanup trap will fire)
+exit 0

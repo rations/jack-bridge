@@ -1,0 +1,7 @@
+/.vscode
+
+# Common local artifacts
+*.o
+*.obj
+*.swp
+*.log

@@ -1,0 +1,102 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          bluetoothd
+# Required-Start:    $local_fs $remote_fs dbus
+# Required-Stop:     $local_fs $remote_fs dbus
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start BlueZ bluetoothd at boot
+# Description:       Starts bluetoothd and ensures adapter presence is handled by the GUI via D-Bus.
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+# Load overrides if present
+if [ -r /etc/default/bluetoothd ]; then
+    . /etc/default/bluetoothd
+fi
+
+: ${BLUETOOTHD_BIN:=/usr/sbin/bluetoothd}
+: ${BLUETOOTHD_ARGS:="-n -E"}   # -n: stay in foreground for start-stop-daemon; -E: enable experimental features (optional)
+: ${BLUETOOTHD_PIDFILE:=/var/run/bluetoothd.pid}
+: ${BLUETOOTHD_LOG:=/var/log/bluetoothd.log}
+: ${BLUETOOTHD_CONF:=/etc/bluetooth/main.conf}
+
+start() {
+    log_daemon_msg "Starting bluetoothd (BlueZ daemon)" "bluetoothd"
+
+    if [ ! -x "$BLUETOOTHD_BIN" ]; then
+        log_failure_msg "bluetoothd not found at $BLUETOOTHD_BIN"
+        return 1
+    fi
+
+    # Ensure dbus is available
+    if ! pidof dbus-daemon >/dev/null 2>&1; then
+        log_failure_msg "dbus-daemon not running; cannot start bluetoothd"
+        return 1
+    fi
+
+    # Prepare log
+    touch "$BLUETOOTHD_LOG" 2>/dev/null || true
+    chown root:root "$BLUETOOTHD_LOG" 2>/dev/null || true
+
+    # Start bluetoothd via start-stop-daemon; run in background and create pidfile
+    start-stop-daemon --start --background --make-pidfile --pidfile "$BLUETOOTHD_PIDFILE" \
+        --startas "$BLUETOOTHD_BIN" -- $BLUETOOTHD_ARGS >>"$BLUETOOTHD_LOG" 2>&1 \
+        || { log_failure_msg "Failed to start bluetoothd"; return 1; }
+
+    # Wait briefly and check that at least one adapter is present or will be available
+    sleep 1
+    # Not fatal if no adapter now; GUI can power/enable adapter
+    if command -v bluetoothctl >/dev/null 2>&1; then
+        if ! bluetoothctl show >/dev/null 2>&1; then
+            log_warning_msg "bluetoothd running but no adapter visible yet"
+        fi
+    fi
+
+    log_end_msg 0
+    return 0
+}
+
+stop() {
+    log_daemon_msg "Stopping bluetoothd" "bluetoothd"
+    # Send SIGTERM, wait up to 10s for graceful shutdown
+    start-stop-daemon --stop --pidfile "$BLUETOOTHD_PIDFILE" --retry=TERM/10/KILL/2 --oknodo || true
+    rm -f "$BLUETOOTHD_PIDFILE" 2>/dev/null || true
+    log_end_msg 0
+}
+
+status() {
+    if [ -f "$BLUETOOTHD_PIDFILE" ]; then
+        pid=$(cat "$BLUETOOTHD_PIDFILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            echo "bluetoothd running (pid $pid)"
+            return 0
+        fi
+    fi
+    echo "bluetoothd not running"
+    return 1
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|force-reload)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0

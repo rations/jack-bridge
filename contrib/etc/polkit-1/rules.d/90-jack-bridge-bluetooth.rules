@@ -1,0 +1,13 @@
+/*
+ * 90-jack-bridge-bluetooth.rules
+ * Allow BlueZ administrative actions (pair/connect/set properties) for users in 'audio' or 'bluetooth'.
+ * This project intentionally avoids systemd, PulseAudio and PipeWire.
+ */
+
+polkit.addRule(function(action, subject) {
+  if ((subject.isInGroup("audio") || subject.isInGroup("bluetooth")) && subject.local) {
+    if (action.id.indexOf("org.bluez.") === 0) {
+      return polkit.Result.YES;
+    }
+  }
+});
