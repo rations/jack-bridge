@@ -1,4 +1,4 @@
-# jack-bridge - System-wide ALSA + JACK Audio with GUI
+# jack-bridge - System wide ALSA + JACK Audio & Bluetooth with GUI No systemd, pulseaudio or pipewire
 
 ![Alsa Sound Connect GUI](Alsa-sound-connect-gui.png)
 
@@ -239,7 +239,7 @@ Per-binary minimal compile commands (useful for producing a single utility if yo
 
 bash
 cd ~/jack-bridge
-make -j
+make clean && make
 
 
 The Makefile builds `mxeq` (GUI) and `bt_agent` (Bluetooth agent helper).
@@ -250,7 +250,7 @@ To completely remove jack-bridge:
 
 bash
 cd ~/jack-bridge
-sudo ./contrib/uninstall.sh
+sudo sh contrib/uninstall.sh
 
 The uninstaller removes:
 - All init scripts and service registrations
@@ -267,8 +267,8 @@ The uninstaller removes:
 
 To also remove packages:
 bash
-sudo apt remove --purge jackd2 qjackctl bluez bluez-tools libasound2-plugins \
-  alsa-utils apulse libasound2-plugin-equal swh-plugins libgtk-3-0
+sudo apt remove jackd2 qjackctl bluez bluez-tools libasound2-plugins \
+  alsa-utils apulse libasound2-plugin-equal swh-plugins
 sudo apt autoremove
 
 ## Architecture
