@@ -1,4 +1,4 @@
-# /etc/default/jackd-rt - override file for contrib/init.d/jackd-rt
+﻿# /etc/default/jackd-rt - override file for contrib/init.d/jackd-rt
 # This file provides optional overrides for the init script.
 # Do NOT hardcode a username or device here for packages that will be distributed;
 # packagers/admins may customize this file if they want system-wide overrides.

@@ -661,6 +661,90 @@ else
     echo "WARNING: contrib/init.d/jack-connection-manager not found"
 fi
 
+# Install D-Bus service for qjackctl integration (Phase A: MVP)
+echo ""
+echo "Installing jack-bridge D-Bus service for qjackctl integration..."
+
+# Build D-Bus service if not already built
+if [ ! -f "contrib/bin/jack-bridge-dbus" ]; then
+    echo "Building jack-bridge-dbus..."
+    if command -v make >/dev/null 2>&1; then
+        make dbus || {
+            echo "WARNING: Failed to build jack-bridge-dbus"
+            echo "         qjackctl Start/Stop buttons will not work"
+            echo "         Run 'make dbus' manually to enable this feature"
+        }
+    else
+        echo "WARNING: make not found, cannot build jack-bridge-dbus"
+        echo "         qjackctl Start/Stop buttons will not work"
+    fi
+fi
+
+# Install D-Bus service binary
+if [ -f "contrib/bin/jack-bridge-dbus" ]; then
+    install -m 0755 contrib/bin/jack-bridge-dbus /usr/local/bin/jack-bridge-dbus
+    echo "  ✓ Installed jack-bridge-dbus to /usr/local/bin"
+else
+    echo "  ! jack-bridge-dbus binary not found, skipping D-Bus service install"
+    echo "    qjackctl Start/Stop will not work without this service"
+fi
+
+# Install D-Bus service activation file
+if [ -f "contrib/dbus/org.jackaudio.service.service" ]; then
+    mkdir -p /usr/share/dbus-1/system-services
+    install -m 0644 contrib/dbus/org.jackaudio.service.service \
+        /usr/share/dbus-1/system-services/org.jackaudio.service.service
+    echo "  ✓ Installed D-Bus service activation file"
+fi
+
+# Install D-Bus policy
+if [ -f "contrib/dbus/org.jackaudio.service.conf" ]; then
+    mkdir -p /usr/share/dbus-1/system.d
+    install -m 0644 contrib/dbus/org.jackaudio.service.conf \
+        /usr/share/dbus-1/system.d/org.jackaudio.service.conf
+    echo "  ✓ Installed D-Bus policy"
+else
+    echo "  ! D-Bus policy not found, qjackctl may require manual authorization"
+fi
+
+# Install polkit rules for password-less control
+if [ -f "contrib/polkit/50-jack-bridge.rules" ]; then
+    mkdir -p /etc/polkit-1/rules.d
+    install -m 0644 contrib/polkit/50-jack-bridge.rules \
+        /etc/polkit-1/rules.d/50-jack-bridge.rules
+    echo "  ✓ Installed polkit rules (audio group gets password-less JACK control)"
+    
+    # Reload polkit
+    if pidof polkitd >/dev/null 2>&1; then
+        kill -HUP $(pidof polkitd | awk '{print $1}') 2>/dev/null || true
+    fi
+else
+    echo "  ! Polkit rules not found, users may be prompted for password"
+fi
+
+# Install jack-bridge-dbus init script
+if [ -f "contrib/init.d/jack-bridge-dbus" ]; then
+    install -m 0755 contrib/init.d/jack-bridge-dbus "${INIT_DIR}/jack-bridge-dbus"
+    echo "  ✓ Installed jack-bridge-dbus init script"
+    
+    # Register with update-rc.d (must start early, before qjackctl launches)
+    if command -v update-rc.d >/dev/null 2>&1; then
+        update-rc.d -f jack-bridge-dbus remove >/dev/null 2>&1 || true
+        update-rc.d jack-bridge-dbus defaults 01 99 || true
+        echo "  ✓ Registered jack-bridge-dbus: starts at priority 01 (very early)"
+    fi
+fi
+
+# Reload D-Bus to pick up new service
+if command -v service >/dev/null 2>&1; then
+    service dbus reload >/dev/null 2>&1 || true
+    echo "  ✓ Reloaded D-Bus configuration"
+fi
+
+echo "D-Bus service installation complete"
+echo "qjackctl Start/Stop buttons will now control the system JACK service"
+echo ""
+
 # Install jack-bridge devices config (authoritative; overwrite without backup)
 mkdir -p /etc/jack-bridge
 cat > /etc/jack-bridge/devices.conf <<'DEVCONF'
