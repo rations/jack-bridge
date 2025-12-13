@@ -799,8 +799,104 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     fi
 done
 
+# Install qjackctl helper scripts to /usr/local/bin
 echo ""
-echo "Installation complete, reboot for changes to take effect. sudo reboot"
+echo "Installing qjackctl D-Bus configuration helpers..."
+if [ -f "contrib/usr/local/bin/jack-bridge-qjackctl-setup" ]; then
+    install -m 0755 contrib/usr/local/bin/jack-bridge-qjackctl-setup /usr/local/bin/jack-bridge-qjackctl-setup
+    echo "  ✓ Installed jack-bridge-qjackctl-setup"
+fi
+
+if [ -f "contrib/usr/local/bin/jack-bridge-verify-qjackctl" ]; then
+    install -m 0755 contrib/usr/local/bin/jack-bridge-verify-qjackctl /usr/local/bin/jack-bridge-verify-qjackctl
+    echo "  ✓ Installed jack-bridge-verify-qjackctl"
+fi
+
+# Configure qjackctl to use D-Bus mode for jack-bridge integration
+# This is CRITICAL - without this, qjackctl spawns its own jackd instead of using our D-Bus service
+echo ""
+echo "Configuring qjackctl for D-Bus mode integration..."
+
+# Create skeleton config for new users
+QJACKCTL_SKEL_DIR="/etc/skel/.config/rncbc.org"
+mkdir -p "$QJACKCTL_SKEL_DIR"
+cat > "$QJACKCTL_SKEL_DIR/QjackCtl.conf" <<'QJACKCTL_SKEL'
+[General]
+DBusEnabled=true
+JackDBusEnabled=true
+StartJack=false
+ServerName=default
+QJACKCTL_SKEL
+chmod 644 "$QJACKCTL_SKEL_DIR/QjackCtl.conf" || true
+echo "  ✓ Created skeleton qjackctl config in /etc/skel/"
+
+# Configure qjackctl for each existing desktop user
+for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
+    home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
+    if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
+        qjackctl_conf_dir="$home_dir/.config/rncbc.org"
+        qjackctl_conf="$qjackctl_conf_dir/QjackCtl.conf"
+        
+        # Create config directory
+        mkdir -p "$qjackctl_conf_dir"
+        
+        if [ -f "$qjackctl_conf" ]; then
+            # Update existing configuration
+            backup_file="${qjackctl_conf}.backup-$(date +%Y%m%d-%H%M%S)"
+            cp "$qjackctl_conf" "$backup_file" 2>/dev/null && \
+                echo "  ✓ Backed up existing config for user $u"
+            
+            # Update or add D-Bus settings
+            if grep -q '^DBusEnabled=' "$qjackctl_conf"; then
+                sed -i 's/^DBusEnabled=.*/DBusEnabled=true/' "$qjackctl_conf"
+            else
+                echo "DBusEnabled=true" >> "$qjackctl_conf"
+            fi
+            
+            if grep -q '^JackDBusEnabled=' "$qjackctl_conf"; then
+                sed -i 's/^JackDBusEnabled=.*/JackDBusEnabled=true/' "$qjackctl_conf"
+            else
+                echo "JackDBusEnabled=true" >> "$qjackctl_conf"
+            fi
+            
+            echo "  ✓ Updated qjackctl D-Bus settings for user $u"
+        else
+            # Create new minimal D-Bus-enabled config
+            cat > "$qjackctl_conf" <<'QJACKCTL_CONF'
+[General]
+DBusEnabled=true
+JackDBusEnabled=true
+StartJack=false
+ServerName=default
+QJACKCTL_CONF
+            echo "  ✓ Created qjackctl D-Bus config for user $u"
+        fi
+        
+        # Fix ownership
+        chown -R "$u:$u" "$qjackctl_conf_dir" 2>/dev/null || true
+    fi
+done
+
+echo ""
+echo "qjackctl D-Bus mode configuration complete!"
+echo ""
+echo "Verification:"
+echo "  Users can run: jack-bridge-verify-qjackctl"
+echo "  To reconfigure: jack-bridge-qjackctl-setup"
+echo ""
+
+echo "============================================================================"
+echo "Installation complete! Changes take effect after reboot."
+echo ""
+echo "Next steps:"
+echo "  1. Reboot: sudo reboot"
+echo "  2. After reboot, launch qjackctl - it should show 'D-Bus JACK'"
+echo "  3. Use Start/Stop buttons to control system JACK service"
+echo "  4. Verify config: jack-bridge-verify-qjackctl"
+echo ""
+echo "Important: qjackctl is now configured to use jack-bridge D-Bus mode."
+echo "           Start/Stop buttons will control the system jackd-rt service."
+echo "============================================================================"
 echo ""
 
 exit 0

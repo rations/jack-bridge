@@ -1,0 +1,53 @@
+#!/bin/sh
+# contrib/usr/local/bin/jack-bridge-verify-qjackctl
+# Verify that qjackctl is correctly configured for D-Bus mode
+
+CONF_FILE="$HOME/.config/rncbc.org/QjackCtl.conf"
+
+echo "jack-bridge qjackctl D-Bus Verification"
+echo "========================================"
+echo ""
+
+if [ ! -f "$CONF_FILE" ]; then
+    echo "✗ qjackctl configuration file not found"
+    echo "  Expected: $CONF_FILE"
+    echo ""
+    echo "This means qjackctl has never been run, or config was deleted."
+    echo ""
+    echo "Solution: Run jack-bridge-qjackctl-setup"
+    exit 1
+fi
+
+# Check D-Bus settings
+dbus_enabled=$(grep '^DBusEnabled=' "$CONF_FILE" 2>/dev/null | cut -d= -f2)
+jack_dbus_enabled=$(grep '^JackDBusEnabled=' "$CONF_FILE" 2>/dev/null | cut -d= -f2)
+
+echo "Configuration file: $CONF_FILE"
+echo "  DBusEnabled: ${dbus_enabled:-<not set>}"
+echo "  JackDBusEnabled: ${jack_dbus_enabled:-<not set>}"
+echo ""
+
+if [ "$dbus_enabled" = "true" ] && [ "$jack_dbus_enabled" = "true" ]; then
+    echo "✓ qjackctl is CORRECTLY configured for D-Bus mode"
+    echo ""
+    echo "Integration status:"
+    echo "  ✓ qjackctl will use D-Bus to control JACK"
+    echo "  ✓ Start/Stop buttons will control system jackd-rt service"
+    echo "  ✓ jack-bridge D-Bus service will be used"
+    echo ""
+    echo "When you launch qjackctl, it should show:"
+    echo "  \"D-Bus JACK\" in the connection mode indicator"
+    exit 0
+else
+    echo "✗ qjackctl D-Bus mode is DISABLED"
+    echo ""
+    echo "Current settings:"
+    echo "  DBusEnabled=${dbus_enabled:-<not set>} (should be: true)"
+    echo "  JackDBusEnabled=${jack_dbus_enabled:-<not set>} (should be: true)"
+    echo ""
+    echo "This means qjackctl will spawn its own jackd process"
+    echo "instead of using the jack-bridge D-Bus service."
+    echo ""
+    echo "Solution: Run jack-bridge-qjackctl-setup"
+    exit 1
+fi
