@@ -195,7 +195,7 @@ stop() {
         return 0
     fi
     
-    # CRITICAL: Stop monitor and watchdog FIRST to prevent restart/reconnect attempts
+    # CRITICAL: Stop monitor FIRST to prevent reconnect attempts
     if [ -f "$MONITOR_PIDFILE" ]; then
         monitor_pid=$(cat "$MONITOR_PIDFILE" 2>/dev/null || true)
         if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
@@ -205,17 +205,6 @@ stop() {
             kill -0 "$monitor_pid" 2>/dev/null && kill -KILL "$monitor_pid" 2>/dev/null || true
         fi
         rm -f "$MONITOR_PIDFILE" 2>/dev/null || true
-    fi
-    
-    if [ -f "$WATCHDOG_PIDFILE" ]; then
-        watchdog_pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null || true)
-        if [ -n "$watchdog_pid" ] && kill -0 "$watchdog_pid" 2>/dev/null; then
-            log_progress_msg "stopping watchdog"
-            kill -TERM "$watchdog_pid" 2>/dev/null || true
-            sleep 1
-            kill -0 "$watchdog_pid" 2>/dev/null && kill -KILL "$watchdog_pid" 2>/dev/null || true
-        fi
-        rm -f "$WATCHDOG_PIDFILE" 2>/dev/null || true
     fi
     
     # Now stop JACK with proper retry strategy
@@ -256,6 +245,17 @@ case "$1" in
         stop
         sleep 1
         start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0
         ;;
     status)
         status
