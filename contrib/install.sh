@@ -22,7 +22,8 @@ BIN_DIR="${PREFIX_ROOT}usr/bin"
 
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez"
+# Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez"
 
 echo "Installing jack-bridge contrib files"
 
@@ -125,15 +126,24 @@ else
     echo "WARNING: jack-connection-manager not found (run 'make manager' to build it)"
 fi
 
-# Install autoconnect and watchdog helpers (from contrib; force overwrite)
+# Install autoconnect helper (from contrib; force overwrite)
 if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
     install -m 0755 contrib/usr/lib/jack-bridge/jack-autoconnect "${USR_LIB_DIR}/jack-autoconnect"
     echo "Installed jack-autoconnect to ${USR_LIB_DIR}/jack-autoconnect"
 fi
 
-if [ -f "contrib/usr/lib/jack-bridge/jack-watchdog" ]; then
-    install -m 0755 contrib/usr/lib/jack-bridge/jack-watchdog "${USR_LIB_DIR}/jack-watchdog"
-    echo "Installed jack-watchdog to ${USR_LIB_DIR}/jack-watchdog"
+# Install custom qjackctl binary (SYSTEM bus integration)
+if [ -f "contrib/bin/qjackctl" ]; then
+    echo "Installing custom qjackctl (jack-bridge SYSTEM bus integration)..."
+    install -m 0755 contrib/bin/qjackctl /usr/local/bin/qjackctl
+    echo "  ✓ Installed custom qjackctl to /usr/local/bin/qjackctl"
+    echo "  ✓ This binary connects to SYSTEM D-Bus (not SESSION bus)"
+else
+    echo "WARNING: Custom qjackctl binary not found at contrib/bin/qjackctl"
+    echo "         Run './build-qjackctl.sh' to build it from qjackctl-1.0.4/ source"
+    echo "         Installing distro qjackctl as fallback..."
+    apt install -y qjackctl || true
+    echo "  ! Distro qjackctl uses SESSION bus (will not integrate with jack-bridge)"
 fi
 
 # Ensure ALSA override directory exists and install default current_input.conf -> input_card0
@@ -241,27 +251,9 @@ PAEOF
 chmod 644 /etc/pulse/client.conf.d/01-no-autospawn.conf || true
 echo "Created /etc/pulse/client.conf.d/01-no-autospawn.conf to disable PulseAudio autospawn"
 
-# Guidance for PipeWire (no changes performed automatically)
-echo "Note: If PipeWire is installed, you may disable its PulseAudio compatibility without purging by disabling user/session autostarts."
-echo "      On systemd-based user sessions: systemctl --user mask --now pipewire-pulse.service pipewire.service pipewire.socket"
-echo "      On non-systemd sessions, disable any XDG autostart entries for pipewire/pipewire-pulse."
-
-# Install qjackctl autostart entry (GUI convenience; server already runs at boot)
-XDG_AUTOSTART_DIR="/etc/xdg/autostart"
-mkdir -p "$XDG_AUTOSTART_DIR"
-cat > "${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=QjackCtl (Auto)
-Comment=Launch QjackCtl minimized; JACK is already started by system service
-TryExec=/usr/bin/qjackctl
-Exec=/usr/bin/qjackctl --start-minimized
-X-GNOME-Autostart-enabled=true
-NoDisplay=false
-OnlyShowIn=XFCE;LXDE;LXQt;MATE;GNOME;KDE;
-EOF
-chmod 644 "${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop" || true
-echo "Installed ${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop"
+# NOTE: qjackctl autostart removed
+# Users launch qjackctl manually when they want graph/patchbay visualization
+# JACK server is already running via jackd-rt init service
 
 # Add desktop users (UID>=1000) to 'audio' group automatically so JACK can run without manual user steps
 # Non-destructive: users already in the group are left as-is; failures are reported but do not abort install.
@@ -417,8 +409,6 @@ if [ -f "contrib/bin/libasound_module_ctl_bluealsa.so" ]; then
 else
     echo "  ! libasound_module_ctl_bluealsa.so not found (optional - mixer controls)"
 fi
-
-# Note: jack-bluealsa-autobridge has been removed from this project; no autobridge binary is installed.
 
 # Install bluetoothd init script if provided (jack-bridge manages bluetoothd for SysVinit systems)
 if [ -f "contrib/init.d/bluetoothd" ]; then
@@ -900,3 +890,4 @@ echo "==========================================================================
 echo ""
 
 exit 0
+
