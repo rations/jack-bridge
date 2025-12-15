@@ -32,7 +32,6 @@ fi
 : ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
 : ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
-: ${WATCHDOG_PIDFILE:=/var/run/jack-watchdog.pid}
 : ${MONITOR_PIDFILE:=/var/run/jack-connection-monitor.pid}
 
 # detect_user(): removed; detection is handled inline in start() for portability
@@ -164,13 +163,6 @@ start() {
         
         # NOTE: jack-connection-manager is now started by separate init script
         # (contrib/init.d/jack-connection-manager) for cleaner service management
-        
-        # Start watchdog last
-        if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then
-            /usr/local/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
-            # Save watchdog PID for clean shutdown
-            echo $! > "$WATCHDOG_PIDFILE" 2>/dev/null || true
-        fi
     else
         sleep 1
         if ! { [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; }; then
