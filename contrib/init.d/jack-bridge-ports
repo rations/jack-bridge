@@ -204,7 +204,14 @@ start() {
 
 stop() {
     log_daemon_msg "Stopping jack-bridge persistent ports" "jack-bridge-ports"
-    
+
+    # Check if JACK is still running (don't fail if already stopped)
+    if ! pgrep -x jackd >/dev/null 2>&1; then
+        log_progress_msg "JACK not running, nothing to stop"
+        log_end_msg 0
+        return 0
+    fi
+
     # Check if any bridge processes are actually running
     if ! pgrep -f "alsa_out -j" >/dev/null 2>&1 && ! pgrep -f "alsa_in -j" >/dev/null 2>&1; then
         log_progress_msg "not running"

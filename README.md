@@ -332,7 +332,6 @@ Audio Output
 - `/usr/local/lib/jack-bridge/jack-route-select` - Device routing helper
 - `/usr/local/lib/jack-bridge/detect-alsa-device.sh` - Device detection
 - `/usr/local/lib/jack-bridge/jack-autoconnect` - Auto-connection helper
-- `/usr/local/lib/jack-bridge/jack-watchdog` - JACK monitoring
 
 **User Data:**
 - `~/.local/share/mxeq/presets.csv` - EQ presets
