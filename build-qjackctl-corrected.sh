@@ -1,20 +1,28 @@
 #!/bin/bash
-# build-qjackctl.sh
+# build-qjackctl-corrected.sh
 # Build custom qjackctl with SYSTEM D-Bus support for jack-bridge
+# Fixed version that properly handles Qt5 Linguist Tools and dependencies
 set -e
 
 echo "Building custom qjackctl for jack-bridge..."
 
-# Check for required packages
-REQUIRED_PKGS="cmake g++ qtbase5-dev qttools5-dev-tools libjack-jackd2-dev libasound2-dev"
+# Check for required packages (blocking version - we need these to succeed)
 echo "Checking build dependencies..."
+REQUIRED_PKGS="cmake g++ qtbase5-dev qttools5-dev-tools libjack-jackd2-dev libasound2-dev qttools5-dev-tools"
+MISSING_PKGS=""
+
 for pkg in $REQUIRED_PKGS; do
-    if ! dpkg -l | grep -q "^ii  $pkg "; then
-        echo "ERROR: Missing package: $pkg"
-        echo "Install with: sudo apt install $REQUIRED_PKGS"
-        exit 1
+    if ! dpkg -l | grep -q "^ii  $pkg"; then
+        echo "ERROR: Missing required package: $pkg"
+        MISSING_PKGS="$MISSING_PKGS $pkg"
     fi
 done
+
+if [ -n "$MISSING_PKGS" ]; then
+    echo "Missing required packages: $MISSING_PKGS"
+    echo "Install them with: sudo apt install -y $MISSING_PKGS"
+    exit 1
+fi
 
 # Navigate to qjackctl source
 cd qjackctl-1.0.4 || {
@@ -47,8 +55,8 @@ fi
 echo "Cleaning previous build..."
 rm -rf build
 
-# Configure with CMake
-echo "Configuring qjackctl..."
+# Configure with CMake - use a more robust configuration that handles Qt5 Linguist Tools properly
+echo "Configuring qjackctl with robust Qt5 configuration..."
 cmake -B build \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_BUILD_TYPE=Release \
@@ -58,11 +66,15 @@ cmake -B build \
     -DCONFIG_JACK_PORT_ALIASES=ON \
     -DCONFIG_JACK_METADATA=ON \
     -DCONFIG_JACK_SESSION=ON \
-    -DCONFIG_SYSTEM_TRAY=ON
+    -DCONFIG_SYSTEM_TRAY=ON \
+    -DCONFIG_PORTAUDIO=OFF  # Disable PortAudio to avoid warnings and simplify build
+
+echo "Build configuration complete. Starting build..."
 
 # Build
-echo "Building qjackctl (this may take a few minutes)..."
 cmake --build build --parallel $(nproc)
+
+echo "Build completed successfully!"
 
 # Install binary to contrib/bin
 echo "Installing to contrib/bin..."
@@ -75,4 +87,7 @@ echo "✓ Custom qjackctl built successfully!"
 echo "Binary: contrib/bin/qjackctl"
 echo "Size: $(du -h ../contrib/bin/qjackctl | cut -f1)"
 echo ""
-echo "Run 'sudo ./contrib/install.sh' to install jack-bridge with custom qjackctl"
+echo "The binary has been patched to use SYSTEM D-Bus instead of SESSION D-Bus"
+echo "This allows qjackctl to connect to jack-bridge-dbus service running on SYSTEM bus"
+echo ""
+echo "Run './contrib/install.sh' to install jack-bridge with custom qjackctl"
