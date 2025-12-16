@@ -23,7 +23,7 @@ BIN_DIR="${PREFIX_ROOT}usr/bin"
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
 # Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez"
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
 
 echo "Installing jack-bridge contrib files"
 
@@ -145,6 +145,40 @@ else
     apt install -y qjackctl || true
     echo "  ! Distro qjackctl uses SESSION bus (will not integrate with jack-bridge)"
 fi
+
+# Install qjackctl desktop file
+echo "Installing qjackctl desktop file..."
+mkdir -p /usr/share/applications
+cat > /usr/share/applications/qjackctl.desktop <<'EOF'
+[Desktop Entry]
+Name=QjackCtl
+Comment=JACK Audio Connection Kit Control Panel
+Exec=/usr/local/bin/qjackctl
+Icon=qjackctl
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Midi;
+StartupNotify=true
+EOF
+chmod 644 /usr/share/applications/qjackctl.desktop
+echo "  ✓ Installed qjackctl desktop file to /usr/share/applications/qjackctl.desktop"
+
+# Install qjackctl autostart entry
+echo "Installing qjackctl autostart entry..."
+mkdir -p /etc/xdg/autostart
+cat > /etc/xdg/autostart/qjackctl.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=QjackCtl (Auto)
+Comment=Launch QjackCtl minimized; JACK is already started by system service
+TryExec=/usr/local/bin/qjackctl
+Exec=/usr/local/bin/qjackctl --start-minimized
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
+OnlyShowIn=XFCE;LXDE;LXQt;MATE;GNOME;KDE;
+EOF
+chmod 644 /etc/xdg/autostart/qjackctl.desktop
+echo "  ✓ Installed qjackctl autostart entry to /etc/xdg/autostart/qjackctl.desktop"
 
 # Ensure ALSA override directory exists and install default current_input.conf -> input_card0
 ASOUND_D_DIR="${ETC_DIR}/asound.conf.d"

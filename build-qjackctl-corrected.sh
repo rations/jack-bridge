@@ -8,7 +8,7 @@ echo "Building custom qjackctl for jack-bridge..."
 
 # Check for required packages (blocking version - we need these to succeed)
 echo "Checking build dependencies..."
-REQUIRED_PKGS="cmake g++ qtbase5-dev qttools5-dev-tools libjack-jackd2-dev libasound2-dev qttools5-dev-tools"
+REQUIRED_PKGS="cmake g++ qt6-base-dev qt6-tools-dev-tools libjack-jackd2-dev libasound2-dev"
 MISSING_PKGS=""
 
 for pkg in $REQUIRED_PKGS; do
@@ -55,8 +55,8 @@ fi
 echo "Cleaning previous build..."
 rm -rf build
 
-# Configure with CMake - use a more robust configuration that handles Qt5 Linguist Tools properly
-echo "Configuring qjackctl with robust Qt5 configuration..."
+# Configure with CMake - use a more robust configuration that handles Qt6 Linguist Tools properly
+echo "Configuring qjackctl with robust Qt6 configuration..."
 cmake -B build \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_BUILD_TYPE=Release \
