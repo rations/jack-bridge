@@ -74,6 +74,34 @@ mkdir -p "$(dirname "$ASOUND_DST")"
 install -m 0644 contrib/etc/asound.conf "$ASOUND_DST"
 echo "Installed (replaced) $ASOUND_DST"
 
+# Install 50-jack.conf for ALSA to JACK bridging
+echo "Installing 50-jack.conf for ALSA to JACK bridging..."
+
+# Detect ALSA configuration directory - try multiple common locations
+ALSA_CONF_DIRS="/usr/share/alsa/alsa.conf.d /etc/alsa/conf.d /usr/local/share/alsa/alsa.conf.d /etc/alsa/alsa.conf.d"
+ALSA_CONF_INSTALLED=0
+
+for DIR in $ALSA_CONF_DIRS; do
+    if [ -d "$DIR" ] || mkdir -p "$DIR"; then
+        if [ -f "50-jack.conf" ]; then
+            if install -m 0644 50-jack.conf "$DIR/50-jack.conf"; then
+                echo "  ✓ Installed 50-jack.conf to $DIR/50-jack.conf"
+                ALSA_CONF_INSTALLED=1
+                break
+            fi
+        else
+            echo "  ! 50-jack.conf not found in repository root"
+            break
+        fi
+    fi
+done
+
+if [ "$ALSA_CONF_INSTALLED" -eq 0 ]; then
+    echo "  ✗ WARNING: Could not install 50-jack.conf"
+    echo "            ALSA to JACK bridging may not work properly"
+    echo "            Please manually install 50-jack.conf to your ALSA configuration directory"
+fi
+
 # NOTE: We do NOT modify 50-jack.conf anymore
 # The distro's 50-jack.conf stays as-is (system:playback always)
 # Device switching is handled by jack-connection-manager (JACK graph routing)
@@ -146,6 +174,52 @@ else
     echo "  ! Distro qjackctl uses SESSION bus (will not integrate with jack-bridge)"
 fi
 
+# Install qjackctl icon for desktop file
+echo "Installing qjackctl icon..."
+mkdir -p /usr/share/icons/hicolor/scalable/apps
+mkdir -p /usr/share/icons/hicolor/128x128/apps
+mkdir -p /usr/share/icons/hicolor/64x64/apps
+mkdir -p /usr/share/icons/hicolor/48x48/apps
+mkdir -p /usr/share/icons/hicolor/32x32/apps
+mkdir -p /usr/share/icons/hicolor/16x16/apps
+
+# Install SVG icon
+if [ -f "contrib/usr/share/icons/hicolor/scalable/apps/qjackctl.svg" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/scalable/apps/qjackctl.svg /usr/share/icons/hicolor/scalable/apps/qjackctl.svg
+    echo "  ✓ Installed qjackctl SVG icon"
+fi
+
+# Install PNG icons
+if [ -f "contrib/usr/share/icons/hicolor/128x128/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/128x128/apps/qjackctl.png /usr/share/icons/hicolor/128x128/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 128x128 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/64x64/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/64x64/apps/qjackctl.png /usr/share/icons/hicolor/64x64/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 64x64 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/48x48/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/48x48/apps/qjackctl.png /usr/share/icons/hicolor/48x48/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 48x48 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/32x32/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/32x32/apps/qjackctl.png /usr/share/icons/hicolor/32x32/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 32x32 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/16x16/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/16x16/apps/qjackctl.png /usr/share/icons/hicolor/16x16/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 16x16 icon"
+fi
+
+# Refresh icon cache
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
 # Install qjackctl desktop file
 echo "Installing qjackctl desktop file..."
 mkdir -p /usr/share/applications
@@ -162,6 +236,13 @@ StartupNotify=true
 EOF
 chmod 644 /usr/share/applications/qjackctl.desktop
 echo "  ✓ Installed qjackctl desktop file to /usr/share/applications/qjackctl.desktop"
+
+# Update desktop database so menus pick up new .desktop files
+echo "Updating desktop database..."
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    echo "  ✓ Updated desktop database"
+fi
 
 # Install qjackctl autostart entry
 echo "Installing qjackctl autostart entry..."
