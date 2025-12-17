@@ -29,6 +29,13 @@ static const ParamMapping PARAM_MAP[] = {
     { {"driver", "nperiods", NULL}, "JACKD_NPERIODS", TYPE_INT, "3" },
     { {"driver", "device", NULL}, "JACKD_DEVICE", TYPE_STRING, "" },
     { {"driver", "midi-driver", NULL}, "JACKD_MIDI", TYPE_STRING, "seq" },
+    { {"driver", "duplex", NULL}, NULL, TYPE_BOOL, "true" },  /* Always true for jack-bridge */
+    { {"driver", "capture", NULL}, NULL, TYPE_STRING, "" },   /* Derived from JACKD_DEVICE */
+    { {"driver", "playback", NULL}, NULL, TYPE_STRING, "" }, /* Derived from JACKD_DEVICE */
+    { {"driver", "inchannels", NULL}, NULL, TYPE_INT, "2" },  /* Default stereo input */
+    { {"driver", "outchannels", NULL}, NULL, TYPE_INT, "2" }, /* Default stereo output */
+    { {"driver", "input-latency", NULL}, NULL, TYPE_INT, "0" },
+    { {"driver", "output-latency", NULL}, NULL, TYPE_INT, "0" },
     
     /* Engine parameters */
     { {"engine", "driver", NULL}, NULL, TYPE_STRING, "alsa" },  /* Always "alsa" */
@@ -36,6 +43,10 @@ static const ParamMapping PARAM_MAP[] = {
     { {"engine", "realtime-priority", NULL}, "JACKD_PRIORITY", TYPE_INT, "70" },
     { {"engine", "port-max", NULL}, NULL, TYPE_INT, "256" },    /* Use jackd default */
     { {"engine", "sync", NULL}, NULL, TYPE_BOOL, "false" },     /* Not supported */
+    { {"engine", "no-mem-lock", NULL}, NULL, TYPE_BOOL, "false" }, /* Not supported */
+    { {"engine", "libs-unlock", NULL}, NULL, TYPE_BOOL, "false" }, /* Not supported */
+    { {"engine", "clock-source", NULL}, NULL, TYPE_STRING, "" },  /* Not supported */
+    { {"engine", "self-connect-mode", NULL}, NULL, TYPE_STRING, "" }, /* Not supported */
     
     /* Terminator */
     { {NULL, NULL, NULL}, NULL, TYPE_INT, NULL }
@@ -113,7 +124,24 @@ void handle_get_parameter_value(GDBusConnection *connection,
     
     /* Handle read-only parameters (no shell_var) */
     if (mapping->shell_var == NULL) {
-        /* Return hardcoded values for engine parameters */
+        /* Special handling for derived parameters */
+        if (g_strcmp0(path_array[1], "capture") == 0 || g_strcmp0(path_array[1], "playback") == 0) {
+            /* For capture/playback, return the same value as device parameter */
+            gchar *device_val = get_config_value("JACKD_DEVICE");
+            is_set = (device_val != NULL && strlen(device_val) > 0);
+            
+            const gchar *val = is_set ? device_val : "";
+            default_variant = g_variant_new_string("");
+            value_variant = g_variant_new_string(val);
+            
+            result = g_variant_new("(bvv)", is_set, default_variant, value_variant);
+            g_free(device_val);
+            g_strfreev((gchar **)path_array);
+            g_dbus_method_invocation_return_value(invocation, result);
+            return;
+        }
+        
+        /* Return hardcoded values for other engine parameters */
         is_set = TRUE;
         
         if (mapping->type == TYPE_STRING) {

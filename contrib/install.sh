@@ -3,7 +3,6 @@
 # Installer for jack-bridge contrib package on Debian-like systems (SysV-style).
 # Installs configs into /etc, helper scripts into /usr/local/lib/jack-bridge, init script into /etc/init.d,
 # and simple apulse wrappers into /usr/bin. Does not hardcode usernames or devices.
-#
 # Usage: sudo sh contrib/install.sh
 set -e
 
@@ -102,11 +101,6 @@ if [ "$ALSA_CONF_INSTALLED" -eq 0 ]; then
     echo "            Please manually install 50-jack.conf to your ALSA configuration directory"
 fi
 
-# NOTE: We do NOT modify 50-jack.conf anymore
-# The distro's 50-jack.conf stays as-is (system:playback always)
-# Device switching is handled by jack-connection-manager (JACK graph routing)
-# This is the correct architecture - ALSA->JACK bridge is stable,
-# routing happens inside JACK graph (event-driven, instant, reliable)
 echo "ALSA->JACK bridge uses distro's 50-jack.conf (system:playback)"
 echo "Device switching handled by jack-connection-manager (JACK graph routing)"
 
@@ -366,10 +360,6 @@ PAEOF
 chmod 644 /etc/pulse/client.conf.d/01-no-autospawn.conf || true
 echo "Created /etc/pulse/client.conf.d/01-no-autospawn.conf to disable PulseAudio autospawn"
 
-# NOTE: qjackctl autostart removed
-# Users launch qjackctl manually when they want graph/patchbay visualization
-# JACK server is already running via jackd-rt init service
-
 # Add desktop users (UID>=1000) to 'audio' group automatically so JACK can run without manual user steps
 # Non-destructive: users already in the group are left as-is; failures are reported but do not abort install.
 echo "Adding desktop users (UID>=1000) to the 'audio' group (automatic)..."
@@ -458,7 +448,7 @@ else
     chmod 0700 /var/lib/bluealsa 2>/dev/null || true
 fi
 
-# Install BlueALSA prebuilt binaries (required - we do not use distro bluez-alsa-utils)
+# Install BlueALSA prebuilt binaries (required - jack-bridge does not use distro bluez-alsa-utils)
 echo "Installing jack-bridge prebuilt BlueALSA binaries to /usr/local/bin..."
 if [ -f "contrib/bin/bluealsad" ]; then
     install -m 0755 contrib/bin/bluealsad /usr/local/bin/bluealsad || true
@@ -595,9 +585,6 @@ else
     echo "Warning: contrib/init.d/jack-bridge-ports not found; persistent ports disabled"
 fi
 
-# (autobridge removed) No jack-bluealsa-autobridge init script is installed or registered.
-
-
 # Install BlueALSA D-Bus policy (canonical)
 DBUS_POLICY_SRC="usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_POLICY_DST="/usr/share/dbus-1/system.d/org.bluealsa.conf"
@@ -629,7 +616,7 @@ if [ -f "contrib/etc/20-jack-bridge-bluealsa.conf" ]; then
             echo "  ✗ Failed to install to $D/20-jack-bridge-bluealsa.conf"
         fi
         
-        # Remove old conflicting file if we previously installed it
+        # Remove old conflicting file if it was previously installed
         if [ -f "$D/20-bluealsa.conf" ]; then
             if grep -q "jack-bridge" "$D/20-bluealsa.conf" 2>/dev/null; then
                 rm -f "$D/20-bluealsa.conf"
@@ -766,7 +753,7 @@ else
     echo "WARNING: contrib/init.d/jack-connection-manager not found"
 fi
 
-# Install D-Bus service for qjackctl integration (Phase A: MVP)
+# Install D-Bus service for qjackctl integration
 echo ""
 echo "Installing jack-bridge D-Bus service for qjackctl integration..."
 
@@ -879,8 +866,6 @@ UCONF
 chmod 0644 "$SKEL_DIR/devices.conf" || true
 echo "Seeded skeleton per-user config at $SKEL_DIR/devices.conf"
 
-# NOTE: Per-user jack_playback_override.conf is NO LONGER NEEDED
-# jack-bridge now updates system-wide 50-jack.conf directly (made writable by audio group)
 # Seed per-user devices.conf for backward compatibility
 for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
@@ -994,10 +979,7 @@ echo "==========================================================================
 echo "Installation complete! Changes take effect after reboot."
 echo ""
 echo "Next steps:"
-echo "  1. Reboot: sudo reboot"
-echo "  2. After reboot, launch qjackctl - it should show 'D-Bus JACK'"
-echo "  3. Use Start/Stop buttons to control system JACK service"
-echo "  4. Verify config: jack-bridge-verify-qjackctl"
+echo "Reboot: sudo reboot"
 echo ""
 echo "Important: qjackctl is now configured to use jack-bridge D-Bus mode."
 echo "           Start/Stop buttons will control the system jackd-rt service."

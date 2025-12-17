@@ -1,7 +1,6 @@
 #!/bin/bash
 # build-qjackctl-corrected.sh
 # Build custom qjackctl with SYSTEM D-Bus support for jack-bridge
-# Fixed version that properly handles Qt5 Linguist Tools and dependencies
 set -e
 
 echo "Building custom qjackctl for jack-bridge..."

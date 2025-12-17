@@ -36,7 +36,7 @@ if [ "$dbus_enabled" = "true" ] && [ "$jack_dbus_enabled" = "true" ]; then
     echo "  ✓ jack-bridge D-Bus service will be used"
     echo ""
     echo "When you launch qjackctl, it should show:"
-    echo "  \"D-Bus JACK\" in the connection mode indicator"
+    echo "  \"Started\" in the connection mode indicator"
     exit 0
 else
     echo "✗ qjackctl D-Bus mode is DISABLED"
