@@ -19,6 +19,8 @@
 #include <gio/gio.h>
 
 #include "jack_bridge_dbus_config.h"
+#include "jack_bridge_settings_sync.h"
+#include "jack_bridge_dbus.h"
 
 /* Service configuration */
 #define DBUS_SERVICE_NAME "org.jackaudio.service"
@@ -32,6 +34,7 @@ static GDBusConnection *bus_connection = NULL;
 static guint service_name_id = 0;
 static guint monitor_timeout_id = 0;
 static gboolean last_known_state = FALSE;
+GMutex config_access_mutex;
 
 /* Forward declarations */
 static void emit_server_started(void);
@@ -503,6 +506,14 @@ int main(int argc, char *argv[]) {
     g_print("jack-bridge-dbus: Starting D-Bus bridge service\n");
     g_print("jack-bridge-dbus: Service: %s\n", DBUS_SERVICE_NAME);
     g_print("jack-bridge-dbus: Object: %s\n", DBUS_OBJECT_PATH);
+    
+    /* Initialize configuration cache */
+    init_config_cache();
+    g_print("jack-bridge-dbus: Configuration cache initialized\n");
+    
+    /* Initialize config access mutex */
+    g_mutex_init(&config_access_mutex);
+    g_print("jack-bridge-dbus: Config access mutex initialized\n");
     
     /* Setup signal handlers */
     signal(SIGINT, signal_handler);

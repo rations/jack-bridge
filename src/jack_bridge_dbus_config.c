@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <glib.h>
+#include "jack_bridge_dbus.h"
 
 /* Parameter mapping structure */
 typedef struct {
@@ -111,10 +112,14 @@ void handle_get_parameter_value(GDBusConnection *connection,
     }
     g_print("])\n");
     
+    /* Lock config access to prevent race conditions during setup dialog */
+    g_mutex_lock(&config_access_mutex);
+    
     /* Find mapping */
     mapping = find_mapping(path_array);
     if (!mapping) {
         g_strfreev((gchar **)path_array);
+        g_mutex_unlock(&config_access_mutex);
         g_dbus_method_invocation_return_error(invocation,
                                               G_DBUS_ERROR,
                                               G_DBUS_ERROR_INVALID_ARGS,
@@ -137,6 +142,7 @@ void handle_get_parameter_value(GDBusConnection *connection,
             result = g_variant_new("(bvv)", is_set, default_variant, value_variant);
             g_free(device_val);
             g_strfreev((gchar **)path_array);
+            g_mutex_unlock(&config_access_mutex);
             g_dbus_method_invocation_return_value(invocation, result);
             return;
         }
@@ -159,6 +165,7 @@ void handle_get_parameter_value(GDBusConnection *connection,
         
         result = g_variant_new("(bvv)", is_set, default_variant, value_variant);
         g_strfreev((gchar **)path_array);
+        g_mutex_unlock(&config_access_mutex);
         g_dbus_method_invocation_return_value(invocation, result);
         return;
     }
@@ -189,6 +196,9 @@ void handle_get_parameter_value(GDBusConnection *connection,
     g_free(config_val);
     g_strfreev((gchar **)path_array);
     
+    /* Unlock config access */
+    g_mutex_unlock(&config_access_mutex);
+    
     g_dbus_method_invocation_return_value(invocation, result);
 }
 
@@ -217,11 +227,15 @@ void handle_set_parameter_value(GDBusConnection *connection,
     }
     g_print("])\n");
     
+    /* Lock config access to prevent race conditions during setup dialog */
+    g_mutex_lock(&config_access_mutex);
+    
     /* Find mapping */
     mapping = find_mapping(path_array);
     if (!mapping) {
         g_variant_unref(value_variant);
         g_strfreev((gchar **)path_array);
+        g_mutex_unlock(&config_access_mutex);
         g_dbus_method_invocation_return_error(invocation,
                                               G_DBUS_ERROR,
                                               G_DBUS_ERROR_INVALID_ARGS,
@@ -233,6 +247,7 @@ void handle_set_parameter_value(GDBusConnection *connection,
     if (mapping->shell_var == NULL) {
         g_variant_unref(value_variant);
         g_strfreev((gchar **)path_array);
+        g_mutex_unlock(&config_access_mutex);
         g_dbus_method_invocation_return_error(invocation,
                                               G_DBUS_ERROR,
                                               G_DBUS_ERROR_FAILED,
@@ -249,6 +264,7 @@ void handle_set_parameter_value(GDBusConnection *connection,
             if (!validate_sample_rate(int_val)) {
                 g_variant_unref(value_variant);
                 g_strfreev((gchar **)path_array);
+                g_mutex_unlock(&config_access_mutex);
                 g_dbus_method_invocation_return_error(invocation,
                                                       G_DBUS_ERROR,
                                                       G_DBUS_ERROR_INVALID_ARGS,
@@ -259,6 +275,7 @@ void handle_set_parameter_value(GDBusConnection *connection,
             if (!validate_period(int_val)) {
                 g_variant_unref(value_variant);
                 g_strfreev((gchar **)path_array);
+                g_mutex_unlock(&config_access_mutex);
                 g_dbus_method_invocation_return_error(invocation,
                                                       G_DBUS_ERROR,
                                                       G_DBUS_ERROR_INVALID_ARGS,
@@ -269,6 +286,7 @@ void handle_set_parameter_value(GDBusConnection *connection,
             if (!validate_nperiods(int_val)) {
                 g_variant_unref(value_variant);
                 g_strfreev((gchar **)path_array);
+                g_mutex_unlock(&config_access_mutex);
                 g_dbus_method_invocation_return_error(invocation,
                                                       G_DBUS_ERROR,
                                                       G_DBUS_ERROR_INVALID_ARGS,
@@ -279,6 +297,7 @@ void handle_set_parameter_value(GDBusConnection *connection,
             if (!validate_priority(int_val)) {
                 g_variant_unref(value_variant);
                 g_strfreev((gchar **)path_array);
+                g_mutex_unlock(&config_access_mutex);
                 g_dbus_method_invocation_return_error(invocation,
                                                       G_DBUS_ERROR,
                                                       G_DBUS_ERROR_INVALID_ARGS,
@@ -340,6 +359,9 @@ void handle_set_parameter_value(GDBusConnection *connection,
     g_variant_unref(value_variant);
     g_strfreev((gchar **)path_array);
     
+    /* Unlock config access */
+    g_mutex_unlock(&config_access_mutex);
+    
     if (success) {
         g_dbus_method_invocation_return_value(invocation, NULL);
     } else {
@@ -372,9 +394,13 @@ void handle_reset_parameter_value(GDBusConnection *connection,
     }
     g_print("])\n");
     
+    /* Lock config access to prevent race conditions during setup dialog */
+    g_mutex_lock(&config_access_mutex);
+    
     mapping = find_mapping(path_array);
     if (!mapping || !mapping->shell_var) {
         g_strfreev((gchar **)path_array);
+        g_mutex_unlock(&config_access_mutex);
         g_dbus_method_invocation_return_error(invocation,
                                               G_DBUS_ERROR,
                                               G_DBUS_ERROR_INVALID_ARGS,
@@ -386,6 +412,9 @@ void handle_reset_parameter_value(GDBusConnection *connection,
     gboolean success = set_config_value(mapping->shell_var, mapping->default_val);
     
     g_strfreev((gchar **)path_array);
+    
+    /* Unlock config access */
+    g_mutex_unlock(&config_access_mutex);
     
     if (success) {
         g_print("jack-bridge-dbus: Reset %s to default\n", mapping->shell_var);
@@ -420,9 +449,13 @@ void handle_get_parameter_constraint(GDBusConnection *connection,
     
     g_variant_get(parameters, "(^as)", &path_array);
     
+    /* Lock config access to prevent race conditions during setup dialog */
+    g_mutex_lock(&config_access_mutex);
+    
     mapping = find_mapping(path_array);
     if (!mapping) {
         g_strfreev((gchar **)path_array);
+        g_mutex_unlock(&config_access_mutex);
         g_dbus_method_invocation_return_error(invocation,
                                               G_DBUS_ERROR,
                                               G_DBUS_ERROR_INVALID_ARGS,
@@ -522,6 +555,9 @@ void handle_get_parameter_constraint(GDBusConnection *connection,
     }
     
     result = g_variant_new("(bbav)", is_strict, is_fake, &builder);
+    
+    /* Unlock config access */
+    g_mutex_unlock(&config_access_mutex);
     
     g_strfreev((gchar **)path_array);
     

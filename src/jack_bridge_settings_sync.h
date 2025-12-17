@@ -28,4 +28,10 @@ gboolean validate_priority(guint priority);
 /* Utility functions */
 gdouble calculate_latency_ms(guint period, guint nperiods, guint sample_rate);
 
+/* Initialize configuration cache (call once at startup) */
+void init_config_cache(void);
+
+/* Refresh configuration cache (call after external changes) */
+void refresh_config_cache(void);
+
 #endif /* JACK_BRIDGE_SETTINGS_SYNC_H */
