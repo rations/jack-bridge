@@ -135,7 +135,7 @@ static void handle_start_server(GDBusConnection *connection,
     /* Execute: service jackd-rt start */
     if (!g_spawn_command_line_sync("service jackd-rt start",
                                    NULL, NULL, &exit_status, &error)) {
-        g_printerr("jack-bridge-dbus: Failed to start jackd-rt: %s\n", 
+        g_printerr("jack-bridge-dbus: Failed to start jackd-rt: %s\n",
                    error->message);
         g_dbus_method_invocation_return_error(invocation,
                                               G_DBUS_ERROR,
@@ -145,6 +145,14 @@ static void handle_start_server(GDBusConnection *connection,
         g_error_free(error);
         return;
     }
+    
+    /* Also restart jack-connection-manager to ensure audio routing is restored */
+    g_spawn_command_line_async("service jack-connection-manager restart", NULL);
+    g_print("jack-bridge-dbus: Restarted jack-connection-manager for proper audio routing\n");
+    
+    /* Restart jack-bridge-ports to ensure USB/HDMI ports are available */
+    g_spawn_command_line_async("service jack-bridge-ports restart", NULL);
+    g_print("jack-bridge-dbus: Restarted jack-bridge-ports for USB/HDMI connectivity\n");
     
     if (exit_status != 0) {
         g_printerr("jack-bridge-dbus: service jackd-rt start exited with %d\n",
@@ -207,6 +215,14 @@ static void handle_stop_server(GDBusConnection *connection,
     }
     
     g_print("jack-bridge-dbus: JACK service stopped successfully\n");
+    
+    /* Stop dependent services asynchronously */
+    g_print("jack-bridge-dbus: Stopping jack-connection-manager...\n");
+    g_spawn_command_line_async("service jack-connection-manager stop", NULL);
+    
+    g_print("jack-bridge-dbus: Stopping jack-bridge-ports...\n");
+    g_spawn_command_line_async("service jack-bridge-ports stop", NULL);
+    
     g_dbus_method_invocation_return_value(invocation, NULL);
 }
 
