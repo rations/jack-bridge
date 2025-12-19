@@ -12,6 +12,8 @@
 
 /* Forward declaration for Devices panel (Playback switching) */
 static void create_devices_panel(GtkWidget *main_box);
+/* Forward declaration for Surround Sound panel */
+static void create_surround_panel(GtkWidget *main_box);
 
 /* Forward declarations needed by earlier callers */
 static int write_string_atomic(const char *path, const char *content);
@@ -54,6 +56,7 @@ static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_eq_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
 static GtkWidget *g_dev_expander = NULL;
+static GtkWidget *g_surround_expander = NULL;
 /* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
 static GtkWidget *g_bt_tree = NULL;
 /* Phase 3: Global references to Devices panel radio buttons for state synchronization */
@@ -61,6 +64,10 @@ static GtkWidget *g_rb_internal = NULL;
 static GtkWidget *g_rb_usb = NULL;
 static GtkWidget *g_rb_hdmi = NULL;
 static GtkWidget *g_rb_bt = NULL;
+/* Global references to Surround Sound panel radio buttons */
+static GtkWidget *g_rb_surround_none = NULL;
+static GtkWidget *g_rb_surround_51 = NULL;
+static GtkWidget *g_rb_surround_71 = NULL;
 /* Global mixer data for dynamic card switching */
 static MixerData *g_mixer_data = NULL;
 /* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
@@ -79,20 +86,21 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
     (void)object;
     (void)pspec;
     (void)user_data;
-    if (!g_main_window || !g_eq_expander || !g_bt_expander || !g_dev_expander) return;
+    if (!g_main_window || !g_eq_expander || !g_bt_expander || !g_dev_expander || !g_surround_expander) return;
 
     gboolean eq_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_eq_expander));
     gboolean bt_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_bt_expander));
     gboolean dev_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_dev_expander));
+    gboolean surround_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_surround_expander));
 
-    if (!eq_exp && !bt_exp && !dev_exp) {
+    if (!eq_exp && !bt_exp && !dev_exp && !surround_exp) {
         /* All collapsed - shrink to compact height */
         gtk_window_resize(GTK_WINDOW(g_main_window), 600, 260);
-    } else if ((eq_exp || bt_exp) && !dev_exp) {
+    } else if ((eq_exp || bt_exp) && !dev_exp && !surround_exp) {
         /* EQ or Bluetooth expanded (large panels) */
         gtk_window_resize(GTK_WINDOW(g_main_window), 600, 480);
-    } else if (dev_exp && !eq_exp && !bt_exp) {
-        /* Only Devices expanded (small panel - just radio buttons) */
+    } else if ((dev_exp || surround_exp) && !eq_exp && !bt_exp) {
+        /* Only Devices or Surround expanded (small panel - just radio buttons) */
         gtk_window_resize(GTK_WINDOW(g_main_window), 600, 310);
     } else {
         /* Multiple panels expanded */
@@ -1538,6 +1546,9 @@ int main(int argc, char *argv[]) {
     /* Devices panel (Playback) */
     create_devices_panel(main_box);
 
+    /* Surround Sound panel */
+    create_surround_panel(main_box);
+
     gtk_widget_show_all(window);
     gtk_main();
 
@@ -2128,6 +2139,180 @@ static void create_devices_panel(GtkWidget *main_box) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
     }
     g_free(pref);
+}
+
+/* ---- Surround Sound panel (None / 5.1 / 7.1) ----
+ * Provides surround sound configuration for ALSA using plug:surround51 and plug:surround71 devices
+ */
+
+/* Helper function to write surround sound configuration to ~/.asoundrc */
+static gboolean write_surround_config(const char *surround_device) {
+    const char *home = g_get_home_dir();
+    gchar *asoundrc_path = g_build_filename(home, ".asoundrc", NULL);
+    gchar *tmp_path = g_build_filename(home, ".asoundrc.tmp", NULL);
+    
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) {
+        g_free(asoundrc_path);
+        g_free(tmp_path);
+        return FALSE;
+    }
+    
+    /* Write surround sound configuration */
+    if (g_strcmp0(surround_device, "plug:surround51") == 0) {
+        fprintf(f, "# Surround Sound 5.1 configuration\n");
+        fprintf(f, "pcm.!default {\n");
+        fprintf(f, "    type plug\n");
+        fprintf(f, "    slave.pcm \"plug:surround51\"\n");
+        fprintf(f, "}\n");
+        fprintf(f, "\n");
+        fprintf(f, "ctl.!default {\n");
+        fprintf(f, "    type hw\n");
+        fprintf(f, "    card 0\n");
+        fprintf(f, "}\n");
+    } else if (g_strcmp0(surround_device, "plug:surround71") == 0) {
+        fprintf(f, "# Surround Sound 7.1 configuration\n");
+        fprintf(f, "pcm.!default {\n");
+        fprintf(f, "    type plug\n");
+        fprintf(f, "    slave.pcm \"plug:surround71\"\n");
+        fprintf(f, "}\n");
+        fprintf(f, "\n");
+        fprintf(f, "ctl.!default {\n");
+        fprintf(f, "    type hw\n");
+        fprintf(f, "    card 0\n");
+        fprintf(f, "}\n");
+    } else {
+        /* Stereo mode - use default configuration */
+        fprintf(f, "# Default stereo configuration\n");
+        fprintf(f, "pcm.!default {\n");
+        fprintf(f, "    type plug\n");
+        fprintf(f, "    slave.pcm \"default\"\n");
+        fprintf(f, "}\n");
+        fprintf(f, "\n");
+        fprintf(f, "ctl.!default {\n");
+        fprintf(f, "    type hw\n");
+        fprintf(f, "    card 0\n");
+        fprintf(f, "}\n");
+    }
+    
+    fclose(f);
+    
+    /* Atomic rename to avoid race conditions */
+    gboolean success = (g_rename(tmp_path, asoundrc_path) == 0);
+    
+    if (!success) {
+        g_unlink(tmp_path);
+    }
+    
+    g_free(asoundrc_path);
+    g_free(tmp_path);
+    
+    return success;
+}
+
+static void on_surround_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
+    (void)user_data;
+    if (!gtk_toggle_button_get_active(tb)) return;
+    const char *label = gtk_button_get_label(GTK_BUTTON(tb));
+    if (!label) return;
+
+    GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
+    
+    if (g_strcmp0(label, "None (Stereo)") == 0) {
+        // Stereo mode - use default ALSA device
+        gboolean success = write_surround_config("default");
+        
+        if (success) {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                                   "Stereo mode configured. Audio will play in standard stereo.");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+        } else {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Failed to configure stereo mode. Check file permissions.");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+        }
+    } else if (g_strcmp0(label, "5.1 Surround") == 0) {
+        // 5.1 surround sound mode
+        gboolean success = write_surround_config("plug:surround51");
+        
+        if (success) {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                                   "5.1 Surround Sound configured.\n\nAudio will now play in 5.1 surround sound format.");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+        } else {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Failed to configure 5.1 surround sound. Check file permissions.");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+        }
+    } else if (g_strcmp0(label, "7.1 Surround") == 0) {
+        // 7.1 surround sound mode
+        gboolean success = write_surround_config("plug:surround71");
+        
+        if (success) {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                   GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                                   "7.1 Surround Sound configured.\n\nAudio will now play in 7.1 surround sound format.");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+        } else {
+            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                                                   "Failed to configure 7.1 surround sound. Check file permissions.");
+            gtk_dialog_run(GTK_DIALOG(d));
+            gtk_widget_destroy(d);
+        }
+    }
+}
+
+static void create_surround_panel(GtkWidget *main_box) {
+    GtkWidget *surround_expander = gtk_expander_new("Surround Sound");
+    gtk_expander_set_expanded(GTK_EXPANDER(surround_expander), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_box), surround_expander, FALSE, FALSE, 0);
+
+    /* Connect to window resize handler like other expanders */
+    g_surround_expander = surround_expander;
+    g_signal_connect(G_OBJECT(surround_expander), "notify::expanded", G_CALLBACK(on_any_expander_toggled), NULL);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_add(GTK_CONTAINER(surround_expander), vbox);
+
+    /* Radio buttons row */
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), row, FALSE, FALSE, 0);
+
+    /* Add info label */
+    GtkWidget *info_label = gtk_label_new("Select your surround sound configuration:");
+    gtk_box_pack_start(GTK_BOX(vbox), info_label, FALSE, FALSE, 2);
+
+    /* None (Stereo) radio button */
+    g_rb_surround_none = gtk_radio_button_new_with_label(NULL, "None (Stereo)");
+    gtk_box_pack_start(GTK_BOX(row), g_rb_surround_none, FALSE, FALSE, 0);
+
+    /* 5.1 Surround radio button */
+    g_rb_surround_51 = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(g_rb_surround_none), "5.1 Surround");
+    gtk_box_pack_start(GTK_BOX(row), g_rb_surround_51, FALSE, FALSE, 0);
+
+    /* 7.1 Surround radio button */
+    g_rb_surround_71 = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(g_rb_surround_none), "7.1 Surround");
+    gtk_box_pack_start(GTK_BOX(row), g_rb_surround_71, FALSE, FALSE, 0);
+
+    /* Connect signals */
+    g_signal_connect(g_rb_surround_none, "toggled", G_CALLBACK(on_surround_radio_toggled), NULL);
+    g_signal_connect(g_rb_surround_51, "toggled", G_CALLBACK(on_surround_radio_toggled), NULL);
+    g_signal_connect(g_rb_surround_71, "toggled", G_CALLBACK(on_surround_radio_toggled), NULL);
+
+    /* Set stereo as default */
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_surround_none), TRUE);
+    
+    /* Add help text */
+    GtkWidget *help_label = gtk_label_new("Note: Surround sound requires compatible hardware and proper speaker configuration.");
+    gtk_widget_set_opacity(help_label, 0.7);
+    gtk_box_pack_start(GTK_BOX(vbox), help_label, FALSE, FALSE, 4);
 }
 
 
