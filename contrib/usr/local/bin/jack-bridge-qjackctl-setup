@@ -1,0 +1,56 @@
+#!/bin/sh
+# contrib/usr/local/bin/jack-bridge-qjackctl-setup
+# Enable qjackctl D-Bus mode for current user to integrate with jack-bridge
+
+CONF_DIR="$HOME/.config/rncbc.org"
+CONF_FILE="$CONF_DIR/QjackCtl.conf"
+
+echo "jack-bridge qjackctl D-Bus Configuration"
+echo "=========================================="
+echo ""
+
+# Create config directory if needed
+mkdir -p "$CONF_DIR"
+
+if [ -f "$CONF_FILE" ]; then
+   # Backup existing config
+    BACKUP_FILE="${CONF_FILE}.backup-$(date +%Y%m%d-%H%M%S)"
+    cp "$CONF_FILE" "$BACKUP_FILE"
+    echo "✓ Backed up existing config to: $BACKUP_FILE"
+    
+    # Update D-Bus settings
+    if grep -q '^DBusEnabled=' "$CONF_FILE"; then
+        sed -i 's/^DBusEnabled=.*/DBusEnabled=true/' "$CONF_FILE"
+    else
+        echo "DBusEnabled=true" >> "$CONF_FILE"
+    fi
+    
+    if grep -q '^JackDBusEnabled=' "$CONF_FILE"; then
+        sed -i 's/^JackDBusEnabled=.*/JackDBusEnabled=true/' "$CONF_FILE"
+    else
+        echo "JackDBusEnabled=true" >> "$CONF_FILE"
+    fi
+    
+    echo "✓ Updated qjackctl configuration for D-Bus mode"
+else
+    # Create minimal D-Bus-enabled config
+    cat > "$CONF_FILE" <<'EOF'
+[General]
+DBusEnabled=true
+JackDBusEnabled=true
+StartJack=false
+ServerName=default
+EOF
+    echo "✓ Created new qjackctl configuration with D-Bus mode enabled"
+fi
+
+echo ""
+echo "Configuration complete!"
+echo ""
+echo "qjackctl is now configured to use jack-bridge D-Bus mode."
+echo ""
+echo "Next steps:"
+echo "  1. Restart qjackctl if it's currently running"
+echo "  2. Use Start/Stop buttons to control system JACK service"
+echo ""
+echo "To verify: jack-bridge-verify-qjackctl"

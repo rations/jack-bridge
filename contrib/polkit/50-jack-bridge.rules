@@ -1,0 +1,43 @@
+/* 50-jack-bridge.rules
+ * Polkit authorization rules for jack-bridge D-Bus service
+ * 
+ * Allows users in 'audio' group to:
+ * - Control JACK service (start/stop/restart) via init system
+ * - Modify JACK configuration via D-Bus
+ * - No password prompts for JACK control
+ */
+
+/* Allow audio group to control JACK via service commands
+ * This covers: service jackd-rt start/stop/restart
+ */
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.systemd1.manage-units" ||
+         action.id == "org.freedesktop.policykit.exec") &&
+        subject.isInGroup("audio")) {
+        return polkit.Result.YES;
+    }
+});
+
+/* Allow audio group to modify JACK configuration
+ * Custom action for jack-bridge D-Bus service
+ */
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.jackaudio.configure" &&
+        subject.isInGroup("audio")) {
+        return polkit.Result.YES;
+    }
+});
+
+/* Allow audio group to execute service command for jackd-rt specifically
+ * This ensures qjackctl Start/Stop buttons work without password
+ */
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop") == 0 &&
+        subject.isInGroup("audio")) {
+        /* Check if command involves jackd-rt service */
+        var cmd = action.lookup("command_line");
+        if (cmd && cmd.indexOf("jackd-rt") >= 0) {
+            return polkit.Result.YES;
+        }
+    }
+});

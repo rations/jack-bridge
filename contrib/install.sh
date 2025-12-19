@@ -3,7 +3,6 @@
 # Installer for jack-bridge contrib package on Debian-like systems (SysV-style).
 # Installs configs into /etc, helper scripts into /usr/local/lib/jack-bridge, init script into /etc/init.d,
 # and simple apulse wrappers into /usr/bin. Does not hardcode usernames or devices.
-#
 # Usage: sudo sh contrib/install.sh
 set -e
 
@@ -22,7 +21,8 @@ BIN_DIR="${PREFIX_ROOT}usr/bin"
 
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse qjackctl libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez"
+# Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
 
 echo "Installing jack-bridge contrib files"
 
@@ -73,11 +73,34 @@ mkdir -p "$(dirname "$ASOUND_DST")"
 install -m 0644 contrib/etc/asound.conf "$ASOUND_DST"
 echo "Installed (replaced) $ASOUND_DST"
 
-# NOTE: We do NOT modify 50-jack.conf anymore
-# The distro's 50-jack.conf stays as-is (system:playback always)
-# Device switching is handled by jack-connection-manager (JACK graph routing)
-# This is the correct architecture - ALSA->JACK bridge is stable,
-# routing happens inside JACK graph (event-driven, instant, reliable)
+# Install 50-jack.conf for ALSA to JACK bridging
+echo "Installing 50-jack.conf for ALSA to JACK bridging..."
+
+# Detect ALSA configuration directory - try multiple common locations
+ALSA_CONF_DIRS="/usr/share/alsa/alsa.conf.d /etc/alsa/conf.d /usr/local/share/alsa/alsa.conf.d /etc/alsa/alsa.conf.d"
+ALSA_CONF_INSTALLED=0
+
+for DIR in $ALSA_CONF_DIRS; do
+    if [ -d "$DIR" ] || mkdir -p "$DIR"; then
+        if [ -f "50-jack.conf" ]; then
+            if install -m 0644 50-jack.conf "$DIR/50-jack.conf"; then
+                echo "  ✓ Installed 50-jack.conf to $DIR/50-jack.conf"
+                ALSA_CONF_INSTALLED=1
+                break
+            fi
+        else
+            echo "  ! 50-jack.conf not found in repository root"
+            break
+        fi
+    fi
+done
+
+if [ "$ALSA_CONF_INSTALLED" -eq 0 ]; then
+    echo "  ✗ WARNING: Could not install 50-jack.conf"
+    echo "            ALSA to JACK bridging may not work properly"
+    echo "            Please manually install 50-jack.conf to your ALSA configuration directory"
+fi
+
 echo "ALSA->JACK bridge uses distro's 50-jack.conf (system:playback)"
 echo "Device switching handled by jack-connection-manager (JACK graph routing)"
 
@@ -125,16 +148,112 @@ else
     echo "WARNING: jack-connection-manager not found (run 'make manager' to build it)"
 fi
 
-# Install autoconnect and watchdog helpers (from contrib; force overwrite)
+# Install autoconnect helper (from contrib; force overwrite)
 if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
     install -m 0755 contrib/usr/lib/jack-bridge/jack-autoconnect "${USR_LIB_DIR}/jack-autoconnect"
     echo "Installed jack-autoconnect to ${USR_LIB_DIR}/jack-autoconnect"
 fi
 
-if [ -f "contrib/usr/lib/jack-bridge/jack-watchdog" ]; then
-    install -m 0755 contrib/usr/lib/jack-bridge/jack-watchdog "${USR_LIB_DIR}/jack-watchdog"
-    echo "Installed jack-watchdog to ${USR_LIB_DIR}/jack-watchdog"
+# Install custom qjackctl binary (SYSTEM bus integration)
+if [ -f "contrib/bin/qjackctl" ]; then
+    echo "Installing custom qjackctl (jack-bridge SYSTEM bus integration)..."
+    install -m 0755 contrib/bin/qjackctl /usr/local/bin/qjackctl
+    echo "  ✓ Installed custom qjackctl to /usr/local/bin/qjackctl"
+    echo "  ✓ This binary connects to SYSTEM D-Bus (not SESSION bus)"
+else
+    echo "WARNING: Custom qjackctl binary not found at contrib/bin/qjackctl"
+    echo "         Run './build-qjackctl.sh' to build it from qjackctl-1.0.4/ source"
+    echo "         Installing distro qjackctl as fallback..."
+    apt install -y qjackctl || true
+    echo "  ! Distro qjackctl uses SESSION bus (will not integrate with jack-bridge)"
 fi
+
+# Install qjackctl icon for desktop file
+echo "Installing qjackctl icon..."
+mkdir -p /usr/share/icons/hicolor/scalable/apps
+mkdir -p /usr/share/icons/hicolor/128x128/apps
+mkdir -p /usr/share/icons/hicolor/64x64/apps
+mkdir -p /usr/share/icons/hicolor/48x48/apps
+mkdir -p /usr/share/icons/hicolor/32x32/apps
+mkdir -p /usr/share/icons/hicolor/16x16/apps
+
+# Install SVG icon
+if [ -f "contrib/usr/share/icons/hicolor/scalable/apps/qjackctl.svg" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/scalable/apps/qjackctl.svg /usr/share/icons/hicolor/scalable/apps/qjackctl.svg
+    echo "  ✓ Installed qjackctl SVG icon"
+fi
+
+# Install PNG icons
+if [ -f "contrib/usr/share/icons/hicolor/128x128/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/128x128/apps/qjackctl.png /usr/share/icons/hicolor/128x128/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 128x128 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/64x64/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/64x64/apps/qjackctl.png /usr/share/icons/hicolor/64x64/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 64x64 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/48x48/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/48x48/apps/qjackctl.png /usr/share/icons/hicolor/48x48/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 48x48 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/32x32/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/32x32/apps/qjackctl.png /usr/share/icons/hicolor/32x32/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 32x32 icon"
+fi
+
+if [ -f "contrib/usr/share/icons/hicolor/16x16/apps/qjackctl.png" ]; then
+    install -m 0644 contrib/usr/share/icons/hicolor/16x16/apps/qjackctl.png /usr/share/icons/hicolor/16x16/apps/qjackctl.png
+    echo "  ✓ Installed qjackctl 16x16 icon"
+fi
+
+# Refresh icon cache
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
+# Install qjackctl desktop file
+echo "Installing qjackctl desktop file..."
+mkdir -p /usr/share/applications
+cat > /usr/share/applications/qjackctl.desktop <<'EOF'
+[Desktop Entry]
+Name=QjackCtl
+Comment=JACK Audio Connection Kit Control Panel
+Exec=/usr/local/bin/qjackctl
+Icon=qjackctl
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Midi;
+StartupNotify=true
+EOF
+chmod 644 /usr/share/applications/qjackctl.desktop
+echo "  ✓ Installed qjackctl desktop file to /usr/share/applications/qjackctl.desktop"
+
+# Update desktop database so menus pick up new .desktop files
+echo "Updating desktop database..."
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    echo "  ✓ Updated desktop database"
+fi
+
+# Install qjackctl autostart entry
+echo "Installing qjackctl autostart entry..."
+mkdir -p /etc/xdg/autostart
+cat > /etc/xdg/autostart/qjackctl.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=QjackCtl (Auto)
+Comment=Launch QjackCtl minimized; JACK is already started by system service
+TryExec=/usr/local/bin/qjackctl
+Exec=/usr/local/bin/qjackctl --start-minimized
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
+OnlyShowIn=XFCE;LXDE;LXQt;MATE;GNOME;KDE;
+EOF
+chmod 644 /etc/xdg/autostart/qjackctl.desktop
+echo "  ✓ Installed qjackctl autostart entry to /etc/xdg/autostart/qjackctl.desktop"
 
 # Ensure ALSA override directory exists and install default current_input.conf -> input_card0
 ASOUND_D_DIR="${ETC_DIR}/asound.conf.d"
@@ -241,28 +360,6 @@ PAEOF
 chmod 644 /etc/pulse/client.conf.d/01-no-autospawn.conf || true
 echo "Created /etc/pulse/client.conf.d/01-no-autospawn.conf to disable PulseAudio autospawn"
 
-# Guidance for PipeWire (no changes performed automatically)
-echo "Note: If PipeWire is installed, you may disable its PulseAudio compatibility without purging by disabling user/session autostarts."
-echo "      On systemd-based user sessions: systemctl --user mask --now pipewire-pulse.service pipewire.service pipewire.socket"
-echo "      On non-systemd sessions, disable any XDG autostart entries for pipewire/pipewire-pulse."
-
-# Install qjackctl autostart entry (GUI convenience; server already runs at boot)
-XDG_AUTOSTART_DIR="/etc/xdg/autostart"
-mkdir -p "$XDG_AUTOSTART_DIR"
-cat > "${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=QjackCtl (Auto)
-Comment=Launch QjackCtl minimized; JACK is already started by system service
-TryExec=/usr/bin/qjackctl
-Exec=/usr/bin/qjackctl --start-minimized
-X-GNOME-Autostart-enabled=true
-NoDisplay=false
-OnlyShowIn=XFCE;LXDE;LXQt;MATE;GNOME;KDE;
-EOF
-chmod 644 "${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop" || true
-echo "Installed ${XDG_AUTOSTART_DIR}/jack-bridge-qjackctl.desktop"
-
 # Add desktop users (UID>=1000) to 'audio' group automatically so JACK can run without manual user steps
 # Non-destructive: users already in the group are left as-is; failures are reported but do not abort install.
 echo "Adding desktop users (UID>=1000) to the 'audio' group (automatic)..."
@@ -351,7 +448,7 @@ else
     chmod 0700 /var/lib/bluealsa 2>/dev/null || true
 fi
 
-# Install BlueALSA prebuilt binaries (required - we do not use distro bluez-alsa-utils)
+# Install BlueALSA prebuilt binaries (required - jack-bridge does not use distro bluez-alsa-utils)
 echo "Installing jack-bridge prebuilt BlueALSA binaries to /usr/local/bin..."
 if [ -f "contrib/bin/bluealsad" ]; then
     install -m 0755 contrib/bin/bluealsad /usr/local/bin/bluealsad || true
@@ -417,8 +514,6 @@ if [ -f "contrib/bin/libasound_module_ctl_bluealsa.so" ]; then
 else
     echo "  ! libasound_module_ctl_bluealsa.so not found (optional - mixer controls)"
 fi
-
-# Note: jack-bluealsa-autobridge has been removed from this project; no autobridge binary is installed.
 
 # Install bluetoothd init script if provided (jack-bridge manages bluetoothd for SysVinit systems)
 if [ -f "contrib/init.d/bluetoothd" ]; then
@@ -490,9 +585,6 @@ else
     echo "Warning: contrib/init.d/jack-bridge-ports not found; persistent ports disabled"
 fi
 
-# (autobridge removed) No jack-bluealsa-autobridge init script is installed or registered.
-
-
 # Install BlueALSA D-Bus policy (canonical)
 DBUS_POLICY_SRC="usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_POLICY_DST="/usr/share/dbus-1/system.d/org.bluealsa.conf"
@@ -524,7 +616,7 @@ if [ -f "contrib/etc/20-jack-bridge-bluealsa.conf" ]; then
             echo "  ✗ Failed to install to $D/20-jack-bridge-bluealsa.conf"
         fi
         
-        # Remove old conflicting file if we previously installed it
+        # Remove old conflicting file if it was previously installed
         if [ -f "$D/20-bluealsa.conf" ]; then
             if grep -q "jack-bridge" "$D/20-bluealsa.conf" 2>/dev/null; then
                 rm -f "$D/20-bluealsa.conf"
@@ -661,6 +753,90 @@ else
     echo "WARNING: contrib/init.d/jack-connection-manager not found"
 fi
 
+# Install D-Bus service for qjackctl integration
+echo ""
+echo "Installing jack-bridge D-Bus service for qjackctl integration..."
+
+# Build D-Bus service if not already built
+if [ ! -f "contrib/bin/jack-bridge-dbus" ]; then
+    echo "Building jack-bridge-dbus..."
+    if command -v make >/dev/null 2>&1; then
+        make dbus || {
+            echo "WARNING: Failed to build jack-bridge-dbus"
+            echo "         qjackctl Start/Stop buttons will not work"
+            echo "         Run 'make dbus' manually to enable this feature"
+        }
+    else
+        echo "WARNING: make not found, cannot build jack-bridge-dbus"
+        echo "         qjackctl Start/Stop buttons will not work"
+    fi
+fi
+
+# Install D-Bus service binary
+if [ -f "contrib/bin/jack-bridge-dbus" ]; then
+    install -m 0755 contrib/bin/jack-bridge-dbus /usr/local/bin/jack-bridge-dbus
+    echo "  ✓ Installed jack-bridge-dbus to /usr/local/bin"
+else
+    echo "  ! jack-bridge-dbus binary not found, skipping D-Bus service install"
+    echo "    qjackctl Start/Stop will not work without this service"
+fi
+
+# Install D-Bus service activation file
+if [ -f "contrib/dbus/org.jackaudio.service.service" ]; then
+    mkdir -p /usr/share/dbus-1/system-services
+    install -m 0644 contrib/dbus/org.jackaudio.service.service \
+        /usr/share/dbus-1/system-services/org.jackaudio.service.service
+    echo "  ✓ Installed D-Bus service activation file"
+fi
+
+# Install D-Bus policy
+if [ -f "contrib/dbus/org.jackaudio.service.conf" ]; then
+    mkdir -p /usr/share/dbus-1/system.d
+    install -m 0644 contrib/dbus/org.jackaudio.service.conf \
+        /usr/share/dbus-1/system.d/org.jackaudio.service.conf
+    echo "  ✓ Installed D-Bus policy"
+else
+    echo "  ! D-Bus policy not found, qjackctl may require manual authorization"
+fi
+
+# Install polkit rules for password-less control
+if [ -f "contrib/polkit/50-jack-bridge.rules" ]; then
+    mkdir -p /etc/polkit-1/rules.d
+    install -m 0644 contrib/polkit/50-jack-bridge.rules \
+        /etc/polkit-1/rules.d/50-jack-bridge.rules
+    echo "  ✓ Installed polkit rules (audio group gets password-less JACK control)"
+    
+    # Reload polkit
+    if pidof polkitd >/dev/null 2>&1; then
+        kill -HUP $(pidof polkitd | awk '{print $1}') 2>/dev/null || true
+    fi
+else
+    echo "  ! Polkit rules not found, users may be prompted for password"
+fi
+
+# Install jack-bridge-dbus init script
+if [ -f "contrib/init.d/jack-bridge-dbus" ]; then
+    install -m 0755 contrib/init.d/jack-bridge-dbus "${INIT_DIR}/jack-bridge-dbus"
+    echo "  ✓ Installed jack-bridge-dbus init script"
+    
+    # Register with update-rc.d (must start early, before qjackctl launches)
+    if command -v update-rc.d >/dev/null 2>&1; then
+        update-rc.d -f jack-bridge-dbus remove >/dev/null 2>&1 || true
+        update-rc.d jack-bridge-dbus defaults 01 99 || true
+        echo "  ✓ Registered jack-bridge-dbus: starts at priority 01 (very early)"
+    fi
+fi
+
+# Reload D-Bus to pick up new service
+if command -v service >/dev/null 2>&1; then
+    service dbus reload >/dev/null 2>&1 || true
+    echo "  ✓ Reloaded D-Bus configuration"
+fi
+
+echo "D-Bus service installation complete"
+echo "qjackctl Start/Stop buttons will now control the system JACK service"
+echo ""
+
 # Install jack-bridge devices config (authoritative; overwrite without backup)
 mkdir -p /etc/jack-bridge
 cat > /etc/jack-bridge/devices.conf <<'DEVCONF'
@@ -690,8 +866,6 @@ UCONF
 chmod 0644 "$SKEL_DIR/devices.conf" || true
 echo "Seeded skeleton per-user config at $SKEL_DIR/devices.conf"
 
-# NOTE: Per-user jack_playback_override.conf is NO LONGER NEEDED
-# jack-bridge now updates system-wide 50-jack.conf directly (made writable by audio group)
 # Seed per-user devices.conf for backward compatibility
 for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
@@ -715,8 +889,102 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     fi
 done
 
+# Install qjackctl helper scripts to /usr/local/bin
 echo ""
-echo "Installation complete, reboot for changes to take effect. sudo reboot"
+echo "Installing qjackctl D-Bus configuration helpers..."
+if [ -f "contrib/usr/local/bin/jack-bridge-qjackctl-setup" ]; then
+    install -m 0755 contrib/usr/local/bin/jack-bridge-qjackctl-setup /usr/local/bin/jack-bridge-qjackctl-setup
+    echo "  ✓ Installed jack-bridge-qjackctl-setup"
+fi
+
+if [ -f "contrib/usr/local/bin/jack-bridge-verify-qjackctl" ]; then
+    install -m 0755 contrib/usr/local/bin/jack-bridge-verify-qjackctl /usr/local/bin/jack-bridge-verify-qjackctl
+    echo "  ✓ Installed jack-bridge-verify-qjackctl"
+fi
+
+# Configure qjackctl to use D-Bus mode for jack-bridge integration
+# This is CRITICAL - without this, qjackctl spawns its own jackd instead of using our D-Bus service
+echo ""
+echo "Configuring qjackctl for D-Bus mode integration..."
+
+# Create skeleton config for new users
+QJACKCTL_SKEL_DIR="/etc/skel/.config/rncbc.org"
+mkdir -p "$QJACKCTL_SKEL_DIR"
+cat > "$QJACKCTL_SKEL_DIR/QjackCtl.conf" <<'QJACKCTL_SKEL'
+[General]
+DBusEnabled=true
+JackDBusEnabled=true
+StartJack=false
+ServerName=default
+QJACKCTL_SKEL
+chmod 644 "$QJACKCTL_SKEL_DIR/QjackCtl.conf" || true
+echo "  ✓ Created skeleton qjackctl config in /etc/skel/"
+
+# Configure qjackctl for each existing desktop user
+for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
+    home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
+    if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
+        qjackctl_conf_dir="$home_dir/.config/rncbc.org"
+        qjackctl_conf="$qjackctl_conf_dir/QjackCtl.conf"
+        
+        # Create config directory
+        mkdir -p "$qjackctl_conf_dir"
+        
+        if [ -f "$qjackctl_conf" ]; then
+            # Update existing configuration
+            backup_file="${qjackctl_conf}.backup-$(date +%Y%m%d-%H%M%S)"
+            cp "$qjackctl_conf" "$backup_file" 2>/dev/null && \
+                echo "  ✓ Backed up existing config for user $u"
+            
+            # Update or add D-Bus settings
+            if grep -q '^DBusEnabled=' "$qjackctl_conf"; then
+                sed -i 's/^DBusEnabled=.*/DBusEnabled=true/' "$qjackctl_conf"
+            else
+                echo "DBusEnabled=true" >> "$qjackctl_conf"
+            fi
+            
+            if grep -q '^JackDBusEnabled=' "$qjackctl_conf"; then
+                sed -i 's/^JackDBusEnabled=.*/JackDBusEnabled=true/' "$qjackctl_conf"
+            else
+                echo "JackDBusEnabled=true" >> "$qjackctl_conf"
+            fi
+            
+            echo "  ✓ Updated qjackctl D-Bus settings for user $u"
+        else
+            # Create new minimal D-Bus-enabled config
+            cat > "$qjackctl_conf" <<'QJACKCTL_CONF'
+[General]
+DBusEnabled=true
+JackDBusEnabled=true
+StartJack=false
+ServerName=default
+QJACKCTL_CONF
+            echo "  ✓ Created qjackctl D-Bus config for user $u"
+        fi
+        
+        # Fix ownership
+        chown -R "$u:$u" "$qjackctl_conf_dir" 2>/dev/null || true
+    fi
+done
+
+echo ""
+echo "qjackctl D-Bus mode configuration complete!"
+echo ""
+echo "Verification:"
+echo "  Users can run: jack-bridge-verify-qjackctl"
+echo "  To reconfigure: jack-bridge-qjackctl-setup"
+echo ""
+
+echo "============================================================================"
+echo "Installation complete! Changes take effect after reboot."
+echo ""
+echo "Next steps:"
+echo "Reboot: sudo reboot"
+echo ""
+echo "Important: qjackctl is now configured to use jack-bridge D-Bus mode."
+echo "           Start/Stop buttons will control the system jackd-rt service."
+echo "============================================================================"
 echo ""
 
 exit 0
+

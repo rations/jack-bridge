@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.jackaudio.service
+Exec=/usr/local/bin/jack-bridge-dbus
+User=root

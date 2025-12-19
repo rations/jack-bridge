@@ -32,7 +32,6 @@ fi
 : ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
 : ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
-: ${WATCHDOG_PIDFILE:=/var/run/jack-watchdog.pid}
 : ${MONITOR_PIDFILE:=/var/run/jack-connection-monitor.pid}
 
 # detect_user(): removed; detection is handled inline in start() for portability
@@ -54,11 +53,20 @@ start() {
         rm -f /var/run/jackd-rt.pid 2>/dev/null || true
     fi
 
-    # Wait up to 5s for ALSA devices to appear (reduced from 15s - USB hijacking is now fixed)
-    WAIT_SECS=5
+    # Wait for ALSA devices to appear
+    # Cold boot: 2s (modern systems are fast), Restart: 0.5s (devices already present)
+    WAIT_SECS=2
     waited=0
+    
+    # Check if this is likely a restart scenario (JACK was recently running)
+    if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
+        echo "jackd-rt: Detected restart scenario, using fast path"
+        WAIT_SECS=1  # 1 second is plenty for restarts
+    fi
+    
     while [ $waited -lt $WAIT_SECS ]; do
         if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
+            echo "jackd-rt: ALSA devices ready after ${waited}s"
             break
         fi
         sleep 1
@@ -149,9 +157,17 @@ start() {
         || { log_failure_msg "Failed to start jackd"; log_end_msg 1; return 1; }
 
     # Health check: prefer jack_wait, fallback to pid check
+    # Use realistic timeout: 3s for cold boot, 2s for restart scenarios
+    JACK_WAIT_TIMEOUT=3  # 3 seconds is sufficient for cold boot on modern systems
+    
+    # Detect restart scenario for even faster response
+    if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
+        JACK_WAIT_TIMEOUT=2  # 2 seconds is plenty for restarts
+    fi
+    
     if command -v jack_wait >/dev/null 2>&1; then
-        if ! jack_wait -w -t 10 >/dev/null 2>&1; then
-            log_warning_msg "jackd did not become ready in time; last 30 lines of $JACKD_LOG:"
+        if ! jack_wait -w -t $JACK_WAIT_TIMEOUT >/dev/null 2>&1; then
+            log_warning_msg "jackd did not become ready in ${JACK_WAIT_TIMEOUT}s; last 30 lines of $JACKD_LOG:"
             tail -n 30 "$JACKD_LOG" 2>/dev/null || true
             log_end_msg 1
             return 1
@@ -164,13 +180,6 @@ start() {
         
         # NOTE: jack-connection-manager is now started by separate init script
         # (contrib/init.d/jack-connection-manager) for cleaner service management
-        
-        # Start watchdog last
-        if [ -x /usr/local/lib/jack-bridge/jack-watchdog ]; then
-            /usr/local/lib/jack-bridge/jack-watchdog >/dev/null 2>&1 &
-            # Save watchdog PID for clean shutdown
-            echo $! > "$WATCHDOG_PIDFILE" 2>/dev/null || true
-        fi
     else
         sleep 1
         if ! { [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; }; then
@@ -203,7 +212,7 @@ stop() {
         return 0
     fi
     
-    # CRITICAL: Stop monitor and watchdog FIRST to prevent restart/reconnect attempts
+    # CRITICAL: Stop monitor FIRST to prevent reconnect attempts
     if [ -f "$MONITOR_PIDFILE" ]; then
         monitor_pid=$(cat "$MONITOR_PIDFILE" 2>/dev/null || true)
         if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
@@ -213,17 +222,6 @@ stop() {
             kill -0 "$monitor_pid" 2>/dev/null && kill -KILL "$monitor_pid" 2>/dev/null || true
         fi
         rm -f "$MONITOR_PIDFILE" 2>/dev/null || true
-    fi
-    
-    if [ -f "$WATCHDOG_PIDFILE" ]; then
-        watchdog_pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null || true)
-        if [ -n "$watchdog_pid" ] && kill -0 "$watchdog_pid" 2>/dev/null; then
-            log_progress_msg "stopping watchdog"
-            kill -TERM "$watchdog_pid" 2>/dev/null || true
-            sleep 1
-            kill -0 "$watchdog_pid" 2>/dev/null && kill -KILL "$watchdog_pid" 2>/dev/null || true
-        fi
-        rm -f "$WATCHDOG_PIDFILE" 2>/dev/null || true
     fi
     
     # Now stop JACK with proper retry strategy
@@ -264,6 +262,17 @@ case "$1" in
         stop
         sleep 1
         start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 2
+        ;;
+esac
+
+exit 0
         ;;
     status)
         status
