@@ -53,11 +53,20 @@ start() {
         rm -f /var/run/jackd-rt.pid 2>/dev/null || true
     fi
 
-    # Wait up to 5s for ALSA devices to appear (reduced from 15s - USB hijacking is now fixed)
-    WAIT_SECS=5
+    # Wait for ALSA devices to appear
+    # Cold boot: 2s (modern systems are fast), Restart: 0.5s (devices already present)
+    WAIT_SECS=2
     waited=0
+    
+    # Check if this is likely a restart scenario (JACK was recently running)
+    if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
+        echo "jackd-rt: Detected restart scenario, using fast path"
+        WAIT_SECS=1  # 1 second is plenty for restarts
+    fi
+    
     while [ $waited -lt $WAIT_SECS ]; do
         if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
+            echo "jackd-rt: ALSA devices ready after ${waited}s"
             break
         fi
         sleep 1
@@ -148,9 +157,17 @@ start() {
         || { log_failure_msg "Failed to start jackd"; log_end_msg 1; return 1; }
 
     # Health check: prefer jack_wait, fallback to pid check
+    # Use realistic timeout: 3s for cold boot, 2s for restart scenarios
+    JACK_WAIT_TIMEOUT=3  # 3 seconds is sufficient for cold boot on modern systems
+    
+    # Detect restart scenario for even faster response
+    if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
+        JACK_WAIT_TIMEOUT=2  # 2 seconds is plenty for restarts
+    fi
+    
     if command -v jack_wait >/dev/null 2>&1; then
-        if ! jack_wait -w -t 10 >/dev/null 2>&1; then
-            log_warning_msg "jackd did not become ready in time; last 30 lines of $JACKD_LOG:"
+        if ! jack_wait -w -t $JACK_WAIT_TIMEOUT >/dev/null 2>&1; then
+            log_warning_msg "jackd did not become ready in ${JACK_WAIT_TIMEOUT}s; last 30 lines of $JACKD_LOG:"
             tail -n 30 "$JACKD_LOG" 2>/dev/null || true
             log_end_msg 1
             return 1

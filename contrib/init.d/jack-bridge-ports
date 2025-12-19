@@ -101,27 +101,60 @@ start() {
         return 1
     fi
     
-    # Wait for JACK to be ready (reduced from 20s - USB hijacking fix allows faster startup)
-    WAIT_SECS=5
+    # Wait for JACK to be ready (optimized for D-Bus restarts - much faster)
+    # Cold boot: 3s, Restart: 1.5s (since JACK should be ready much faster)
+    WAIT_SECS=3
+    WAIT_INTERVAL=0.5
     waited=0
+    
+    # Detect restart scenario for faster response
+    if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
+        echo "jack-bridge-ports: Detected restart scenario, using fast path"
+        WAIT_SECS=1.5  # Much faster for restarts
+    fi
+    
+    echo "jack-bridge-ports: Waiting for JACK to be ready (max ${WAIT_SECS}s)..." >> "$LOGFILE" 2>&1
+    
+    # Log restart detection for debugging
+    if [ -f /var/run/jackd-rt.pid.old ]; then
+        echo "jack-bridge-ports: Detected /var/run/jackd-rt.pid.old (restart scenario)" >> "$LOGFILE" 2>&1
+    fi
+    if [ -f /var/run/jack-bridge-dbus.pid ]; then
+        echo "jack-bridge-ports: Detected /var/run/jack-bridge-dbus.pid (D-Bus service active)" >> "$LOGFILE" 2>&1
+    fi
+    
     while [ $waited -lt $WAIT_SECS ]; do
         if command -v jack_wait >/dev/null 2>&1; then
             if jack_wait -w -t 1 >/dev/null 2>&1; then
+                echo "jack-bridge-ports: JACK ready via jack_wait (after ${waited}s)" >> "$LOGFILE" 2>&1
                 break
+            else
+                echo "jack-bridge-ports: jack_wait failed, retrying..." >> "$LOGFILE" 2>&1
             fi
         else
-            # Fallback: check if jackd is running
+            # Fallback: check if jackd process is running
             if pidof jackd >/dev/null 2>&1; then
-                sleep 1  # Give it a moment to initialize
+                echo "jack-bridge-ports: jackd process detected, proceeding (after ${waited}s)" >> "$LOGFILE" 2>&1
+                sleep 1  # Give it just a moment more to initialize
                 break
+            else
+                echo "jack-bridge-ports: Waiting... jackd not running yet" >> "$LOGFILE" 2>&1
             fi
         fi
-        sleep 1
-        waited=$((waited + 1))
+        sleep $WAIT_INTERVAL
+        waited=$(awk "BEGIN {printf \"%.1f\", $waited + $WAIT_INTERVAL}")
     done
     
     if [ $waited -ge $WAIT_SECS ]; then
-        log_failure_msg "JACK not ready after ${WAIT_SECS}s; cannot spawn ports"
+        log_failure_msg "JACK not ready after ${WAIT_SECS}s; cannot spawn ports (check jackd-rt service)"
+        echo "jack-bridge-ports: JACK readiness timeout - diagnostic info:" >> "$LOGFILE" 2>&1
+        echo "  - jackd process check: $(pidof jackd 2>/dev/null || echo 'NOT RUNNING')" >> "$LOGFILE" 2>&1
+        echo "  - JACKD_RT_PIDFILE: $(cat /var/run/jackd-rt.pid 2>/dev/null || echo 'MISSING')" >> "$LOGFILE" 2>&1
+        if command -v jack_wait >/dev/null 2>&1; then
+            echo "  - jack_wait test: $(jack_wait -w -t 1 2>&1 || echo 'FAILED')" >> "$LOGFILE" 2>&1
+        else
+            echo "  - jack_wait: NOT AVAILABLE" >> "$LOGFILE" 2>&1
+        fi
         log_end_msg 1
         return 1
     fi

@@ -146,13 +146,19 @@ static void handle_start_server(GDBusConnection *connection,
         return;
     }
     
-    /* Also restart jack-connection-manager to ensure audio routing is restored */
+    /* Give JACK a brief moment to initialize before restarting dependent services */
+    g_usleep(1500000); /* 1.5 second delay - much shorter than previous 8s attempt */
+    
+    /* Restart jack-bridge-ports first to spawn USB/HDMI ports */
+    g_spawn_command_line_async("service jack-bridge-ports restart", NULL);
+    g_print("jack-bridge-dbus: Restarted jack-bridge-ports for USB/HDMI ports\n");
+    
+    /* Small delay between service restarts to avoid resource contention */
+    g_usleep(500000); /* 0.5 second delay */
+    
+    /* Restart jack-connection-manager to ensure audio routing is restored */
     g_spawn_command_line_async("service jack-connection-manager restart", NULL);
     g_print("jack-bridge-dbus: Restarted jack-connection-manager for proper audio routing\n");
-    
-    /* Restart jack-bridge-ports to ensure USB/HDMI ports are available */
-    g_spawn_command_line_async("service jack-bridge-ports restart", NULL);
-    g_print("jack-bridge-dbus: Restarted jack-bridge-ports for USB/HDMI connectivity\n");
     
     if (exit_status != 0) {
         g_printerr("jack-bridge-dbus: service jackd-rt start exited with %d\n",
