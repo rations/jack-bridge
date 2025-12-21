@@ -583,6 +583,11 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
             is_capture = TRUE;
         }
         
+        /* Force loopback mixing control to be treated as capture for Enable checkbox */
+        if (strstr(name, "Loopback") != NULL) {
+            is_capture = TRUE;
+        }
+        
         /* Auto-enable ALL capture switches on startup (generic for any interface) */
         if (is_capture && snd_mixer_selem_has_capture_switch(elem)) {
             int sw = 0;
@@ -591,6 +596,12 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
                 snd_mixer_selem_set_capture_switch_all(elem, 1);
                 fprintf(stderr, "Auto-enabled capture for '%s' on card %d\n", name, card_num);
             }
+        }
+        
+        /* Auto-enable loopback mixing control on startup */
+        if (strstr(name, "Loopback") != NULL && snd_mixer_selem_has_capture_switch(elem)) {
+            snd_mixer_selem_set_capture_switch_all(elem, 1);
+            fprintf(stderr, "Auto-enabled loopback mixing for '%s' on card %d\n", name, card_num);
         }
         
         data->channels[idx].elem = elem;
@@ -766,6 +777,16 @@ static void rebuild_mixer_for_card(int card_num) {
         if (g_mixer_data->channels[i].is_capture) {
             snd_mixer_selem_get_capture_volume_range(g_mixer_data->channels[i].elem, &min, &max);
             snd_mixer_selem_get_capture_volume(g_mixer_data->channels[i].elem, 0, &value);
+            
+            /* Ensure loopback mixing slider is set to 1 if enabled */
+            const char *channel_name = g_mixer_data->channels[i].channel_name;
+            if (channel_name && strstr(channel_name, "Loopback") != NULL) {
+                int sw = 0;
+                snd_mixer_selem_get_capture_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                if (sw) {
+                    value = max; /* Set to maximum value if enabled */
+                }
+            }
         } else {
             snd_mixer_selem_get_playback_volume_range(g_mixer_data->channels[i].elem, &min, &max);
             snd_mixer_selem_get_playback_volume(g_mixer_data->channels[i].elem, 0, &value);

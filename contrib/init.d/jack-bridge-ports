@@ -86,8 +86,16 @@ detect_card_device() {
 # Ensure ALSA loopback module is loaded
 ensure_loopback() {
     if ! lsmod | grep -q '^snd_aloop'; then
-        modprobe snd-aloop || return 1
-        sleep 1
+        if command -v modprobe >/dev/null 2>&1; then
+            if ! modprobe snd-aloop; then
+                echo "ERROR: failed to load snd-aloop module" >> "$LOGFILE" 2>&1
+                return 1
+            fi
+            sleep 1
+        else
+            echo "ERROR: modprobe not available to load snd-aloop" >> "$LOGFILE" 2>&1
+            return 1
+        fi
     fi
     return 0
 }
