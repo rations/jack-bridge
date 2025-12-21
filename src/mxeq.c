@@ -61,6 +61,7 @@ static GtkWidget *g_rb_internal = NULL;
 static GtkWidget *g_rb_usb = NULL;
 static GtkWidget *g_rb_hdmi = NULL;
 static GtkWidget *g_rb_bt = NULL;
+static GtkWidget *g_rb_gaming = NULL;
 /* Global mixer data for dynamic card switching */
 static MixerData *g_mixer_data = NULL;
 /* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
@@ -1951,6 +1952,7 @@ typedef struct {
     GtkWidget *rb_usb;
     GtkWidget *rb_hdmi;
     GtkWidget *rb_bt;
+    GtkWidget *rb_gaming;
 } DevicesUI;
 
 static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
@@ -1992,7 +1994,7 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         
         if (!mac) {
             GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                                  "No Bluetooth device selected.\n\nPlease:\n1. Expand 'BLUETOOTH' panel\n2. Connect a device\n3. Try again");
+                                                   "No Bluetooth device selected.\n\nPlease:\n1. Expand 'BLUETOOTH' panel\n2. Connect a device\n3. Try again");
             gtk_dialog_run(GTK_DIALOG(d));
             gtk_widget_destroy(d);
             /* Revert radio to previous selection (don't leave Bluetooth selected if it failed) */
@@ -2012,8 +2014,8 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         
         if (!ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
             GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                                  "Failed to set Bluetooth output.\n\nError: %s\n\nCheck that device is connected and BlueALSA daemon is running.",
-                                                  err ? err->message : "routing helper failed");
+                                                   "Failed to set Bluetooth output.\n\nError: %s\n\nCheck that device is connected and BlueALSA daemon is running.",
+                                                   err ? err->message : "routing helper failed");
             gtk_dialog_run(GTK_DIALOG(d));
             gtk_widget_destroy(d);
             if (err) g_error_free(err);
@@ -2032,7 +2034,7 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         /* Verify ports exist */
         if (!bluealsa_ports_exist()) {
             GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                                  "Bluetooth ports failed to spawn.\n\nPossible causes:\n• Device disconnected\n• BlueALSA daemon not running\n• No A2DP transport available\n\nCheck /tmp/jack-route-select.log");
+                                                   "Bluetooth ports failed to spawn.\n\nPossible causes:\n• Device disconnected\n• BlueALSA daemon not running\n• No A2DP transport available\n\nCheck /tmp/jack-route-select.log");
             gtk_dialog_run(GTK_DIALOG(d));
             gtk_widget_destroy(d);
             /* Revert radio to Internal */
@@ -2046,12 +2048,16 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         
         /* Success! Show confirmation */
         GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
-                                              GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                                              "Bluetooth output ready!\n\nDevice: %s\nPorts: bluealsa:playback_1/2\n\nAudio will play through Bluetooth.", mac);
+                                               GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+                                               "Bluetooth output ready!\n\nDevice: %s\nPorts: bluealsa:playback_1/2\n\nAudio will play through Bluetooth.", mac);
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
         g_free(mac);
         return;
+    } else if (g_strcmp0(label, "Gaming") == 0) {
+        ok = route_to_target_async("gaming");
+        /* Gaming uses internal card for capture, so show internal mixer */
+        rebuild_mixer_for_card(0);
     } else {
         return;
     }
@@ -2095,28 +2101,36 @@ static void create_devices_panel(GtkWidget *main_box) {
     ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
     gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
 
+    ui->rb_gaming = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Gaming");
+    gtk_box_pack_start(GTK_BOX(row), ui->rb_gaming, FALSE, FALSE, 0);
+    gtk_widget_set_tooltip_text(ui->rb_gaming, "Optimized audio path for Steam and Windows games");
+
     /* Phase 3: Store global references for state synchronization from Bluetooth panel */
     g_rb_internal = ui->rb_internal;
     g_rb_usb = ui->rb_usb;
     g_rb_hdmi = ui->rb_hdmi;
     g_rb_bt = ui->rb_bt;
+    g_rb_gaming = ui->rb_gaming;
 
     /* Presence-based sensitivity (no hardcoding) */
     gtk_widget_set_sensitive(ui->rb_internal, TRUE);
     gtk_widget_set_sensitive(ui->rb_usb, is_usb_present());
     gtk_widget_set_sensitive(ui->rb_hdmi, is_hdmi_present());
     gtk_widget_set_sensitive(ui->rb_bt, is_bt_present());
+    gtk_widget_set_sensitive(ui->rb_gaming, TRUE);
 
     g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_gaming, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
 
     /* Initialize from persisted preference, but fall back if device not present */
     gchar *pref = load_preferred_output();
     gboolean have_usb = gtk_widget_get_sensitive(ui->rb_usb);
     gboolean have_hdmi = gtk_widget_get_sensitive(ui->rb_hdmi);
     gboolean have_bt = gtk_widget_get_sensitive(ui->rb_bt);
+    gboolean have_gaming = gtk_widget_get_sensitive(ui->rb_gaming);
 
     if (g_strcmp0(pref, "usb") == 0 && have_usb) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
@@ -2124,6 +2138,8 @@ static void create_devices_panel(GtkWidget *main_box) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
     } else if (g_strcmp0(pref, "bluetooth") == 0 && have_bt) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
+    } else if (g_strcmp0(pref, "gaming") == 0 && have_gaming) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_gaming), TRUE);
     } else {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
     }

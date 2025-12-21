@@ -146,6 +146,7 @@ collect_current_sources() {
       sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
       sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
       sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
+      sink["gaming_in:playback_1"]=1; sink["gaming_in:playback_2"]=1;
     }
     /^[^ \t]/ { cur=$1; next }
     /^[ \t]/ {
@@ -167,6 +168,7 @@ jack_disconnect_all_sinks() {
       sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
       sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
       sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
+      sink["gaming_in:playback_1"]=1; sink["gaming_in:playback_2"]=1;
     }
     /^[^ \t]/ { cur=$1; next }
     /^[ \t]/ {
@@ -366,7 +368,7 @@ ensure_bt_out() {
   # Bluetooth uses 'jackbridge_bluealsa' ALSA plugin that requires an ACTIVE connection.
   # This function spawns alsa_out ONLY when user selects Bluetooth output.
   mac_arg="$1"
-  
+ 
   # Extract MAC if provided
   bt_mac=""
   if [ -n "${mac_arg}" ]; then
@@ -374,7 +376,7 @@ ensure_bt_out() {
       bt_mac="$mac_arg"
     fi
   fi
-  
+ 
   # Write BlueALSA defaults FIRST (alsa_out will read these)
   if [ -n "$bt_mac" ]; then
     write_bluealsa_defaults "$bt_mac" "a2dp" "org.bluealsa"
@@ -383,11 +385,11 @@ ensure_bt_out() {
     write_bluealsa_defaults "00:00:00:00:00:00" "a2dp" "org.bluealsa"
     log "Updated BlueALSA defaults for most-recent device"
   fi
-  
+ 
   # Kill any existing bluealsa alsa_out process (in case switching devices)
   pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
   sleep 0.5  # Let process terminate
-  
+ 
   # Spawn alsa_out reading from jackbridge_bluealsa PCM (uses defaults we just wrote)
   log "Spawning bluealsa alsa_out (period=$BT_PERIOD nperiods=$BT_NPERIODS)"
   if have jack_samplerate; then
@@ -395,11 +397,11 @@ ensure_bt_out() {
   else
     rate=48000
   fi
-  
+ 
   # Spawn in background - alsa_out will create bluealsa:playback_1/2 ports
   nohup alsa_out -j bluealsa -d jackbridge_bluealsa -r "$rate" -p "$BT_PERIOD" -n "$BT_NPERIODS" \
     >>/tmp/jack-route-select-bluealsa.log 2>&1 &
-  
+ 
   # Wait for ports to appear
   if wait_for_port "bluealsa:playback_1"; then
     log "bluealsa ports spawned successfully"
@@ -407,6 +409,50 @@ ensure_bt_out() {
   else
     log "ERROR: bluealsa ports failed to spawn (check /tmp/jack-route-select-bluealsa.log)"
     log "       Device may not be connected or BlueALSA daemon not running"
+    return 1
+  fi
+}
+
+ensure_gaming_in() {
+  # ON-DEMAND spawning: Gaming uses ALSA loopback device
+  # This function spawns alsa_in to capture from loopback and feed JACK
+
+  # Kill any existing gaming_in process
+  pkill -f "alsa_in -j gaming_in" 2>/dev/null || true
+  sleep 0.3
+
+  # Ensure loopback module is loaded
+  if ! lsmod | grep -q '^snd_aloop'; then
+    if command -v modprobe >/dev/null 2>&1; then
+      if ! modprobe snd-aloop; then
+        log "ERROR: failed to load snd-aloop module"
+        return 1
+      fi
+      sleep 1
+    else
+      log "ERROR: modprobe not available to load snd-aloop"
+      return 1
+    fi
+  fi
+
+  # Spawn alsa_in to capture from loopback capture port
+  log "Spawning gaming_in alsa_in from loopback"
+  if have jack_samplerate; then
+    rate=$(jack_rate)
+  else
+    rate=48000
+  fi
+
+  # Spawn in background - alsa_in will create gaming_in:capture_1/2 ports
+  nohup alsa_in -j gaming_in -d hw:Loopback,1,0 -r "$rate" -p 1024 -n 2 \
+    >>/tmp/jack-route-select-gaming-in.log 2>&1 &
+
+  # Wait for ports to appear
+  if wait_for_port "gaming_in:capture_1"; then
+    log "gaming_in ports spawned successfully"
+    return 0
+  else
+    log "ERROR: gaming_in ports failed to spawn (check /tmp/jack-route-select-gaming-in.log)"
     return 1
   fi
 }
@@ -481,6 +527,10 @@ route() {
       # Use simple PCM name - parameters come from defaults
       out_pcm="jackbridge_bluealsa"
       ;;
+    gaming)
+      # Gaming uses the loopback device via ALSA 'gaming' PCM
+      out_pcm="gaming"
+      ;;
     *)
       out_pcm="${PREFERRED_OUTPUT:-internal}"
       ;;
@@ -526,8 +576,16 @@ route() {
       ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
       newpref="bluealsa:playback_"
       ;;
+    gaming)
+      # Kill on-demand Bluetooth and USB capture clients when switching to Gaming
+      pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      # Spawn on-demand Gaming client (alsa_in from loopback)
+      ensure_gaming_in || log "WARNING: ensure_gaming_in failed"
+      newpref="gaming_in:playback_"
+      ;;
     *)
-      echo "Usage: $0 {internal|usb|hdmi|bluetooth} [bluealsa-DEV or MAC]" >&2
+      echo "Usage: $0 {internal|usb|hdmi|bluetooth|gaming} [bluealsa-DEV or MAC]" >&2
       exit 1
       ;;
   esac
@@ -573,7 +631,7 @@ main() {
   tgt="${1:-${PREFERRED_OUTPUT}}"
   arg2="${2:-}"
   if [ -z "${tgt}" ]; then
-    echo "Usage: $0 {internal|usb|hdmi|bluetooth} [bluealsa-DEV or MAC]" >&2
+    echo "Usage: $0 {internal|usb|hdmi|bluetooth|gaming} [bluealsa-DEV or MAC]" >&2
     exit 1
   fi
   route "$tgt" "$arg2"

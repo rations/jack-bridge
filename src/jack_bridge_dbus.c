@@ -524,18 +524,22 @@ static void signal_handler(int signum) {
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
-    
+
     g_print("jack-bridge-dbus: Starting D-Bus bridge service\n");
     g_print("jack-bridge-dbus: Service: %s\n", DBUS_SERVICE_NAME);
     g_print("jack-bridge-dbus: Object: %s\n", DBUS_OBJECT_PATH);
-    
-    /* Initialize configuration cache */
-    init_config_cache();
-    g_print("jack-bridge-dbus: Configuration cache initialized\n");
-    
+
     /* Initialize config access mutex */
     g_mutex_init(&config_access_mutex);
     g_print("jack-bridge-dbus: Config access mutex initialized\n");
+
+    /* Initialize configuration cache */
+    init_config_cache();
+    g_print("jack-bridge-dbus: Configuration cache initialized\n");
+
+    /* Add a small delay to ensure the configuration cache is fully initialized */
+    g_usleep(500000); /* 0.5 second delay */
+    g_print("jack-bridge-dbus: Configuration cache ready\n");
     
     /* Setup signal handlers */
     signal(SIGINT, signal_handler);

@@ -83,6 +83,32 @@ detect_card_device() {
     return 1
 }
 
+# Ensure ALSA loopback module is loaded
+ensure_loopback() {
+    if ! lsmod | grep -q '^snd_aloop'; then
+        modprobe snd-aloop || return 1
+        sleep 1
+    fi
+    return 0
+}
+
+# Spawn Gaming bridge (on demand)
+spawn_gaming() {
+    ensure_loopback || return 1
+
+    if pgrep -f "alsa_in -j gaming_in" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    su -l "$USERNAME" -c \
+      "nohup alsa_in -j gaming_in -d hw:Loopback,1,0 -r 48000 -p 1024 -n 2 >>\"$LOGFILE\" 2>&1 &"
+}
+
+# Stop Gaming bridge
+stop_gaming() {
+    pkill -TERM -f "alsa_in -j gaming_in" 2>/dev/null || true
+}
+
 start() {
     log_daemon_msg "Starting jack-bridge persistent ports" "jack-bridge-ports"
     
@@ -255,7 +281,7 @@ stop() {
     # Gracefully terminate alsa_out and alsa_in instances with proper signal handling
     # Use SIGTERM first (gives processes time to cleanup JACK connections)
     log_progress_msg "sending TERM signal"
-    for port in usb_out hdmi_out bluealsa system_in; do
+    for port in usb_out hdmi_out bluealsa system_in gaming_in; do
         if pgrep -f "alsa_out -j $port" >/dev/null 2>&1; then
             pkill -TERM -f "alsa_out -j $port" 2>/dev/null || true
         fi
@@ -300,6 +326,7 @@ status() {
         OUTPUT=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
         INPUT=$(jack_lsp 2>/dev/null | grep -E '^system:capture' || true)
         BT=$(jack_lsp 2>/dev/null | grep -E '^bluealsa:' || true)
+        GAMING=$(jack_lsp 2>/dev/null | grep -E '^gaming_in:' || true)
         
         if [ -n "$OUTPUT" ]; then
             echo "Active persistent OUTPUT bridge ports:"
@@ -320,6 +347,13 @@ status() {
             echo "$BT" | sed 's/^/  /'
         else
             echo "No Bluetooth ports (spawned on-demand when user selects Bluetooth)"
+        fi
+        
+        if [ -n "$GAMING" ]; then
+            echo "Active on-demand Gaming ports:"
+            echo "$GAMING" | sed 's/^/  /'
+        else
+            echo "No Gaming ports (spawned on-demand when user selects Gaming)"
         fi
         
         [ -n "$OUTPUT" ] || [ -n "$INPUT" ] && return 0 || return 1

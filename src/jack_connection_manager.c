@@ -87,6 +87,8 @@ static void load_config(void) {
         strcpy(target_sink_prefix, "hdmi_out:playback_");
     } else if (strcmp(preferred_output, "bluetooth") == 0) {
         strcpy(target_sink_prefix, "bluealsa:playback_");
+    } else if (strcmp(preferred_output, "gaming") == 0) {
+        strcpy(target_sink_prefix, "gaming_in:playback_");
     } else {
         strcpy(target_sink_prefix, "system:playback_");
     }
@@ -97,7 +99,8 @@ static int is_sink_port(const char *port_name) {
     return (strstr(port_name, "system:playback_") != NULL ||
             strstr(port_name, "usb_out:playback_") != NULL ||
             strstr(port_name, "hdmi_out:playback_") != NULL ||
-            strstr(port_name, "bluealsa:playback_") != NULL);
+            strstr(port_name, "bluealsa:playback_") != NULL ||
+            strstr(port_name, "gaming_in:playback_") != NULL);
 }
 
 /* Check if port is a capture port */

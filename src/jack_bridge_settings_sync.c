@@ -130,13 +130,15 @@ GHashTable *parse_config_file(const char *path) {
 void init_config_cache(void) {
     GMutex *mutex = get_config_cache_mutex();
     g_mutex_lock(mutex);
-    
+
     if (config_cache) {
         g_hash_table_destroy(config_cache);
     }
-    
+
     config_cache = parse_config_file(JACKD_RT_CONFIG);
     g_mutex_unlock(mutex);
+    g_print("jack-bridge-dbus: Configuration cache initialized with %d entries\n",
+            config_cache ? g_hash_table_size(config_cache) : 0);
 }
 
 /*
