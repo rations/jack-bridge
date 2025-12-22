@@ -104,7 +104,7 @@ fi
 echo "ALSA->JACK bridge uses distro's 50-jack.conf (system:playback)"
 echo "Device switching handled by jack-connection-manager (JACK graph routing)"
 
-# Install init script
+# Install init scripts
 mkdir -p "$INIT_DIR"
 install -m 0755 contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
 echo "Installed init script to ${INIT_DIR}/jackd-rt"
@@ -338,15 +338,25 @@ mkdir -p "$(dirname "$LIMITS_DST")"
 install -m 0644 contrib/etc/security/limits.d/audio.conf "$LIMITS_DST" || true
 echo "Installed (replaced) realtime limits template to $LIMITS_DST"
 
-# Register init script with update-rc.d if available
-# Use priority 02 for start, 98 for stop so jackd stops LAST (after bridge ports)
+# Register init scripts with update-rc.d if available
 if command -v update-rc.d >/dev/null 2>&1; then
-    echo "Registering jackd-rt init script with update-rc.d..."
+    echo "Registering jack-bridge init scripts with update-rc.d..."
+
+    # jack-bridge-loopback: ensure snd-aloop Loopback card is available *before* JACK and ports.
+    if [ -f "${INIT_DIR}/jack-bridge-loopback" ]; then
+        update-rc.d -f jack-bridge-loopback remove >/dev/null 2>&1 || true
+        # Start very early in the boot sequence; stop ordering is not critical.
+        update-rc.d jack-bridge-loopback defaults 01 99 || true
+        echo "  ✓ jack-bridge-loopback: starts at priority 01 (before jackd-rt and jack-bridge-ports)"
+    fi
+
+    # jackd-rt: JACK core daemon; must start after loopback and basic services
     update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
+    # Use priority 02 for start, 98 for stop so jackd stops LAST (after bridge ports)
     update-rc.d jackd-rt defaults 02 98 || true
     echo "  ✓ jackd-rt: starts at priority 02, stops at priority 98 (after dependent services)"
 else
-    echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
+    echo "update-rc.d not available; please register ${INIT_DIR}/jack-bridge-loopback and ${INIT_DIR}/jackd-rt in your init system manually if desired."
 fi
 
  # Disable PulseAudio autospawn system-wide (create /etc/pulse/client.conf.d/01-no-autospawn.conf)
@@ -987,4 +997,3 @@ echo "==========================================================================
 echo ""
 
 exit 0
-

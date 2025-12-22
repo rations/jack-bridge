@@ -137,15 +137,6 @@ jack_rate() {
   echo 48000
 }
 
-# Detect whether an ALSA Loopback card is present (independent of lsmod/modprobe)
-loopback_card_present() {
-  if [ -r /proc/asound/cards ] && \
-     grep -q 'Loopback' /proc/asound/cards 2>/dev/null; then
-    return 0
-  fi
-  return 1
-}
-
 # Parse jack_lsp -c and collect sources connected to any known sink ports
 collect_current_sources() {
   have jack_lsp || return
@@ -430,24 +421,13 @@ ensure_gaming_in() {
   pkill -f "alsa_in -j gaming_in" 2>/dev/null || true
   sleep 0.3
 
-  # Ensure Loopback device is available. Prefer card presence over module name,
-  # so systems with built-in snd-aloop (no lsmod entry) still work.
-  if loopback_card_present; then
-    log "Loopback ALSA card already present; skipping snd-aloop modprobe"
-  else
-    # Fallback to module-based detection/loading when no Loopback card exists.
-    if ! lsmod | grep -q '^snd_aloop'; then
-      if command -v modprobe >/dev/null 2>&1; then
-        if ! modprobe snd-aloop; then
-          log "ERROR: failed to load snd-aloop module"
-          return 1
-        fi
-        sleep 1
-      else
-        log "ERROR: modprobe not available to load snd-aloop and no Loopback card detected"
-        return 1
-      fi
-    fi
+  # Ensure Loopback device is available. Module loading is handled by the
+  # jack-bridge-loopback init script; here we simply check for the card
+  # and emit a clear error if it is missing.
+  if ! [ -r /proc/asound/cards ] || \
+     ! grep -q 'Loopback' /proc/asound/cards 2>/dev/null; then
+    log "Gaming requires ALSA Loopback card (snd-aloop); no Loopback card detected. Ensure jack-bridge-loopback is enabled."
+    return 1
   fi
 
   # Spawn alsa_in to capture from loopback capture port

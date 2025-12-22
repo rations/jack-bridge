@@ -27,7 +27,9 @@ typedef struct {
     GtkWidget *scale;
     GtkWidget *mute_check;
     const char *channel_name;
-    gboolean is_capture;  /* TRUE if this is a capture control, FALSE for playback */
+    gboolean is_capture;   /* TRUE if this is a capture control, FALSE for playback */
+    gboolean has_volume;   /* TRUE if control has a usable volume range */
+    gboolean has_switch;   /* TRUE if control has a mute/enable switch */
 } MixerChannel;
 
 typedef struct {
@@ -583,17 +585,39 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
         
         /* Detect if this is a capture-only control */
         gboolean is_capture = FALSE;
-        if (snd_mixer_selem_has_capture_volume(elem) && !snd_mixer_selem_has_playback_volume(elem)) {
+        gboolean has_play_vol = snd_mixer_selem_has_playback_volume(elem);
+        gboolean has_cap_vol  = snd_mixer_selem_has_capture_volume(elem);
+        gboolean has_play_sw  = snd_mixer_selem_has_playback_switch(elem);
+        gboolean has_cap_sw   = snd_mixer_selem_has_capture_switch(elem);
+        gboolean has_any_vol  = has_play_vol || has_cap_vol;
+        gboolean has_any_sw   = has_play_sw || has_cap_sw;
+
+        if (has_cap_vol && !has_play_vol) {
             is_capture = TRUE;
         }
         
         /* Force loopback mixing control to be treated as capture for Enable checkbox */
         if (strstr(name, "Loopback") != NULL) {
             is_capture = TRUE;
+            /* In alsamixer, Loopback Mixing is a switch-only control; ignore any
+             * reported volume range so we render it as a checkbox without slider.
+             * Also force has_switch=TRUE so the GUI always shows a checkbox even
+             * if the simple mixer API does not report a switch capability. */
+            has_any_vol = FALSE;
+            has_any_sw = TRUE;
+        }
+
+        /* Auto-Mute Mode is conceptually a toggle, not a volume control. Many
+         * drivers expose it as an enum or switch. Treat it as a pseudo-switch
+         * in the GUI: no slider, always show a checkbox using the ALSA name. */
+        if (strstr(name, "Auto-Mute") != NULL || strstr(name, "Auto Mute") != NULL) {
+            has_any_vol = FALSE;
+            has_any_sw = TRUE;
         }
         
-        /* Auto-enable ALL capture switches on startup (generic for any interface) */
-        if (is_capture && snd_mixer_selem_has_capture_switch(elem)) {
+        /* Auto-enable ALL capture switches on startup (generic for any interface),
+         * but never touch Auto-Mute controls (users must toggle those explicitly). */
+        if (is_capture && has_cap_sw && !strstr(name, "Auto-Mute")) {
             int sw = 0;
             snd_mixer_selem_get_capture_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
             if (!sw) {
@@ -603,7 +627,7 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
         }
         
         /* Auto-enable loopback mixing control on startup */
-        if (strstr(name, "Loopback") != NULL && snd_mixer_selem_has_capture_switch(elem)) {
+        if (strstr(name, "Loopback") != NULL && has_cap_sw) {
             snd_mixer_selem_set_capture_switch_all(elem, 1);
             fprintf(stderr, "Auto-enabled loopback mixing for '%s' on card %d\n", name, card_num);
         }
@@ -611,6 +635,8 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
         data->channels[idx].elem = elem;
         data->channels[idx].channel_name = g_strdup(name);  /* Allocate copy since elem names are transient */
         data->channels[idx].is_capture = is_capture;
+        data->channels[idx].has_volume = has_any_vol;
+        data->channels[idx].has_switch = has_any_sw;
         idx++;
     }
     
@@ -707,6 +733,79 @@ static void ensure_loopback_mixing_enabled(void) {
     }
 
     snd_mixer_close(m);
+}
+
+/* Set ALSA Loopback "Loopback Mixing" control to the requested state (0/1).
+ * This is used by the GUI checkbox so users can explicitly enable/disable the
+ * loopback mixing path instead of relying solely on auto-enabling. */
+static void set_loopback_mixing_enabled(gboolean enabled) {
+    int loop_card = get_loopback_card_number();
+    if (loop_card < 0) {
+        fprintf(stderr, "set_loopback_mixing_enabled: no ALSA Loopback card detected; skipping\n");
+        return;
+    }
+
+    gchar *card_str = g_strdup_printf("hw:%d", loop_card);
+    snd_mixer_t *m = NULL;
+    if (snd_mixer_open(&m, 0) < 0) {
+        fprintf(stderr, "set_loopback_mixing_enabled: failed to open mixer for %s\n", card_str);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_attach(m, card_str) < 0) {
+        fprintf(stderr, "set_loopback_mixing_enabled: failed to attach to %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_selem_register(m, NULL, NULL) < 0) {
+        fprintf(stderr, "set_loopback_mixing_enabled: failed to register simple element class for %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_load(m) < 0) {
+        fprintf(stderr, "set_loopback_mixing_enabled: failed to load mixer elements for %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+
+    fprintf(stderr, "set_loopback_mixing_enabled: scanning mixer elements on %s (enabled=%d)\n",
+            card_str, enabled ? 1 : 0);
+    g_free(card_str);
+
+    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
+        if (snd_mixer_elem_get_type(elem) != SND_MIXER_ELEM_SIMPLE)
+            continue;
+
+        const char *name = snd_mixer_selem_get_name(elem);
+        if (!name || strstr(name, "Loopback") == NULL)
+            continue;
+
+        int val = enabled ? 1 : 0;
+
+        if (snd_mixer_selem_has_capture_switch(elem)) {
+            snd_mixer_selem_set_capture_switch_all(elem, val);
+            fprintf(stderr, "set_loopback_mixing_enabled: set capture switch for '%s' on Loopback card %d to %d\n",
+                    name, loop_card, val);
+        } else if (snd_mixer_selem_has_playback_switch(elem)) {
+            snd_mixer_selem_set_playback_switch_all(elem, val);
+            fprintf(stderr, "set_loopback_mixing_enabled: set playback switch for '%s' on Loopback card %d to %d\n",
+                    name, loop_card, val);
+        }
+    }
+
+    snd_mixer_close(m);
+}
+
+/* GTK callback for the Loopback Mixing checkbox. Uses the helper above to
+ * drive the Loopback card mixer state instead of relying on generic per-
+ * element mute/enable logic. */
+static void on_loopback_enable_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+    gboolean active = gtk_toggle_button_get_active(btn);
+    set_loopback_mixing_enabled(active);
 }
 
 static void init_alsa_eq(EQData *data) {
@@ -810,7 +909,7 @@ static void cleanup_alsa(MixerData *mixer_data, EQData *eq_data) {
     }
 }
 
-/* Dynamic mixer rebuild: clear and repopulate mixer_box with controls from specified card */
+    /* Dynamic mixer rebuild: clear and repopulate mixer_box with controls from specified card */
 static void rebuild_mixer_for_card(int card_num) {
     if (!g_mixer_data || !g_mixer_data->mixer_box) return;
     
@@ -848,73 +947,87 @@ static void rebuild_mixer_for_card(int card_num) {
         return;
     }
     
-    /* Create slider for each control found (max 8 per row, auto-wrap) */
+    /* Create controls for each mixer element (max 8 per row, auto-wrap). For
+     * pure switch controls (no volume range, e.g. Loopback Mixing), we render
+     * only a checkbox, matching alsamixer semantics. */
     for (int i = 0; i < g_mixer_data->num_channels; i++) {
+        MixerChannel *ch = &g_mixer_data->channels[i];
         int col = i % 8;  // Max 8 columns per row
         int row = i / 8;  // Automatic row wrapping
         
         GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
         gtk_grid_attach(GTK_GRID(g_mixer_data->mixer_box), channel_box, col, row, 1, 1);
 
-        GtkWidget *label = gtk_label_new(g_mixer_data->channels[i].channel_name);
+        GtkWidget *label = gtk_label_new(ch->channel_name);
         gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
         gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
-
-        g_mixer_data->channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
-        gtk_range_set_inverted(GTK_RANGE(g_mixer_data->channels[i].scale), TRUE);
-        gtk_scale_set_draw_value(GTK_SCALE(g_mixer_data->channels[i].scale), TRUE);
-        gtk_scale_set_value_pos(GTK_SCALE(g_mixer_data->channels[i].scale), GTK_POS_BOTTOM);
-        gtk_widget_set_size_request(g_mixer_data->channels[i].scale, -1, 150);
-        gtk_box_pack_start(GTK_BOX(channel_box), g_mixer_data->channels[i].scale, TRUE, TRUE, 0);
-        g_signal_connect(g_mixer_data->channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &g_mixer_data->channels[i]);
-
-        long min, max, value;
-        if (g_mixer_data->channels[i].is_capture) {
-            snd_mixer_selem_get_capture_volume_range(g_mixer_data->channels[i].elem, &min, &max);
-            snd_mixer_selem_get_capture_volume(g_mixer_data->channels[i].elem, 0, &value);
-            
-            /* Ensure loopback mixing slider is set to 1 if enabled */
-            const char *channel_name = g_mixer_data->channels[i].channel_name;
-            if (channel_name && strstr(channel_name, "Loopback") != NULL) {
-                int sw = 0;
-                snd_mixer_selem_get_capture_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                if (sw) {
-                    value = max; /* Set to maximum value if enabled */
-                }
+        /* Optional volume slider (only if control has a real volume range) */
+        ch->scale = NULL;
+        if (ch->has_volume) {
+            long min = 0, max = 0, value = 0;
+            if (ch->is_capture) {
+                snd_mixer_selem_get_capture_volume_range(ch->elem, &min, &max);
+                snd_mixer_selem_get_capture_volume(ch->elem, 0, &value);
+            } else {
+                snd_mixer_selem_get_playback_volume_range(ch->elem, &min, &max);
+                snd_mixer_selem_get_playback_volume(ch->elem, 0, &value);
             }
-        } else {
-            snd_mixer_selem_get_playback_volume_range(g_mixer_data->channels[i].elem, &min, &max);
-            snd_mixer_selem_get_playback_volume(g_mixer_data->channels[i].elem, 0, &value);
+
+            if (max > min) {
+                ch->scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
+                gtk_range_set_inverted(GTK_RANGE(ch->scale), TRUE);
+                gtk_scale_set_draw_value(GTK_SCALE(ch->scale), TRUE);
+                gtk_scale_set_value_pos(GTK_SCALE(ch->scale), GTK_POS_BOTTOM);
+                gtk_widget_set_size_request(ch->scale, -1, 150);
+                gtk_box_pack_start(GTK_BOX(channel_box), ch->scale, TRUE, TRUE, 0);
+                g_signal_connect(ch->scale, "value-changed", G_CALLBACK(slider_changed), ch);
+
+                double norm = (double)(value - min) / (double)(max - min);
+                if (norm < 0.0) norm = 0.0;
+                if (norm > 1.0) norm = 1.0;
+                gtk_range_set_value(GTK_RANGE(ch->scale), norm);
+            }
         }
-        gtk_range_set_value(GTK_RANGE(g_mixer_data->channels[i].scale), (double)(value - min) / (max - min));
 
         /* Add Mute (playback) or Enable (capture) checkbox if control supports it */
-        g_mixer_data->channels[i].mute_check = NULL;
-        if (g_mixer_data->channels[i].is_capture) {
-            /* Capture controls: expose Enable checkbox (checked=capture enabled) */
-            if (snd_mixer_selem_has_capture_switch(g_mixer_data->channels[i].elem)) {
-                int sw = 0;
-                snd_mixer_selem_get_capture_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                GtkWidget *enable = gtk_check_button_new_with_label("Enable");
+        ch->mute_check = NULL;
+        if (ch->has_switch) {
+            if (ch->is_capture) {
+                gboolean is_loopback = (ch->channel_name && strstr(ch->channel_name, "Loopback") != NULL);
+                gboolean is_automute = (ch->channel_name &&
+                    (strstr(ch->channel_name, "Auto-Mute") != NULL || strstr(ch->channel_name, "Auto Mute") != NULL));
+                /* Capture controls: Enable-style checkbox; Loopback and Auto-Mute use full ALSA
+                 * names so users can see which control they are toggling. */
+                const char *lbl = (is_loopback || is_automute) ? ch->channel_name : "Enable";
+                GtkWidget *enable = gtk_check_button_new_with_label(lbl);
                 gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
                 gtk_widget_set_margin_top(enable, 4);
+
+                int sw = 1;
+                if (snd_mixer_selem_has_capture_switch(ch->elem)) {
+                    snd_mixer_selem_get_capture_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                }
                 gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
                 gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
-                g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), &g_mixer_data->channels[i]);
-                g_mixer_data->channels[i].mute_check = enable;
-            }
-        } else {
-            /* Playback controls: expose Mute checkbox (checked=muted) */
-            if (snd_mixer_selem_has_playback_switch(g_mixer_data->channels[i].elem)) {
-                int sw = 1;
-                snd_mixer_selem_get_playback_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+
+                if (is_loopback) {
+                    /* Use Loopback-specific helper instead of generic mute handler. */
+                    g_signal_connect(enable, "toggled", G_CALLBACK(on_loopback_enable_toggled), NULL);
+                } else {
+                    g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), ch);
+                }
+                ch->mute_check = enable;
+            } else {
+                /* Playback controls: expose Mute checkbox (checked=muted) */
                 GtkWidget *mute = gtk_check_button_new_with_label("Mute");
                 gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
                 gtk_widget_set_margin_top(mute, 4);
+                int sw = 1;
+                snd_mixer_selem_get_playback_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
                 gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
                 gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
-                g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &g_mixer_data->channels[i]);
-                g_mixer_data->channels[i].mute_check = mute;
+                g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), ch);
+                ch->mute_check = mute;
             }
         }
     }
@@ -1452,7 +1565,7 @@ int main(int argc, char *argv[]) {
     /* Store mixer_box reference for dynamic rebuild */
     mixer_data.mixer_box = mixer_box;
 
-    // Add sliders for each mixer channel (if none found, show an informative message)
+    // Add controls for each mixer channel (if none found, show an informative message)
     if (mixer_data.num_channels == 0) {
         GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
         gtk_widget_set_hexpand(no_mixer_box, TRUE);
@@ -1471,64 +1584,81 @@ int main(int argc, char *argv[]) {
         gtk_box_pack_start(GTK_BOX(no_mixer_box), no_mixer_label, TRUE, TRUE, 8);
     } else {
         for (int i = 0; i < mixer_data.num_channels; i++) {
+            MixerChannel *ch = &mixer_data.channels[i];
             int col = i % 8;  // Max 8 columns per row
             int row = i / 8;  // Automatic row wrapping
-            
+
             GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
             gtk_grid_attach(GTK_GRID(mixer_box), channel_box, col, row, 1, 1);
 
-            GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
+            GtkWidget *label = gtk_label_new(ch->channel_name);
             gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
             gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
 
-            mixer_data.channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
-            gtk_range_set_inverted(GTK_RANGE(mixer_data.channels[i].scale), TRUE);
-            gtk_scale_set_draw_value(GTK_SCALE(mixer_data.channels[i].scale), TRUE);
-            gtk_scale_set_value_pos(GTK_SCALE(mixer_data.channels[i].scale), GTK_POS_BOTTOM);
-            gtk_widget_set_size_request(mixer_data.channels[i].scale, -1, 150);
-            gtk_box_pack_start(GTK_BOX(channel_box), mixer_data.channels[i].scale, TRUE, TRUE, 0);
-            g_signal_connect(mixer_data.channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &mixer_data.channels[i]);
+            /* Optional volume slider (only if control has a real volume range) */
+            ch->scale = NULL;
+            if (ch->has_volume) {
+                long min = 0, max = 0, value = 0;
+                if (ch->is_capture) {
+                    snd_mixer_selem_get_capture_volume_range(ch->elem, &min, &max);
+                    snd_mixer_selem_get_capture_volume(ch->elem, 0, &value);
+                } else {
+                    snd_mixer_selem_get_playback_volume_range(ch->elem, &min, &max);
+                    snd_mixer_selem_get_playback_volume(ch->elem, 0, &value);
+                }
 
-            long min, max, value;
-            if (mixer_data.channels[i].is_capture) {
-                snd_mixer_selem_get_capture_volume_range(mixer_data.channels[i].elem, &min, &max);
-                snd_mixer_selem_get_capture_volume(mixer_data.channels[i].elem, 0, &value);
-            } else {
-                snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
-                snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
+                if (max > min) {
+                    ch->scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
+                    gtk_range_set_inverted(GTK_RANGE(ch->scale), TRUE);
+                    gtk_scale_set_draw_value(GTK_SCALE(ch->scale), TRUE);
+                    gtk_scale_set_value_pos(GTK_SCALE(ch->scale), GTK_POS_BOTTOM);
+                    gtk_widget_set_size_request(ch->scale, -1, 150);
+                    gtk_box_pack_start(GTK_BOX(channel_box), ch->scale, TRUE, TRUE, 0);
+                    g_signal_connect(ch->scale, "value-changed", G_CALLBACK(slider_changed), ch);
+
+                    double norm = (double)(value - min) / (double)(max - min);
+                    if (norm < 0.0) norm = 0.0;
+                    if (norm > 1.0) norm = 1.0;
+                    gtk_range_set_value(GTK_RANGE(ch->scale), norm);
+                }
             }
-            gtk_range_set_value(GTK_RANGE(mixer_data.channels[i].scale), (double)(value - min) / (max - min));
 
             /* Optional per-channel Mute (playback) or Enable (capture) checkbox */
-            mixer_data.channels[i].mute_check = NULL;
-            if (mixer_data.channels[i].is_capture) {
-                /* Capture controls: expose Enable checkbox (checked=capture enabled) */
-                if (snd_mixer_selem_has_capture_switch(mixer_data.channels[i].elem)) {
-                    int sw = 0;
-                    snd_mixer_selem_get_capture_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                    GtkWidget *enable = gtk_check_button_new_with_label("Enable");
+            ch->mute_check = NULL;
+            if (ch->has_switch) {
+                if (ch->is_capture) {
+                    gboolean is_loopback = (ch->channel_name && strstr(ch->channel_name, "Loopback") != NULL);
+                    /* Capture controls: Enable-style; Loopback uses full ALSA name and dedicated helper. */
+                    const char *lbl = is_loopback ? ch->channel_name : "Enable";
+                    GtkWidget *enable = gtk_check_button_new_with_label(lbl);
                     gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
                     gtk_widget_set_margin_top(enable, 4);
+                    int sw = 1;
+                    if (snd_mixer_selem_has_capture_switch(ch->elem)) {
+                        snd_mixer_selem_get_capture_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                    }
                     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
                     gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
-                    g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
-                    mixer_data.channels[i].mute_check = enable;
-                }
-            } else {
-                /* Playback controls: expose Mute checkbox (checked=muted) */
-                if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
-                    int sw = 1;
-                    snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+                    if (is_loopback) {
+                        g_signal_connect(enable, "toggled", G_CALLBACK(on_loopback_enable_toggled), NULL);
+                    } else {
+                        g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), ch);
+                    }
+                    ch->mute_check = enable;
+                } else {
+                    /* Playback controls: expose Mute checkbox (checked=muted) */
                     GtkWidget *mute = gtk_check_button_new_with_label("Mute");
                     gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
                     gtk_widget_set_margin_top(mute, 4);
+                    int sw = 1;
+                    snd_mixer_selem_get_playback_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
                     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
                     gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
-                    g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
-                    mixer_data.channels[i].mute_check = mute;
+                    g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), ch);
+                    ch->mute_check = mute;
                 }
             }
-            /* Removed padding label so the mute button sits directly under the slider */
+            /* Removed padding label so the mute/enable button sits directly under the slider or label */
         }
     }
 
