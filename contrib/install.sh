@@ -73,6 +73,22 @@ mkdir -p "$(dirname "$ASOUND_DST")"
 install -m 0644 contrib/etc/asound.conf "$ASOUND_DST"
 echo "Installed (replaced) $ASOUND_DST"
 
+# Ensure snd-aloop is loaded at boot using the distro-native mechanism (/etc/modules).
+# This avoids a separate SysV init script for the Loopback card and matches
+# Devuan-style recommendations for persistent kernel modules.
+MODULES_FILE="/etc/modules"
+if [ -e "$MODULES_FILE" ] || touch "$MODULES_FILE" 2>/dev/null; then
+    if ! grep -Eq '^[[:space:]]*snd-aloop([[:space:]]|$)' "$MODULES_FILE"; then
+        printf '\n# Added by jack-bridge: ALSA Loopback for Gaming output (snd-aloop)\n' >> "$MODULES_FILE" 2>/dev/null || true
+        printf 'snd-aloop\n' >> "$MODULES_FILE" 2>/dev/null || true
+        echo "Added snd-aloop to $MODULES_FILE for Gaming Loopback card"
+    else
+        echo "snd-aloop already present in $MODULES_FILE"
+    fi
+else
+    echo "WARNING: Could not write to $MODULES_FILE; please add 'snd-aloop' manually for Gaming Loopback support."
+fi
+
 # Install 50-jack.conf for ALSA to JACK bridging
 echo "Installing 50-jack.conf for ALSA to JACK bridging..."
 
@@ -342,21 +358,13 @@ echo "Installed (replaced) realtime limits template to $LIMITS_DST"
 if command -v update-rc.d >/dev/null 2>&1; then
     echo "Registering jack-bridge init scripts with update-rc.d..."
 
-    # jack-bridge-loopback: ensure snd-aloop Loopback card is available *before* JACK and ports.
-    if [ -f "${INIT_DIR}/jack-bridge-loopback" ]; then
-        update-rc.d -f jack-bridge-loopback remove >/dev/null 2>&1 || true
-        # Start very early in the boot sequence; stop ordering is not critical.
-        update-rc.d jack-bridge-loopback defaults 01 99 || true
-        echo "  ✓ jack-bridge-loopback: starts at priority 01 (before jackd-rt and jack-bridge-ports)"
-    fi
-
-    # jackd-rt: JACK core daemon; must start after loopback and basic services
+    # jackd-rt: JACK core daemon; start after basic services
     update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
     # Use priority 02 for start, 98 for stop so jackd stops LAST (after bridge ports)
     update-rc.d jackd-rt defaults 02 98 || true
     echo "  ✓ jackd-rt: starts at priority 02, stops at priority 98 (after dependent services)"
 else
-    echo "update-rc.d not available; please register ${INIT_DIR}/jack-bridge-loopback and ${INIT_DIR}/jackd-rt in your init system manually if desired."
+    echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
 fi
 
  # Disable PulseAudio autospawn system-wide (create /etc/pulse/client.conf.d/01-no-autospawn.conf)

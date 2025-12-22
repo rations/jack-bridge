@@ -500,6 +500,119 @@ static void on_mute_toggled(GtkToggleButton *btn, gpointer user_data) {
     }
 }
 
+/* Helper: best-effort Auto-Mute control via ALSA ctl API on the primary
+ * internal card (hw:0). Many HDA drivers expose "Auto-Mute" or
+ * "Auto-Mute Mode" as an enum or boolean control. We search the
+ * control list for a matching name and, if found, toggle it based on
+ * the checkbox state. This is intentionally conservative: if we cannot
+ * locate or understand the control, we log and leave hardware state
+ * unchanged so we never break audio on unknown hardware. */
+static void set_automute_enabled(gboolean enabled) {
+    snd_ctl_t *ctl = NULL;
+    int err;
+
+    if ((err = snd_ctl_open(&ctl, "hw:0", 0)) < 0) {
+        fprintf(stderr, "set_automute_enabled: Failed to open ALSA ctl hw:0: %s\n", snd_strerror(err));
+        return;
+    }
+
+    snd_ctl_elem_list_t *list;
+    snd_ctl_elem_list_alloca(&list);
+    if ((err = snd_ctl_elem_list(ctl, list)) < 0) {
+        fprintf(stderr, "set_automute_enabled: Failed to get control list: %s\n", snd_strerror(err));
+        snd_ctl_close(ctl);
+        return;
+    }
+
+    int num_controls = snd_ctl_elem_list_get_count(list);
+    if (num_controls <= 0) {
+        fprintf(stderr, "set_automute_enabled: No controls on hw:0\n");
+        snd_ctl_close(ctl);
+        return;
+    }
+
+    if ((err = snd_ctl_elem_list_alloc_space(list, num_controls)) < 0) {
+        fprintf(stderr, "set_automute_enabled: Failed to alloc list space: %s\n", snd_strerror(err));
+        snd_ctl_close(ctl);
+        return;
+    }
+    if ((err = snd_ctl_elem_list(ctl, list)) < 0) {
+        fprintf(stderr, "set_automute_enabled: Failed to list controls: %s\n", snd_strerror(err));
+        snd_ctl_elem_list_free_space(list);
+        snd_ctl_close(ctl);
+        return;
+    }
+
+    int used = snd_ctl_elem_list_get_used(list);
+    int found = 0;
+
+    for (int i = 0; i < used; i++) {
+        snd_ctl_elem_id_t *id;
+        snd_ctl_elem_id_alloca(&id);
+        snd_ctl_elem_list_get_id(list, i, id);
+
+        const char *name = snd_ctl_elem_id_get_name(id);
+        if (!name) continue;
+
+        if (strstr(name, "Auto-Mute") == NULL && strstr(name, "Auto Mute") == NULL)
+            continue;
+
+        snd_ctl_elem_info_t *info;
+        snd_ctl_elem_info_alloca(&info);
+        snd_ctl_elem_info_set_id(info, id);
+        if ((err = snd_ctl_elem_info(ctl, info)) < 0) {
+            fprintf(stderr, "set_automute_enabled: Failed to get info for '%s': %s\n", name, snd_strerror(err));
+            continue;
+        }
+
+        snd_ctl_elem_type_t type = snd_ctl_elem_info_get_type(info);
+        snd_ctl_elem_value_t *val;
+        snd_ctl_elem_value_alloca(&val);
+        snd_ctl_elem_value_set_id(val, id);
+
+        if (type == SND_CTL_ELEM_TYPE_BOOLEAN) {
+            snd_ctl_elem_value_set_boolean(val, 0, enabled ? 1 : 0);
+            if ((err = snd_ctl_elem_write(ctl, val)) < 0) {
+                fprintf(stderr, "set_automute_enabled: Failed to set boolean '%s': %s\n", name, snd_strerror(err));
+            } else {
+                fprintf(stderr, "set_automute_enabled: Set boolean '%s' to %d\n", name, enabled ? 1 : 0);
+                found = 1;
+            }
+        } else if (type == SND_CTL_ELEM_TYPE_ENUMERATED) {
+            unsigned int items = snd_ctl_elem_info_get_items(info);
+            /* Heuristic: assume index 0 = Disabled, index 1 = Enabled when toggling. */
+            unsigned int idx = enabled ? 1 : 0;
+            if (idx >= items) idx = items - 1;
+            snd_ctl_elem_value_set_enumerated(val, 0, idx);
+            if ((err = snd_ctl_elem_write(ctl, val)) < 0) {
+                fprintf(stderr, "set_automute_enabled: Failed to set enum '%s' to %u: %s\n", name, idx, snd_strerror(err));
+            } else {
+                fprintf(stderr, "set_automute_enabled: Set enum '%s' to index %u (enabled=%d)\n", name, idx, enabled ? 1 : 0);
+                found = 1;
+            }
+        } else {
+            fprintf(stderr, "set_automute_enabled: Control '%s' has unsupported type %d\n", name, (int)type);
+        }
+
+        if (found)
+            break;
+    }
+
+    if (!found) {
+        fprintf(stderr, "set_automute_enabled: No matching Auto-Mute control found on hw:0\n");
+    }
+
+    snd_ctl_elem_list_free_space(list);
+    snd_ctl_close(ctl);
+}
+
+/* GTK callback for Auto-Mute checkbox – delegates to ALSA ctl helper above. */
+static void on_auto_mute_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+    gboolean active = gtk_toggle_button_get_active(btn);
+    set_automute_enabled(active);
+}
+
 static void eq_slider_changed(GtkRange *range, EQBand *band) {
     gdouble value = gtk_range_get_value(range);
     long alsa_value = (long)(value * 100.0); // Map 0-1 to 0-100
@@ -1013,6 +1126,9 @@ static void rebuild_mixer_for_card(int card_num) {
                 if (is_loopback) {
                     /* Use Loopback-specific helper instead of generic mute handler. */
                     g_signal_connect(enable, "toggled", G_CALLBACK(on_loopback_enable_toggled), NULL);
+                } else if (is_automute) {
+                    /* Auto-Mute is driven via ALSA ctl, not simple mixer switches. */
+                    g_signal_connect(enable, "toggled", G_CALLBACK(on_auto_mute_toggled), NULL);
                 } else {
                     g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), ch);
                 }
@@ -1628,8 +1744,11 @@ int main(int argc, char *argv[]) {
             if (ch->has_switch) {
                 if (ch->is_capture) {
                     gboolean is_loopback = (ch->channel_name && strstr(ch->channel_name, "Loopback") != NULL);
-                    /* Capture controls: Enable-style; Loopback uses full ALSA name and dedicated helper. */
-                    const char *lbl = is_loopback ? ch->channel_name : "Enable";
+                    gboolean is_automute = (ch->channel_name &&
+                        (strstr(ch->channel_name, "Auto-Mute") != NULL || strstr(ch->channel_name, "Auto Mute") != NULL));
+                    /* Capture controls: Enable-style; Loopback and Auto-Mute use full ALSA names
+                     * and dedicated helpers. */
+                    const char *lbl = (is_loopback || is_automute) ? ch->channel_name : "Enable";
                     GtkWidget *enable = gtk_check_button_new_with_label(lbl);
                     gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
                     gtk_widget_set_margin_top(enable, 4);
@@ -1641,6 +1760,8 @@ int main(int argc, char *argv[]) {
                     gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
                     if (is_loopback) {
                         g_signal_connect(enable, "toggled", G_CALLBACK(on_loopback_enable_toggled), NULL);
+                    } else if (is_automute) {
+                        g_signal_connect(enable, "toggled", G_CALLBACK(on_auto_mute_toggled), NULL);
                     } else {
                         g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), ch);
                     }

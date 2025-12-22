@@ -73,6 +73,35 @@ start() {
         waited=$((waited+1))
     done
 
+    # Best-effort: ensure ALSA Loopback (snd-aloop) is available for Gaming.
+    # This avoids introducing a separate boot-time init ordering dependency
+    # while still providing the Loopback card before JACK and bridge ports.
+    if [ -r /proc/asound/cards ] && grep -q 'Loopback' /proc/asound/cards 2>/dev/null; then
+        echo "jackd-rt: ALSA Loopback card already present"
+    else
+        # Try common modprobe paths explicitly; do not fail start if missing.
+        if command -v modprobe >/dev/null 2>&1; then
+            MODPROBE_CMD="modprobe"
+        elif [ -x /sbin/modprobe ]; then
+            MODPROBE_CMD="/sbin/modprobe"
+        elif [ -x /usr/sbin/modprobe ]; then
+            MODPROBE_CMD="/usr/sbin/modprobe"
+        else
+            MODPROBE_CMD=""
+        fi
+
+        if [ -n "$MODPROBE_CMD" ]; then
+            if "$MODPROBE_CMD" snd-aloop 2>/dev/null; then
+                echo "jackd-rt: Loaded snd-aloop via $MODPROBE_CMD"
+                sleep 1
+            else
+                log_warning_msg "jackd-rt: $MODPROBE_CMD snd-aloop failed; Gaming Loopback card may be unavailable"
+            fi
+        else
+            log_warning_msg "jackd-rt: modprobe not available; cannot auto-load snd-aloop for Gaming"
+        fi
+    fi
+
     # Inline: detect user to run under (no eval, fixed /bin/sh for helpers)
     USERNAME=""
     if [ -n "$JACKD_USER" ]; then
