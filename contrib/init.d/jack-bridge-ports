@@ -83,8 +83,25 @@ detect_card_device() {
     return 1
 }
 
-# Ensure ALSA loopback module is loaded
+# Detect whether an ALSA Loopback card is present (independent of lsmod/modprobe)
+loopback_card_present() {
+    if [ -r /proc/asound/cards ] && \
+       grep -q 'Loopback' /proc/asound/cards 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# Ensure ALSA loopback module is loaded or already present
 ensure_loopback() {
+    # Prefer checking for an actual Loopback card so systems with
+    # built-in snd-aloop (no lsmod entry) still work.
+    if loopback_card_present; then
+        echo "Loopback ALSA card already present; skipping snd-aloop modprobe" >> "$LOGFILE" 2>&1
+        return 0
+    fi
+
+    # Fallback to module-based detection/loading when no Loopback card exists.
     if ! lsmod | grep -q '^snd_aloop'; then
         if command -v modprobe >/dev/null 2>&1; then
             if ! modprobe snd-aloop; then
@@ -93,7 +110,7 @@ ensure_loopback() {
             fi
             sleep 1
         else
-            echo "ERROR: modprobe not available to load snd-aloop" >> "$LOGFILE" 2>&1
+            echo "ERROR: modprobe not available to load snd-aloop and no Loopback card detected" >> "$LOGFILE" 2>&1
             return 1
         fi
     fi

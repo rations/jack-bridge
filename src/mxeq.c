@@ -16,6 +16,10 @@ static void create_devices_panel(GtkWidget *main_box);
 /* Forward declarations needed by earlier callers */
 static int write_string_atomic(const char *path, const char *content);
 static gboolean bluealsa_ports_exist(void);
+static int get_usb_card_number(void);
+static int get_loopback_card_number(void);
+static void rebuild_mixer_for_card(int card_num);
+static void ensure_loopback_mixing_enabled(void);
 
 typedef struct {
     snd_mixer_t *mixer;
@@ -612,6 +616,97 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
     
     data->num_channels = idx;
     fprintf(stderr, "init_alsa_mixer: found %d mixer controls on card %d\n", idx, card_num);
+}
+
+/* Detect ALSA Loopback card number (returns -1 if no Loopback found) */
+static int get_loopback_card_number(void) {
+    FILE *f = fopen("/proc/asound/cards", "r");
+    if (!f) return -1;
+    char line[512];
+    int card = -1;
+    while (fgets(line, sizeof(line), f)) {
+        /* Look for "card N: ... Loopback" */
+        if (strstr(line, "Loopback")) {
+            if (sscanf(line, " %d", &card) == 1) {
+                fclose(f);
+                return card;
+            }
+        }
+    }
+    fclose(f);
+    return -1;
+}
+
+/* Ensure ALSA Loopback "Loopback Mixing" control is enabled on the Loopback card.
+ * This mirrors what alsamixer does when toggling the Loopback Mixing switch, and
+ * is used when Gaming mode is selected so Proton/Wine audio can flow through the
+ * snd-aloop bridge reliably even if the default mixer state is off. */
+static void ensure_loopback_mixing_enabled(void) {
+    int loop_card = get_loopback_card_number();
+    if (loop_card < 0) {
+        fprintf(stderr, "ensure_loopback_mixing_enabled: no ALSA Loopback card detected; skipping\n");
+        return;
+    }
+
+    gchar *card_str = g_strdup_printf("hw:%d", loop_card);
+    snd_mixer_t *m = NULL;
+    if (snd_mixer_open(&m, 0) < 0) {
+        fprintf(stderr, "ensure_loopback_mixing_enabled: failed to open mixer for %s\n", card_str);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_attach(m, card_str) < 0) {
+        fprintf(stderr, "ensure_loopback_mixing_enabled: failed to attach to %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_selem_register(m, NULL, NULL) < 0) {
+        fprintf(stderr, "ensure_loopback_mixing_enabled: failed to register simple element class for %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+    if (snd_mixer_load(m) < 0) {
+        fprintf(stderr, "ensure_loopback_mixing_enabled: failed to load mixer elements for %s\n", card_str);
+        snd_mixer_close(m);
+        g_free(card_str);
+        return;
+    }
+
+    fprintf(stderr, "ensure_loopback_mixing_enabled: scanning mixer elements on %s\n", card_str);
+    g_free(card_str);
+
+    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
+        if (snd_mixer_elem_get_type(elem) != SND_MIXER_ELEM_SIMPLE)
+            continue;
+
+        const char *name = snd_mixer_selem_get_name(elem);
+        if (!name || strstr(name, "Loopback") == NULL)
+            continue;
+
+        /* Try capture switch first (typical for Loopback Mixing) */
+        if (snd_mixer_selem_has_capture_switch(elem)) {
+            if (snd_mixer_selem_set_capture_switch_all(elem, 1) == 0) {
+                fprintf(stderr, "ensure_loopback_mixing_enabled: enabled capture switch for '%s' on Loopback card %d\n",
+                        name, loop_card);
+            } else {
+                fprintf(stderr, "ensure_loopback_mixing_enabled: FAILED to enable capture switch for '%s' on Loopback card %d\n",
+                        name, loop_card);
+            }
+        } else if (snd_mixer_selem_has_playback_switch(elem)) {
+            /* Fallback: some implementations might expose it as playback */
+            if (snd_mixer_selem_set_playback_switch_all(elem, 1) == 0) {
+                fprintf(stderr, "ensure_loopback_mixing_enabled: enabled playback switch for '%s' on Loopback card %d\n",
+                        name, loop_card);
+            } else {
+                fprintf(stderr, "ensure_loopback_mixing_enabled: FAILED to enable playback switch for '%s' on Loopback card %d\n",
+                        name, loop_card);
+            }
+        }
+    }
+
+    snd_mixer_close(m);
 }
 
 static void init_alsa_eq(EQData *data) {
@@ -2077,8 +2172,20 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         return;
     } else if (g_strcmp0(label, "Gaming") == 0) {
         ok = route_to_target_async("gaming");
-        /* Gaming uses internal card for capture, so show internal mixer */
-        rebuild_mixer_for_card(0);
+        if (ok) {
+            /* Ensure ALSA Loopback "Loopback Mixing" control is enabled so
+             * Proton/Wine audio can flow through the snd-aloop bridge. */
+            ensure_loopback_mixing_enabled();
+
+            /* Show Loopback card mixer if available; fall back to internal */
+            int loop_card = get_loopback_card_number();
+            if (loop_card >= 0) {
+                rebuild_mixer_for_card(loop_card);
+            } else {
+                fprintf(stderr, "on_device_radio_toggled: Gaming selected but no Loopback card detected; showing card 0 mixer\n");
+                rebuild_mixer_for_card(0);
+            }
+        }
     } else {
         return;
     }

@@ -45,7 +45,7 @@ fi
 
 if [ "x$AUTOROUTE" = "x1" ]; then
     case "$PREFERRED_OUTPUT" in
-      internal|usb|hdmi|bluetooth)
+      internal|usb|hdmi|bluetooth|gaming)
         if [ -x "$ROUTE_HELPER" ]; then
             "$ROUTE_HELPER" "$PREFERRED_OUTPUT" >/dev/null 2>&1 || true
         fi
