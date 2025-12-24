@@ -26,13 +26,12 @@
 
 Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 - **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB/HDMI/BLUETOOTH)
-- **10-band equalizer** with real-time adjustments and preset management
 - **Built-in recorder** - Record in mono/stereo at 44.1kHz or 48kHz, saves to ~/Music
 - **Bluetooth panel** - Scan, pair, trust, connect devices with visual feedback
 - **Device switching** - Change output between Internal/USB/HDMI/Bluetooth without restarting JACK
 
 ### 🔊 Audio Routing
-- **ALSA → EQ → JACK pipeline** - All ALSA apps benefit from EQ without affecting native JACK clients
+- **ALSA → JACK pipeline** - All ALSA apps route through JACK, without systemd, PulseAudio, or PipeWire
 - **Multi-device support** - Seamlessly switch between internal, USB, HDMI, and Bluetooth outputs
 - **Persistent bridge ports** - USB/HDMI ports available at boot (Bluetooth spawned on-demand)
 - **Capture-aware** - Records from JACK's `system:capture` `system:midi_capture` ports and custom `usb_in:capture` for external audio interface.
@@ -80,7 +79,7 @@ sudo reboot
 
 The installer will:
 1. Install required packages (jackd, alsa-utils, bluez, etc.)
-2. Configure ALSA → EQ → JACK routing
+2. Configure ALSA → JACK routing
 3. Install SysV init scripts for jackd-rt, bluealsad, bluetoothd, jack-bridge-ports
 4. Install Alsa Sound Connect GUI to `/usr/local/bin/mxeq`
 5. Create desktop launcher (Applications → Sound & Video → Alsa Sound Connect)
@@ -95,7 +94,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 
 1. Open **Alsa Sound Connect** from Applications menu
 2. Mixer controls for internal audio card will be visible
-3. All sections (EQ, Bluetooth, Devices) are collapsed by default - expand as needed
+3. All sections (Recording, Bluetooth, Devices) are collapsed by default - expand as needed
 
 ### Mixer Controls
 
@@ -105,7 +104,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 
 ### Recording
 
-1. Expand "EQ and Recording" section
+1. Expand "Recording" section
 2. Enter filename (auto-saves to ~/Music/)
 3. Choose Mono/Stereo and sample rate
 4. Click Record → Stop when finished
@@ -284,7 +283,7 @@ The uninstaller removes:
 To also remove packages:
 bash
 sudo apt remove jackd2 qjackctl bluez bluez-tools libasound2-plugins \
-  alsa-utils apulse libasound2-plugin-equal swh-plugins
+  alsa-utils apulse swh-plugins
 sudo apt autoremove
 
 ## Architecture
@@ -307,8 +306,6 @@ Shutdown Sequence (reverse order with graceful termination)
 Application (ALSA API)
     ↓
 /etc/asound.conf (routing config)
-    ↓
-ALSA Equal Plugin (10-band EQ)
     ↓
 ALSA JACK Plugin (bridge to JACK)
     ↓
@@ -350,7 +347,6 @@ Audio Output
 - `/usr/local/lib/jack-bridge/jack-autoconnect` - Auto-connection helper
 
 **User Data:**
-- `~/.local/share/mxeq/presets.csv` - EQ presets
 - `~/Music/` - Recorded audio files
 - `~/.config/jack-bridge/devices.conf` - Per-user device preferences
 
