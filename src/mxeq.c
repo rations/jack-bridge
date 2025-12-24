@@ -397,6 +397,27 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
         
         const char *name = snd_mixer_selem_get_name(elem);
         if (!name) continue;
+
+        /* Hide hardware-only controls that confuse users in the GUI.
+         * In particular, HDA codecs often expose "Auto-Mute Mode" and
+         * "Loopback Mixing" mixer elements which control jack-sense
+         * speaker muting and analog loopback. These are still available
+         * in alsamixer(1), but showing them here is confusing because
+         * jack-bridge does not manage them.
+         *
+         * We therefore filter out mixer elements whose names contain
+         * "auto-mute"/"automute" or "loopback" (case-insensitive).
+         */
+        gchar *lower = g_ascii_strdown(name, -1);
+        if (lower) {
+            if (strstr(lower, "auto-mute") ||
+                strstr(lower, "automute")  ||
+                strstr(lower, "loopback")) {
+                g_free(lower);
+                continue; /* Skip this control in the GUI */
+            }
+            g_free(lower);
+        }
         
         /* Detect if this is a capture-only control */
         gboolean is_capture = FALSE;
@@ -1158,16 +1179,11 @@ int main(int argc, char *argv[]) {
     g_eq_expander = eq_expander;
     g_signal_connect(G_OBJECT(eq_expander), "notify::expanded", G_CALLBACK(on_any_expander_toggled), NULL);
 
-    /* Put the EQ content inside its own scrolled window so it only requests space
-       when expanded. This prevents the app window from leaving large blank space
-       when the expander is collapsed. */
-    GtkWidget *eq_scroller = gtk_scrolled_window_new(NULL, NULL);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(eq_scroller), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(eq_scroller, -1, 220); /* hint when expanded */
-
+    /* Recording content box: pack directly into the expander so its height
+       naturally follows the Recorder UI without leaving extra blank space
+       when expanded or collapsed (similar behaviour to the Devices expander). */
     GtkWidget *eq_content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_container_add(GTK_CONTAINER(eq_scroller), eq_content_vbox);
-    gtk_container_add(GTK_CONTAINER(eq_expander), eq_scroller);
+    gtk_container_add(GTK_CONTAINER(eq_expander), eq_content_vbox);
 
     // Recorder UI inside Recording expander
     create_recorder_ui(eq_content_vbox);
