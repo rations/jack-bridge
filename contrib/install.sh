@@ -22,7 +22,7 @@ BIN_DIR="${PREFIX_ROOT}usr/bin"
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
 # Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse libasound2-plugin-equal swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
 
 echo "Installing jack-bridge contrib files"
 
@@ -987,4 +987,3 @@ echo "==========================================================================
 echo ""
 
 exit 0
-
