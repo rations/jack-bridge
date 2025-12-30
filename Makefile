@@ -11,6 +11,12 @@ MKDIR_P = mkdir -p
 
 BIN_DIR = contrib/bin
 
+# Build ALSA -> JACK LD_PRELOAD shim (libalsa-jack-redirect.so)
+SHIM_TARGET = $(BIN_DIR)/libalsa-jack-redirect.so
+SHIM_SRCS = src/alsa_jack_redirect.c
+SHIM_LIBS = -ldl
+SHIM_CFLAGS = -fPIC
+
 # Build mxeq (GUI) - needs GTK3, GLib/GIO and ALSA
 MOTR_TARGET = $(BIN_DIR)/mxeq
 MOTR_SRCS = src/mxeq.c src/gui_bt.c src/bt_agent.c
@@ -37,10 +43,15 @@ DBUS_LIBS = $(shell $(PKG_CONFIG) --libs $(DBUS_PKGS)) -ljack
 
 CFLAGS_COMMON = -Wall -Wextra -std=c11
 
-all: mxeq manager dbus
+all: mxeq manager dbus shim
 
 $(BIN_DIR):
 	$(MKDIR_P) $(BIN_DIR)
+
+shim: $(BIN_DIR) $(SHIM_TARGET)
+
+$(SHIM_TARGET): $(SHIM_SRCS) | $(BIN_DIR)
+	$(CC) -shared $(CFLAGS_COMMON) $(SHIM_CFLAGS) -o $@ $(SHIM_SRCS) $(SHIM_LIBS)
 
 mxeq: $(BIN_DIR) $(MOTR_TARGET)
 
@@ -58,6 +69,6 @@ $(DBUS_TARGET): $(DBUS_SRCS) | $(BIN_DIR)
 	$(CC) $(CFLAGS_COMMON) $(DBUS_CFLAGS) -o $@ $(DBUS_SRCS) $(DBUS_LIBS)
 
 clean:
-	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager $(BIN_DIR)/jack-bridge-dbus
+	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager $(BIN_DIR)/jack-bridge-dbus $(BIN_DIR)/libalsa-jack-redirect.so
 
-.PHONY: all clean mxeq manager dbus
+.PHONY: all clean mxeq manager dbus shim

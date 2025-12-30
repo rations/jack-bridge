@@ -154,6 +154,15 @@ if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
     echo "Installed jack-autoconnect to ${USR_LIB_DIR}/jack-autoconnect"
 fi
 
+# Install ALSA -> JACK LD_PRELOAD shim library for Steam/Proton (if present)
+if [ -f "contrib/bin/libalsa-jack-redirect.so" ]; then
+    install -m 0644 contrib/bin/libalsa-jack-redirect.so "${USR_LIB_DIR}/libalsa-jack-redirect.so"
+    echo "Installed ALSA->JACK LD_PRELOAD shim to ${USR_LIB_DIR}/libalsa-jack-redirect.so"
+else
+    echo "NOTICE: contrib/bin/libalsa-jack-redirect.so not found; Steam/Proton JACK shim not installed."
+    echo "        Build it with 'make shim' and re-run contrib/install.sh if you want this feature."
+fi
+
 # Install custom qjackctl binary (SYSTEM bus integration)
 if [ -f "contrib/bin/qjackctl" ]; then
     echo "Installing custom qjackctl (jack-bridge SYSTEM bus integration)..."
