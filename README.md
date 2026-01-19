@@ -24,7 +24,7 @@
 
 ### Known issues. If using an external usb audio interface or any usb midi hardware (drums, keyboards etc) they can override jack-bridge if plugged in on boot. If this happens plug them in after booting. Or select USB in the devices section of the GUI before shutting down. Also pressing setup in the qjackctl GUI tends to crash unless you have opened graph or messages first.
 
-Professional audio control interface Alsa Sound Connect (`mxeq`) with:
+### Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 - **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB/HDMI/BLUETOOTH)
 - **Built-in recorder** - Record in mono/stereo at 44.1kHz or 48kHz, saves to ~/Music
 - **Bluetooth panel** - Scan, pair, trust, connect devices with visual feedback
@@ -59,12 +59,19 @@ Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 
 ### Quick Install
 
-Download `jack-bridge-20260119.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260120.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260119.tar.gz
-cd jack-bridge
+tar -xf jack-bridge-20260120.tar.gz
+```
+```bash
+cd jack-bridge-20260120
+```
+```bash
 sudo sh contrib/install.sh
+```
+```bash
+sudo reboot
 ```
 
 Or clone the repository:
@@ -72,16 +79,17 @@ Or clone the repository:
 ```bash
 # Clone repository
 git clone https://github.com/rations/jack-bridge.git
-
+```
+```bash
 cd jack-bridge
-
-# Update 
+```
+```bash 
 sudo apt update
-
-# Run installer
+```
+```bash
 sudo sh contrib/install.sh
-
-# Reboot to activate
+```
+```bash
 sudo reboot
 ```
 
