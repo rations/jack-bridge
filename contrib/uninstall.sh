@@ -145,6 +145,13 @@ fi
 if [ -f "$PULSE_AUTOSPAWN_CONF" ]; then
   rm -f "$PULSE_AUTOSPAWN_CONF"
   log "  Removed $PULSE_AUTOSPAWN_CONF"
+
+  # Remove the directory if it becomes empty (leave system clean)
+  PULSE_CONF_DIR="$(dirname "$PULSE_AUTOSPAWN_CONF")"
+  if [ -d "$PULSE_CONF_DIR" ] && [ -z "$(ls -A "$PULSE_CONF_DIR" 2>/dev/null)" ]; then
+    rmdir "$PULSE_CONF_DIR" 2>/dev/null || true
+    log "  Removed empty $PULSE_CONF_DIR"
+  fi
 fi
 
 if [ -f "$DEVCONF" ]; then
