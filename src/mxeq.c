@@ -1233,19 +1233,6 @@ static const char *CURRENT_INPUT_PATH = "/etc/asound.conf.d/current_input.conf";
 static const char *JB_BEGIN = "# BEGIN jack-bridge";
 static const char *JB_END   = "# END jack-bridge";
 
-/* Simple helper to scan a text file for a substring (case-sensitive) */
-static gboolean file_contains_substr(const char *path, const char *needle) {
-    if (!path || !needle) return FALSE;
-    FILE *f = fopen(path, "r");
-    if (!f) return FALSE;
-    char buf[512];
-    gboolean found = FALSE;
-    while (fgets(buf, sizeof(buf), f)) {
-        if (strstr(buf, needle) != NULL) { found = TRUE; break; }
-    }
-    fclose(f);
-    return found;
-}
 
 /* Detect USB card number (returns -1 if no USB found) */
 static int get_usb_card_number(void) {
@@ -1269,19 +1256,6 @@ static int get_usb_card_number(void) {
 
 static gboolean is_usb_present(void) {
     return (get_usb_card_number() >= 0);
-}
-static gboolean is_hdmi_present(void) {
-    if (file_contains_substr("/proc/asound/cards", "HDMI")) return TRUE;
-    /* Fallback: check aplay -l for HDMI devices (e.g. on HDA Intel cards) */
-    gchar *out = NULL;
-    if (g_spawn_command_line_sync("aplay -l", &out, NULL, NULL, NULL)) {
-        if (out && strstr(out, "HDMI")) {
-            g_free(out);
-            return TRUE;
-        }
-        g_free(out);
-    }
-    return FALSE;
 }
 static gboolean is_bt_present(void) {
     if (g_file_test("/usr/bin/bluealsa", G_FILE_TEST_IS_REGULAR) ||
@@ -1760,7 +1734,7 @@ static void create_devices_panel(GtkWidget *main_box) {
     /* Presence-based sensitivity (no hardcoding) */
     gtk_widget_set_sensitive(ui->rb_internal, TRUE);
     gtk_widget_set_sensitive(ui->rb_usb, is_usb_present());
-    gtk_widget_set_sensitive(ui->rb_hdmi, is_hdmi_present());
+    gtk_widget_set_sensitive(ui->rb_hdmi, TRUE);  /* HDMI always available if card supports it */
     gtk_widget_set_sensitive(ui->rb_bt, is_bt_present());
 
     g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
