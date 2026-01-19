@@ -566,11 +566,11 @@ BLUEALSAD_DEFAULT
     fi
 fi
 
-# Install persistent JACK bridge ports init script (Phase 4: Persistent Ports)
+# Install JACK bridge ports init script (Phase 4: On-demand Ports)
 if [ -f "contrib/init.d/jack-bridge-ports" ]; then
-    echo "Installing jack-bridge-ports init script (persistent JACK bridge clients)..."
+    echo "Installing jack-bridge-ports init script (JACK bridge port management)..."
     install -m 0755 contrib/init.d/jack-bridge-ports "${INIT_DIR}/jack-bridge-ports"
-    
+
     if command -v update-rc.d >/dev/null 2>&1; then
         echo "Registering jack-bridge-ports init script..."
         # Start after jackd-rt (S02) and bluealsad (S01) - use priority 04 for proper ordering
@@ -578,11 +578,12 @@ if [ -f "contrib/init.d/jack-bridge-ports" ]; then
         update-rc.d -f jack-bridge-ports remove >/dev/null 2>&1 || true
         update-rc.d jack-bridge-ports defaults 04 02 || true
         echo "  ✓ jack-bridge-ports: starts at priority 04 (after JACK), stops at priority 02 (before JACK)"
-        echo "  ✓ Bridge ports will spawn usb_out and hdmi_out at boot"
+        echo "  ✓ Ensures system:capture ports exist for ALSA input routing"
+        echo "  ✓ USB/HDMI ports spawn on-demand when selected in GUI (CPU efficient)"
         echo "  ✓ Bluetooth ports spawn on-demand when user selects Bluetooth output"
     fi
 else
-    echo "Warning: contrib/init.d/jack-bridge-ports not found; persistent ports disabled"
+    echo "Warning: contrib/init.d/jack-bridge-ports not found; bridge port management disabled"
 fi
 
 # Install BlueALSA D-Bus policy (canonical)
