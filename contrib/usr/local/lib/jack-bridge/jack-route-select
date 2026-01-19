@@ -498,13 +498,16 @@ route() {
 
   case "$target" in
     internal)
-      # Kill on-demand Bluetooth and USB capture clients when switching to internal
+      # Kill all on-demand clients when switching to internal
+      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+      pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       pkill -f "alsa_in -j usb_in" 2>/dev/null || true
       newpref="system:playback_"
       ;;
     usb)
-      # Kill on-demand Bluetooth client when switching away
+      # Kill on-demand HDMI and Bluetooth clients when switching to USB
+      pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       ensure_usb_out || log "WARNING: ensure_usb_out failed"
       # Spawn usb_in for USB capture (usb_in:capture_1/2 ports for manual connection in qjackctl)
@@ -512,15 +515,18 @@ route() {
       newpref="usb_out:playback_"
       ;;
     hdmi)
-      # Kill on-demand Bluetooth and USB capture clients when switching to HDMI
+      # Kill on-demand USB and Bluetooth clients when switching to HDMI
       # HDMI has no capture - system:capture (internal mic) remains available
+      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       pkill -f "alsa_in -j usb_in" 2>/dev/null || true
       ensure_hdmi_out || log "WARNING: ensure_hdmi_out failed"
       newpref="hdmi_out:playback_"
       ;;
     bluetooth)
-      # Kill USB capture client when switching to Bluetooth
+      # Kill USB and HDMI clients when switching to Bluetooth
+      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+      pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_in -j usb_in" 2>/dev/null || true
       # Spawn on-demand Bluetooth client (kills existing first if any)
       ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"

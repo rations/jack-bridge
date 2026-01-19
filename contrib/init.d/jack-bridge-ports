@@ -5,9 +5,9 @@
 # Required-Stop:     jackd-rt
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: Spawn persistent JACK bridge ports (usb_out, hdmi_out)
-# Description:       Creates permanent alsa_out bridge clients for USB and HDMI at boot.
-#                    Bluetooth ports are spawned on-demand by jack-route-select when selected.
+# Short-Description: Spawn persistent JACK bridge ports (system:capture)
+# Description:       Creates permanent alsa_in bridge client for system:capture at boot.
+#                    USB/HDMI/Bluetooth ports are spawned on-demand by jack-route-select when selected.
 ### END INIT INFO
 
 . /lib/lsb/init-functions
@@ -174,29 +174,9 @@ start() {
     : ${BT_PERIOD:=256}
     : ${BT_NPERIODS:=3}
     
-    # ALWAYS spawn USB port (even if no USB device - JACK will create silent ports)
-    USB_HW=$(detect_card_device "USB")
-    if [ -z "$USB_HW" ]; then
-        USB_HW="hw:99"  # Non-existent device - alsa_out creates ports but no audio flows until device connects
-        echo "No USB audio device detected; spawning usb_out with placeholder $USB_HW" >> "$LOGFILE" 2>&1
-    else
-        echo "USB audio device detected: $USB_HW" >> "$LOGFILE" 2>&1
-    fi
-    echo "Spawning usb_out for $USB_HW" >> "$LOGFILE" 2>&1
-    su -l "$USERNAME" -c "nohup alsa_out -j usb_out -d \"$USB_HW\" -r 48000 -p 256 -n 3 >>\"$LOGFILE\" 2>&1 &" || true
-    sleep 1
-    
-    # ALWAYS spawn HDMI port (even if no HDMI device)
-    HDMI_HW=$(detect_card_device "HDMI")
-    if [ -z "$HDMI_HW" ]; then
-        HDMI_HW="hw:98"  # Non-existent device
-        echo "No HDMI audio device detected; spawning hdmi_out with placeholder $HDMI_HW" >> "$LOGFILE" 2>&1
-    else
-        echo "HDMI audio device detected: $HDMI_HW" >> "$LOGFILE" 2>&1
-    fi
-    echo "Spawning hdmi_out for $HDMI_HW" >> "$LOGFILE" 2>&1
-    su -l "$USERNAME" -c "nohup alsa_out -j hdmi_out -d \"$HDMI_HW\" -r 48000 -p 256 -n 3 >>\"$LOGFILE\" 2>&1 &" || true
-    sleep 1
+    # NOTE: USB and HDMI ports are now spawned on-demand by jack-route-select when user selects them
+    # This prevents CPU consumption when idle, matching Bluetooth behavior
+    echo "USB/HDMI ports will be spawned on-demand when user selects them" >> "$LOGFILE" 2>&1
     
     # NOTE: system:capture ports are created automatically by jackd with -D flag (duplex mode)
     # jackd opens the detected device for BOTH playback and capture
@@ -300,29 +280,29 @@ status() {
         OUTPUT=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
         INPUT=$(jack_lsp 2>/dev/null | grep -E '^system:capture' || true)
         BT=$(jack_lsp 2>/dev/null | grep -E '^bluealsa:' || true)
-        
+
         if [ -n "$OUTPUT" ]; then
-            echo "Active persistent OUTPUT bridge ports:"
+            echo "Active on-demand OUTPUT bridge ports (USB/HDMI):"
             echo "$OUTPUT" | sed 's/^/  /'
         else
-            echo "No persistent OUTPUT bridge ports found (usb_out, hdmi_out)"
+            echo "No on-demand OUTPUT bridge ports (USB/HDMI spawned when selected)"
         fi
-        
+
         if [ -n "$INPUT" ]; then
             echo "Active persistent INPUT bridge ports (from alsa_in):"
             echo "$INPUT" | sed 's/^/  /'
         else
             echo "No persistent INPUT bridge ports found (system:capture from alsa_in)"
         fi
-        
+
         if [ -n "$BT" ]; then
             echo "Active on-demand Bluetooth ports:"
             echo "$BT" | sed 's/^/  /'
         else
             echo "No Bluetooth ports (spawned on-demand when user selects Bluetooth)"
         fi
-        
-        [ -n "$OUTPUT" ] || [ -n "$INPUT" ] && return 0 || return 1
+
+        [ -n "$OUTPUT" ] || [ -n "$INPUT" ] || [ -n "$BT" ] && return 0 || return 1
     else
         echo "jack_lsp not available; cannot check port status"
         return 1
