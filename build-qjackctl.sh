@@ -7,7 +7,7 @@ echo "Building custom qjackctl for jack-bridge..."
 
 # Check for required packages (blocking version - we need these to succeed)
 echo "Checking build dependencies..."
-REQUIRED_PKGS="cmake g++ qt6-base-dev qt6-tools-dev-tools libjack-jackd2-dev libasound2-dev"
+REQUIRED_PKGS="cmake g++ qt6-base-dev qt6-svg-dev qt6-tools-dev-tools libjack-jackd2-dev libasound2-dev"
 MISSING_PKGS=""
 
 for pkg in $REQUIRED_PKGS; do
@@ -32,20 +32,46 @@ cd qjackctl-1.0.4 || {
 # Create patch marker to avoid re-patching
 PATCH_MARKER=".jack-bridge-patched"
 if [ ! -f "$PATCH_MARKER" ]; then
-    echo "Applying jack-bridge SYSTEM bus patch..."
-    
+    echo "Applying jack-bridge SYSTEM bus patches..."
+
     # Patch line 2425: sessionBus() → systemBus()
     sed -i '2425s/QDBusConnection::sessionBus()/QDBusConnection::systemBus()/' \
         src/qjackctlMainForm.cpp
-    
-    # Verify patch applied
+
+    # Verify main form patch applied
     if grep -n "QDBusConnection::systemBus()" src/qjackctlMainForm.cpp | grep -q "^2425:"; then
-        echo "  ✓ Patch applied successfully (line 2425)"
-        touch "$PATCH_MARKER"
+        echo "  ✓ Main form patch applied successfully (line 2425)"
     else
-        echo "  ✗ Patch failed! Manual intervention required."
+        echo "  ✗ Main form patch failed! Manual intervention required."
         exit 1
     fi
+
+    # Add QDBusConnection include to setup form
+    if ! grep -q "#include <QDBusConnection>" src/qjackctlSetupForm.cpp; then
+        sed -i '/#include <QButtonGroup>/a\
+#include <QDBusConnection>' src/qjackctlSetupForm.cpp
+        echo "  ✓ Added QDBusConnection include to setup form"
+    fi
+
+    # Patch setup form to enable settings when using SYSTEM bus instead of SESSION bus
+    # Memory lock settings
+    sed -i 's/!bCoreaudio && !bJackDBus/!bCoreaudio \&\& !(bJackDBus \&\& QDBusConnection::sessionBus().isConnected())/g' \
+        src/qjackctlSetupForm.cpp
+
+    # Ignore HW settings
+    sed -i 's/(bSun || bOss) && !bJackDBus/(bSun || bOss) \&\& !(bJackDBus \&\& QDBusConnection::sessionBus().isConnected())/g' \
+        src/qjackctlSetupForm.cpp
+
+    # Word length settings
+    sed -i 's/(bSun || bOss) && !bJackDBus/(bSun || bOss) \&\& !(bJackDBus \&\& QDBusConnection::sessionBus().isConnected())/g' \
+        src/qjackctlSetupForm.cpp
+
+    # Server settings
+    sed -i 's/!bJackDBus/!(bJackDBus \&\& QDBusConnection::sessionBus().isConnected())/g' \
+        src/qjackctlSetupForm.cpp
+
+    echo "  ✓ Setup form patches applied successfully"
+    touch "$PATCH_MARKER"
 else
     echo "Source already patched (found $PATCH_MARKER)"
 fi
