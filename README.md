@@ -33,7 +33,7 @@ Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 ### 🔊 Audio Routing
 - **ALSA → JACK pipeline** - All ALSA apps route through JACK, without systemd, PulseAudio, or PipeWire
 - **Multi-device support** - Seamlessly switch between internal, USB, HDMI, and Bluetooth outputs
-- **Persistent bridge ports** - USB/HDMI ports available at boot (Bluetooth spawned on-demand)
+- **Persistent bridge ports** - USB/HDMI/Bluetooth ports spawned on-demand
 - **Capture-aware** - Records from JACK's `system:capture` `system:midi_capture` ports and custom `usb_in:capture` for external audio interface.
 - **Qjackctl Graph** - Visually route audio to and from multiple apps and sources using graph in qjackctl. 
 
@@ -51,13 +51,23 @@ Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 
 ## Requirements
 
-**Debian-based distributions** Without systemd. Using sysVinit. Testing done on Devuan 5 
+**Debian-based distributions** Without systemd. Using sysVinit. Testing done on Devuan 5 XFCE and Mate Desktop Environments.
 
-**Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts.
+**Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. Removing PulseAudio is not required as the installer Disables PulseAudio autospawn system-wide and if you need pulseaudio for steam games you can start and stop pulseaudio as needed in a terminal with pulseaudio --start and pulseaudio --kill. As it is now steams version of proton does not support jack and steams runtime would have to be rebuilt as a custom binary and everytime there is an upgrade it would stop working. Until I can figure something out unfortunatly jack-bridge does not work with steam. If you use wine for gaming jack-bridge works fine. 
 
 ## Installation
 
 ### Quick Install
+
+Download `jack-bridge-20260119.tar.gz` from releases on GitHub. Then:
+
+```bash
+tar -xf jack-bridge-20260119.tar.gz
+cd jack-bridge
+sudo sh contrib/install.sh
+```
+
+Or clone the repository:
 
 ```bash
 # Clone repository
@@ -146,9 +156,9 @@ Bluetooth Device ←→ bluetoothd ←→ bluealsad ←→ ALSA bluealsa plugin 
 
 ### On-Demand Port Spawning
 
-Unlike USB/HDMI (which create persistent ports at boot), Bluetooth ports are spawned **on-demand** because:
+USB/HDMi/Bluetooth ports are spawned **on-demand** because:
 - BlueALSA PCM requires an active connection
-- Spawning at boot would fail if no device connected
+- Spawning BlueAlsa at boot would fail if no device connected
 - On-demand prevents error messages and saves resources
 
 When you select Bluetooth output:
@@ -158,6 +168,11 @@ When you select Bluetooth output:
 4. Routes audio through Bluetooth
 
 ### Troubleshooting
+
+**Bluetooth not working**
+If your system has bluetooth already it will conflict with the custom bluealsa setup.
+You need to remove/delete 20-bluealsa.conf in /usr/share/alsa/alsa.conf.d or /etc/alsa/conf.d
+Also remove bluez package and run sudo sh contrib/install.sh again to resolve the conflicts. 
 
 **Discovery finds nothing:**
 bash
@@ -257,7 +272,17 @@ cd ~/jack-bridge
 make clean && make
 
 
-The Makefile builds `mxeq` (GUI) and `bt_agent` (Bluetooth agent helper).
+The Makefile builds `mxeq` (GUI) and `bt_agent` (Bluetooth agent helper) `jack-bridge-dbus` (Works with customq jackctl)
+
+### Building custom qjackctl
+
+You will need to change the name of qjackctl-1.0.4-jack-bridge-mod back to qjackctl-1.0.4 to match build-qjackctl.sh 
+
+```bash
+chmod -x build-qjackctl.sh 
+
+./build-qjackctl.sh
+```
 
 ## Uninstall
 
@@ -333,7 +358,7 @@ Audio Output
 - `/etc/init.d/jackd-rt` - JACK audio server
 - `/etc/init.d/bluealsad` - BlueALSA daemon
 - `/etc/init.d/bluetoothd` - BlueZ Bluetooth daemon
-- `/etc/init.d/jack-bridge-ports` - Persistent bridge ports
+- `/etc/init.d/jack-bridge-ports` - Bridge ports
 
 **Configuration:**
 - `/etc/asound.conf` - ALSA routing and EQ configuration
