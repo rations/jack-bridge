@@ -37,6 +37,9 @@ cp -r contrib/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 # Source code (needed for building)
 cp -r src/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 
+# Additional files needed by installer
+cp -r usr/ "$TEMP_DIR/jack-bridge-${VERSION}/"
+
 # Build system
 cp Makefile "$TEMP_DIR/jack-bridge-${VERSION}/"
 
