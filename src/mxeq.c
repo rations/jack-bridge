@@ -35,12 +35,22 @@ typedef struct {
 } MixerData;
 
 /* UI globals used to keep window/expander references for compacting behavior.
-   These are used by the expander 'notify::expanded' handler to shrink the
-   main window back to a compact size when all expanders are collapsed. */
+    These are used by the expander 'notify::expanded' handler to shrink the
+    main window back to a compact size when all expanders are collapsed. */
 static GtkWidget *g_main_window = NULL;
+static GtkWidget *g_main_box = NULL;
+static GtkWidget *g_mixer_expander = NULL;
 static GtkWidget *g_eq_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
 static GtkWidget *g_dev_expander = NULL;
+
+/* Approximate heights for precise window resizing to avoid blank space */
+#define EXPANDER_HEADER_HEIGHT 5
+#define MIXER_CONTENT_HEIGHT 320
+#define EQ_CONTENT_HEIGHT 100
+#define BT_CONTENT_HEIGHT 150
+#define DEV_CONTENT_HEIGHT 50
+#define WINDOW_BASE_HEIGHT 40  /* borders, spacing */
 /* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
 static GtkWidget *g_bt_tree = NULL;
 /* Phase 3: Global references to Devices panel radio buttons for state synchronization */
@@ -66,24 +76,21 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
     (void)object;
     (void)pspec;
     (void)user_data;
-    if (!g_main_window || !g_eq_expander || !g_bt_expander || !g_dev_expander) return;
 
-    gboolean eq_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_eq_expander));
-    gboolean bt_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_bt_expander));
-    gboolean dev_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_dev_expander));
+    if (g_main_window && g_mixer_expander && g_eq_expander && g_bt_expander && g_dev_expander) {
+        gboolean mixer_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_mixer_expander));
+        gboolean eq_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_eq_expander));
+        gboolean bt_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_bt_expander));
+        gboolean dev_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_dev_expander));
 
-    if (!eq_exp && !bt_exp && !dev_exp) {
-        /* All collapsed - shrink to compact height */
-        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 260);
-    } else if ((eq_exp || bt_exp) && !dev_exp) {
-        /* EQ or Bluetooth expanded (large panels) */
-        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 480);
-    } else if (dev_exp && !eq_exp && !bt_exp) {
-        /* Only Devices expanded (small panel - just radio buttons) */
-        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 310);
-    } else {
-        /* Multiple panels expanded */
-        gtk_window_resize(GTK_WINDOW(g_main_window), 600, 480);
+        /* Calculate exact height based on expanded state to eliminate blank space */
+        int height = WINDOW_BASE_HEIGHT;
+        height += mixer_exp ? MIXER_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
+        height += eq_exp ? EQ_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
+        height += bt_exp ? BT_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
+        height += dev_exp ? DEV_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
+
+        gtk_window_resize(GTK_WINDOW(g_main_window), 600, height);
     }
 }
 
@@ -1055,8 +1062,8 @@ int main(int argc, char *argv[]) {
     // Create window
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Alsa Sound Connect");
-    // Compact width for screen fit, homogeneous spacing keeps professional look
-    gtk_window_set_default_size(GTK_WINDOW(window), 600, 260);
+    // Natural sizing - let GTK determine height based on content, set reasonable minimum
+    gtk_window_set_default_size(GTK_WINDOW(window), 600, -1);
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
@@ -1067,10 +1074,20 @@ int main(int argc, char *argv[]) {
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4); // Tighter spacing
     gtk_container_set_border_width(GTK_CONTAINER(main_box), 5);
     gtk_container_add(GTK_CONTAINER(window), main_box);
+    g_main_box = main_box;
+
+    // Mixer expander (expanded by default to show mixer controls)
+    GtkWidget *mixer_expander = gtk_expander_new("Mixer Controls");
+    gtk_expander_set_expanded(GTK_EXPANDER(mixer_expander), TRUE);
+    gtk_box_pack_start(GTK_BOX(main_box), mixer_expander, FALSE, FALSE, 0);
+
+    /* keep a reference so the expander toggle handler can resize the window */
+    g_mixer_expander = mixer_expander;
+    g_signal_connect(G_OBJECT(mixer_expander), "notify::expanded", G_CALLBACK(on_any_expander_toggled), NULL);
 
     // Mixer frame with border
     GtkWidget *mixer_frame = gtk_frame_new(NULL);
-    gtk_box_pack_start(GTK_BOX(main_box), mixer_frame, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(mixer_expander), mixer_frame);
 
     // Scrolled window for mixer (vertical scrolling only, max ~300px height)
     GtkWidget *mixer_scroller = gtk_scrolled_window_new(NULL, NULL);

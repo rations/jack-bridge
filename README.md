@@ -111,7 +111,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 ### First Launch
 
 1. Open **Alsa Sound Connect** from Applications menu
-2. Mixer controls for internal audio card will be visible
+2. Mixer controls for internal audio card will be visible (expandable/collapsible)
 3. All sections (Recording, Bluetooth, Devices) are collapsed by default - expand as needed
 
 ### Mixer Controls
@@ -119,6 +119,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 - **Volume sliders** - Adjust playback/capture levels
 - **Mute/Enable checkboxes** - Mute playback or enable capture
 - **Dynamic switching** - Controls update when you change devices
+- **Collapsible** - Click the "Mixer Controls" header to hide/show the mixer panel
 
 ### Recording
 
