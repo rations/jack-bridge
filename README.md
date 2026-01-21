@@ -59,13 +59,13 @@
 
 ### Quick Install
 
-Download `jack-bridge-20260120.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260121.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260120.tar.gz
+tar -xf jack-bridge-20260121.tar.gz
 ```
 ```bash
-cd jack-bridge-20260120
+cd jack-bridge-20260121
 ```
 ```bash
 sudo sh contrib/install.sh
