@@ -16,6 +16,7 @@ static void create_devices_panel(GtkWidget *main_box);
 /* Forward declarations needed by earlier callers */
 static int write_string_atomic(const char *path, const char *content);
 static gboolean bluealsa_ports_exist(void);
+static int get_internal_card_number(void);
 
 typedef struct {
     snd_mixer_t *mixer;
@@ -1035,7 +1036,9 @@ int main(int argc, char *argv[]) {
     gtk_window_set_default_icon_name("alsa-sound-connect");
 
     MixerData mixer_data = {0};
-    init_alsa_mixer(&mixer_data, 0);  /* Start with card 0 (internal) */
+    /* Detect the actual internal card (first non-USB card) */
+    int internal_card = get_internal_card_number();
+    init_alsa_mixer(&mixer_data, internal_card);  /* Start with detected internal card */
     /* Store global reference for dynamic mixer switching */
     g_mixer_data = &mixer_data;
     /* Ensure per-user ALSA override exists so Recorder works without root/system writes */
@@ -1211,6 +1214,12 @@ int main(int argc, char *argv[]) {
     /* Devices panel (Playback) */
     create_devices_panel(main_box);
 
+    /* Since Internal is active by default, ensure mixer shows internal card controls */
+    int detected_internal_card = get_internal_card_number();
+    if (detected_internal_card != g_mixer_data->current_card) {
+        rebuild_mixer_for_card(detected_internal_card);
+    }
+
     gtk_widget_show_all(window);
     gtk_main();
 
@@ -1269,6 +1278,27 @@ static int get_usb_card_number(void) {
     }
     fclose(f);
     return -1;
+}
+
+/* Detect internal card number (first non-USB card, returns 0 if none found) */
+static int get_internal_card_number(void) {
+    FILE *f = fopen("/proc/asound/cards", "r");
+    if (!f) return 0;
+    char line[512];
+    int card = -1;
+    while (fgets(line, sizeof(line), f)) {
+        /* Skip USB cards */
+        if (strstr(line, "USB")) {
+            continue;
+        }
+        /* Extract card number from "card N:" prefix for first non-USB card */
+        if (sscanf(line, " %d", &card) == 1) {
+            fclose(f);
+            return card;
+        }
+    }
+    fclose(f);
+    return 0; /* Default to card 0 if no non-USB cards found */
 }
 
 static gboolean is_usb_present(void) {
@@ -1612,8 +1642,9 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
 
     if (g_strcmp0(label, "Internal") == 0) {
         ok = route_to_target_async("internal");
-        /* Switch mixer to show internal card (hw:0) controls */
-        rebuild_mixer_for_card(0);
+        /* Switch mixer to show internal card controls */
+        int internal_card = get_internal_card_number();
+        rebuild_mixer_for_card(internal_card);
     } else if (g_strcmp0(label, "USB") == 0) {
         ok = route_to_target_async("usb");
         /* Switch mixer to show USB card controls */
@@ -1624,10 +1655,12 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     } else if (g_strcmp0(label, "HDMI") == 0) {
         ok = route_to_target_async("hdmi");
         /* HDMI uses internal card for capture, so show internal mixer */
-        rebuild_mixer_for_card(0);
+        int internal_card = get_internal_card_number();
+        rebuild_mixer_for_card(internal_card);
     } else if (g_strcmp0(label, "Bluetooth") == 0) {
         /* Bluetooth uses internal card for capture, so show internal mixer */
-        rebuild_mixer_for_card(0);
+        int internal_card = get_internal_card_number();
+        rebuild_mixer_for_card(internal_card);
         
         /* Get MAC from BT panel selection */
         char *obj = NULL;
