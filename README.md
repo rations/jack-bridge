@@ -51,7 +51,7 @@
 
 ## Requirements
 
-**Debian-based distributions** Without systemd. Using sysVinit. Testing done on Devuan 5 XFCE and Mate Desktop Environments.
+**Debian-based distributions** Without systemd. Using sysVinit. Should be compatible with OpenRC but has not been tested. Testing done on Devuan 5 XFCE and Mate Desktop Environments using sysVinit.
 
 **Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. Removing PulseAudio is not required as the installer Disables PulseAudio autospawn system-wide and if you need pulseaudio for steam games you can start and stop pulseaudio as needed in a terminal with pulseaudio --start and pulseaudio --kill. As it is now steams version of proton does not support jack and steams runtime would have to be rebuilt as a custom binary and everytime there is an upgrade it would stop working. Until I can figure something out unfortunatly jack-bridge does not work with steam. If you use wine for gaming jack-bridge works fine. 
 
