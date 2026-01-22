@@ -8,6 +8,15 @@
 
 set -e
 
+# Detect OS
+IS_VOID=false
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "void" ]; then
+        IS_VOID=true
+    fi
+fi
+
 echo "=== BlueALSA ALSA Plugins Build Script ==="
 echo
 
@@ -51,8 +60,13 @@ done
 
 if [ -n "$MISSING" ]; then
     echo "Error: Missing build tools:$MISSING"
-    echo "Install them with:"
-    echo "  sudo apt install -y git automake libtool pkg-config build-essential"
+    if $IS_VOID; then
+        echo "Install them with:"
+        echo "  sudo xbps-install -y git automake libtool pkg-config base-devel"
+    else
+        echo "Install them with:"
+        echo "  sudo apt install -y git automake libtool pkg-config build-essential"
+    fi
     exit 1
 fi
 
@@ -63,24 +77,44 @@ echo
 echo "Step 2: Checking library dependencies..."
 echo "The following packages are required. Checking..."
 
-REQUIRED_LIBS="libbluetooth-dev libdbus-1-dev libasound2-dev libglib2.0-dev libsbc-dev"
-OPTIONAL_LIBS="libfdk-aac-dev libldacbt-abr-dev libldacbt-enc-dev liblc3-dev"
+if $IS_VOID; then
+    REQUIRED_LIBS="bluez-devel dbus-devel alsa-lib-devel glib-devel sbc-devel"
+    OPTIONAL_LIBS="fdk-aac-devel ldacbt-abr-devel ldacbt-enc-devel lc3-devel"
+else
+    REQUIRED_LIBS="libbluetooth-dev libdbus-1-dev libasound2-dev libglib2.0-dev libsbc-dev"
+    OPTIONAL_LIBS="libfdk-aac-dev libldacbt-abr-dev libldacbt-enc-dev liblc3-dev"
+fi
 
 MISSING_LIBS=""
-for lib in $REQUIRED_LIBS; do
-    if ! dpkg -l | grep -q "^ii  $lib"; then
-        MISSING_LIBS="$MISSING_LIBS $lib"
-    fi
-done
+if $IS_VOID; then
+    for lib in $REQUIRED_LIBS; do
+        if ! xbps-query -l | grep -q "$lib"; then
+            MISSING_LIBS="$MISSING_LIBS $lib"
+        fi
+    done
+else
+    for lib in $REQUIRED_LIBS; do
+        if ! dpkg -l | grep -q "^ii  $lib"; then
+            MISSING_LIBS="$MISSING_LIBS $lib"
+        fi
+    done
+fi
 
 if [ -n "$MISSING_LIBS" ]; then
     echo "Required libraries missing:$MISSING_LIBS"
     echo "Installing..."
-    sudo apt update
-    sudo apt install -y $REQUIRED_LIBS || {
-        echo "Error: Failed to install required libraries"
-        exit 1
-    }
+    if $IS_VOID; then
+        sudo xbps-install -y $REQUIRED_LIBS || {
+            echo "Error: Failed to install required libraries"
+            exit 1
+        }
+    else
+        sudo apt update
+        sudo apt install -y $REQUIRED_LIBS || {
+            echo "Error: Failed to install required libraries"
+            exit 1
+        }
+    fi
 fi
 
 echo "  ✓ Required libraries available"

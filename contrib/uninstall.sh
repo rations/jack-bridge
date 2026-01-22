@@ -12,6 +12,15 @@ require_root() {
 }
 require_root
 
+# Detect OS
+IS_VOID=false
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "void" ]; then
+        IS_VOID=true
+    fi
+fi
+
 log() { printf '%s\n' "$*"; }
 
 echo "========================================="
@@ -89,29 +98,50 @@ log "Stopping services..."
 
 # Stop all services we manage
 for service in jack-bridge-ports jackd-rt bluealsad bluetoothd jack-bridge-bluetooth-config jack-connection-manager jack-bridge-dbus; do
-  if command -v service >/dev/null 2>&1; then
+  if $IS_VOID && command -v sv >/dev/null 2>&1; then
+    sv stop "$service" 2>/dev/null || true
+  elif command -v service >/dev/null 2>&1; then
     service "$service" stop 2>/dev/null || true
   fi
 done
 
-log "Deregistering init scripts..."
+log "Deregistering services..."
 
-# Deregister SysV init scripts
-if command -v update-rc.d >/dev/null 2>&1; then
-  for script in jackd-rt bluealsad bluetoothd jack-bridge-ports jack-bridge-bluetooth-config jack-connection-manager jack-bridge-dbus; do
-    update-rc.d -f "$script" remove 2>/dev/null || true
+if $IS_VOID; then
+  # Void: remove runit services
+  for svc in jackd-rt bluealsad bluetoothd jack-bridge-ports jack-bridge-bluetooth-config jack-connection-manager jack-bridge-dbus; do
+    if [ -L "/var/service/$svc" ]; then
+      rm -f "/var/service/$svc"
+      log "  Disabled runit service $svc"
+    fi
+    if [ -d "/etc/sv/$svc" ]; then
+      rm -rf "/etc/sv/$svc"
+      log "  Removed runit service $svc"
+    fi
   done
+else
+  # Deregister SysV init scripts
+  if command -v update-rc.d >/dev/null 2>&1; then
+    for script in jackd-rt bluealsad bluetoothd jack-bridge-ports jack-bridge-bluetooth-config jack-connection-manager jack-bridge-dbus; do
+      update-rc.d -f "$script" remove 2>/dev/null || true
+    done
+  fi
 fi
 
-log "Removing init scripts..."
+log "Removing services..."
 
-# Remove init scripts and defaults
-for f in "$INIT_JACK" "$INIT_BLUEALSA" "$INIT_BLUETOOTH" "$INIT_PORTS" "$INIT_BLUETOOTH_CONFIG" "$INIT_CONNECTION_MANAGER" "$INIT_DBUS" "$DEF_JACK" "$DEF_BLUEALSA"; do
-  if [ -e "$f" ]; then
-    rm -f "$f"
-    log "  Removed $f"
-  fi
-done
+if $IS_VOID; then
+  # Void: runit services already removed above
+  :
+else
+  # Remove init scripts and defaults
+  for f in "$INIT_JACK" "$INIT_BLUEALSA" "$INIT_BLUETOOTH" "$INIT_PORTS" "$INIT_BLUETOOTH_CONFIG" "$INIT_CONNECTION_MANAGER" "$INIT_DBUS" "$DEF_JACK" "$DEF_BLUEALSA"; do
+    if [ -e "$f" ]; then
+      rm -f "$f"
+      log "  Removed $f"
+    fi
+  done
+fi
 
 log "Removing binaries and libraries..."
 
@@ -330,11 +360,17 @@ echo "========================================="
 echo ""
 echo "jack-bridge has been removed from your system."
 echo ""
-echo "To also remove installed packages, run:"
-echo "  sudo apt remove jackd2 qjackctl bluez bluez-tools \\"
-echo "  apulse libasound2-plugin-equal"
-echo ""
-echo "  sudo apt autoremove"
+if $IS_VOID; then
+  echo "To also remove installed packages, run:"
+  echo "  sudo xbps-remove jack qjackctl bluez bluez-tools \\"
+  echo "  apulse alsa-plugins-equal"
+else
+  echo "To also remove installed packages, run:"
+  echo "  sudo apt remove jackd2 qjackctl bluez bluez-tools \\"
+  echo "  apulse libasound2-plugin-equal"
+  echo ""
+  echo "  sudo apt autoremove"
+fi
 echo ""
 echo "User data preserved:"
 echo "  - Recordings in ~/Music/"

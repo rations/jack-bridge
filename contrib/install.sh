@@ -19,15 +19,39 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-# Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
-# We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
-# Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+# Detect OS
+IS_VOID=false
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "void" ]; then
+        IS_VOID=true
+    fi
+fi
+
+# Packages
+if $IS_VOID; then
+    # Void Linux packages
+    REQUIRED_PACKAGES="jack alsa-utils alsa-plugins apulse swh-plugins gtk+3 bluez bluez-tools dbus polkit ImageMagick alsa-plugins-bluez libb2 qt6-core qt6-dbus qt6-gui qt6-network qt6-widgets qt6-xml tslib qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations"
+else
+    # Debian packages
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+fi
 
 echo "Installing jack-bridge contrib files"
 
-# Non-interactive package installation for Debian-like systems (will prompt for sudo password)
-if command -v apt >/dev/null 2>&1; then
+# Package installation
+if $IS_VOID; then
+    if command -v xbps-install >/dev/null 2>&1; then
+        echo "Detected Void Linux. Installing required packages: $REQUIRED_PACKAGES"
+        if ! xbps-install -y $REQUIRED_PACKAGES; then
+            echo "Package installation failed. Required packages must be installed for jack-bridge to function."
+            echo "Retry: sudo xbps-install -y $REQUIRED_PACKAGES"
+            exit 1
+        fi
+    else
+        echo "xbps-install not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
+    fi
+elif command -v apt >/dev/null 2>&1; then
     echo "Detected apt. Installing required packages: $REQUIRED_PACKAGES"
     if ! apt update; then
         echo "Warning: apt update failed; continuing to install may still work."
@@ -38,7 +62,7 @@ if command -v apt >/dev/null 2>&1; then
         exit 1
     fi
 else
-    echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
+    echo "No supported package manager found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
 fi
 
 # Cleanup obsolete artifacts from previous versions (authoritative removal)
@@ -104,15 +128,37 @@ fi
 echo "ALSA->JACK bridge uses distro's 50-jack.conf (system:playback)"
 echo "Device switching handled by jack-connection-manager (JACK graph routing)"
 
-# Install init script
-mkdir -p "$INIT_DIR"
-install -m 0755 contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
-echo "Installed init script to ${INIT_DIR}/jackd-rt"
+# Install services
+if $IS_VOID; then
+    # Void Linux: install runit services
+    SV_DIR="/etc/sv"
+    mkdir -p "$SV_DIR"
+    for svc in jackd-rt bluealsad bluetoothd jack-bridge-ports jack-connection-manager jack-bridge-dbus; do
+        if [ -d "contrib/sv/$svc" ]; then
+            cp -r "contrib/sv/$svc" "$SV_DIR/"
+            echo "Installed runit service $svc to $SV_DIR/$svc"
+            # Enable service
+            if [ ! -L "/var/service/$svc" ]; then
+                ln -s "$SV_DIR/$svc" /var/service/ 2>/dev/null || true
+                echo "Enabled runit service $svc"
+            fi
+        fi
+    done
+    # Install defaults (runit can use env files)
+    mkdir -p "$DEFAULTS_DIR"
+    install -m 0644 contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
+    echo "Installed defaults to ${DEFAULTS_DIR}/jackd-rt"
+else
+    # Debian: install SysV init scripts
+    mkdir -p "$INIT_DIR"
+    install -m 0755 contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
+    echo "Installed init script to ${INIT_DIR}/jackd-rt"
 
-# Install defaults file
-mkdir -p "$DEFAULTS_DIR"
-install -m 0644 contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
-echo "Installed defaults to ${DEFAULTS_DIR}/jackd-rt"
+    # Install defaults file
+    mkdir -p "$DEFAULTS_DIR"
+    install -m 0644 contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
+    echo "Installed defaults to ${DEFAULTS_DIR}/jackd-rt"
+fi
 
 # Ensure JACK_NO_AUDIO_RESERVATION is set in /etc/default/jackd-rt to allow service startup
 # without a session D-Bus (useful for headless/service start). If the variable already
@@ -338,15 +384,15 @@ mkdir -p "$(dirname "$LIMITS_DST")"
 install -m 0644 contrib/etc/security/limits.d/audio.conf "$LIMITS_DST" || true
 echo "Installed (replaced) realtime limits template to $LIMITS_DST"
 
-# Register init script with update-rc.d if available
+# Register init script with update-rc.d if available (Debian only)
 # Use priority 02 for start, 98 for stop so jackd stops LAST (after bridge ports)
-if command -v update-rc.d >/dev/null 2>&1; then
+if ! $IS_VOID && command -v update-rc.d >/dev/null 2>&1; then
     echo "Registering jackd-rt init script with update-rc.d..."
     update-rc.d -f jackd-rt remove >/dev/null 2>&1 || true
     update-rc.d jackd-rt defaults 02 98 || true
     echo "  ✓ jackd-rt: starts at priority 02, stops at priority 98 (after dependent services)"
 else
-    echo "update-rc.d not available; please register ${INIT_DIR}/jackd-rt in your init system manually if desired."
+    echo "update-rc.d not available or Void Linux; init system handled separately."
 fi
 
  # Disable PulseAudio autospawn system-wide (create /etc/pulse/client.conf.d/01-no-autospawn.conf)

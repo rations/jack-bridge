@@ -1,0 +1,119 @@
+#!/bin/sh
+# runit run script for jack-bridge-ports
+# Based on contrib/init.d/jack-bridge-ports
+
+exec 2>&1
+
+DEVICES_CONF="/etc/jack-bridge/devices.conf"
+LOGFILE="/var/log/jack-bridge-ports.log"
+
+# Load system defaults
+if [ -r "$DEVICES_CONF" ]; then
+    . "$DEVICES_CONF"
+fi
+
+# Detect user
+detect_user() {
+    USERNAME=""
+    if [ -n "$SUDO_USER" ]; then
+        USERNAME="$SUDO_USER"
+        return 0
+    fi
+    for user in $(cut -d: -f1 /etc/passwd); do
+        uid=$(id -u "$user" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+            groups=$(id -nG "$user" 2>/dev/null || true)
+            if printf '%s\n' " $groups " | grep -q ' audio '; then
+                USERNAME="$user"
+                return 0
+            fi
+        fi
+    done
+    for user in $(cut -d: -f1 /etc/passwd); do
+        uid=$(id -u "$user" 2>/dev/null || true)
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+            USERNAME="$user"
+            return 0
+        fi
+    done
+    USERNAME="root"
+}
+
+detect_user
+if [ -z "$USERNAME" ]; then
+    echo "Could not determine user to run under"
+    exit 1
+fi
+
+# Wait for JACK
+WAIT_SECS=3
+WAIT_INTERVAL=0.5
+waited=0
+
+if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
+    WAIT_SECS=1.5
+fi
+
+echo "jack-bridge-ports: Waiting for JACK to be ready (max ${WAIT_SECS}s)..." >> "$LOGFILE" 2>&1
+
+while [ $waited -lt $WAIT_SECS ]; do
+    if command -v jack_wait >/dev/null 2>&1; then
+        if jack_wait -w -t 1 >/dev/null 2>&1; then
+            echo "jack-bridge-ports: JACK ready via jack_wait (after ${waited}s)" >> "$LOGFILE" 2>&1
+            break
+        else
+            echo "jack-bridge-ports: jack_wait failed, retrying..." >> "$LOGFILE" 2>&1
+        fi
+    else
+        if pidof jackd >/dev/null 2>&1; then
+            echo "jack-bridge-ports: jackd process detected, proceeding (after ${waited}s)" >> "$LOGFILE" 2>&1
+            sleep 1
+            break
+        else
+            echo "jack-bridge-ports: Waiting... jackd not running yet" >> "$LOGFILE" 2>&1
+        fi
+    fi
+    sleep $WAIT_INTERVAL
+    waited=$(awk "BEGIN {printf \"%.1f\", $waited + $WAIT_INTERVAL}")
+done
+
+if [ $waited -ge $WAIT_SECS ]; then
+    echo "JACK not ready after ${WAIT_SECS}s; cannot spawn ports (check jackd-rt service)" >> "$LOGFILE" 2>&1
+    exit 1
+fi
+
+# Prepare log
+touch "$LOGFILE" 2>/dev/null || true
+chown "$USERNAME":"$USERNAME" "$LOGFILE" 2>/dev/null || true
+echo "=== jack-bridge-ports started at $(date) ===" >> "$LOGFILE" 2>&1
+
+# Load user overrides
+USER_HOME=$(getent passwd "$USERNAME" | cut -d: -f6)
+if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/jack-bridge/devices.conf" ]; then
+    . "$USER_HOME/.config/jack-bridge/devices.conf"
+fi
+
+: ${BT_PERIOD:=256}
+: ${BT_NPERIODS:=3}
+
+echo "USB/HDMI ports will be spawned on-demand when user selects them" >> "$LOGFILE" 2>&1
+echo "system:capture ports created by jackd in duplex mode (-D flag)" >> "$LOGFILE" 2>&1
+echo "Bluetooth ports will be spawned on-demand when user selects Bluetooth" >> "$LOGFILE" 2>&1
+
+# Give ports time to register
+sleep 2
+
+# Verify
+if command -v jack_lsp >/dev/null 2>&1; then
+    PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|system):' || true)
+    if [ -n "$PORTS" ]; then
+        echo "Active persistent bridge ports:" >> "$LOGFILE" 2>&1
+        echo "$PORTS" | sed 's/^/  /' >> "$LOGFILE" 2>&1
+    else
+        echo "No bridge ports found after spawn; check $LOGFILE"
+        exit 1
+    fi
+fi
+
+# Keep running (this is a one-shot service, but runit expects long-running)
+exec sleep infinity

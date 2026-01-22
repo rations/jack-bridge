@@ -1,0 +1,34 @@
+#!/bin/sh
+# runit run script for bluetoothd
+# Based on contrib/init.d/bluetoothd
+
+exec 2>&1
+
+: ${BLUETOOTHD_BIN:=/usr/sbin/bluetoothd}
+: ${BLUETOOTHD_ARGS:="-n -E"}
+: ${BLUETOOTHD_PIDFILE:=/var/run/bluetoothd.pid}
+: ${BLUETOOTHD_LOG:=/var/log/bluetoothd.log}
+: ${BLUETOOTHD_CONF:=/etc/bluetooth/main.conf}
+
+# Load overrides
+if [ -r /etc/default/bluetoothd ]; then
+    . /etc/default/bluetoothd
+fi
+
+if [ ! -x "$BLUETOOTHD_BIN" ]; then
+    echo "bluetoothd not found at $BLUETOOTHD_BIN"
+    exit 1
+fi
+
+# Ensure D-Bus
+if ! pidof dbus-daemon >/dev/null 2>&1; then
+    echo "dbus-daemon not running; cannot start bluetoothd"
+    exit 1
+fi
+
+# Prepare log
+touch "$BLUETOOTHD_LOG" 2>/dev/null || true
+chown root:root "$BLUETOOTHD_LOG" 2>/dev/null || true
+
+# Start
+exec "$BLUETOOTHD_BIN" $BLUETOOTHD_ARGS >>"$BLUETOOTHD_LOG" 2>&1

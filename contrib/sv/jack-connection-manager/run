@@ -1,0 +1,49 @@
+#!/bin/sh
+# runit run script for jack-connection-manager
+# Based on contrib/init.d/jack-connection-manager
+
+exec 2>&1
+
+DAEMON="/usr/local/bin/jack-connection-manager"
+LOGFILE="/var/log/jack-connection-manager.log"
+
+# Determine login user
+LOGIN_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-}")
+if [ -z "$LOGIN_USER" ]; then
+    LOGIN_USER=$(awk -F: '$3>=1000 && $3<65534 {print $1; exit}' /etc/passwd)
+fi
+
+if [ -z "$LOGIN_USER" ]; then
+    echo "ERROR: Could not determine desktop user"
+    exit 1
+fi
+
+if [ ! -x "$DAEMON" ]; then
+    echo "ERROR: $DAEMON not found or not executable"
+    exit 1
+fi
+
+# Wait for JACK
+echo "Waiting for JACK server..."
+for i in $(seq 1 30); do
+    if su - "$LOGIN_USER" -c "jack_lsp >/dev/null 2>&1"; then
+        break
+    fi
+    sleep 1
+done
+
+# Wait for bridge ports
+echo "Waiting for bridge ports..."
+for i in $(seq 1 10); do
+    if su - "$LOGIN_USER" -c "jack_lsp 2>/dev/null | grep -q 'usb_out\\|hdmi_out'"; then
+        break
+    fi
+    sleep 1
+done
+
+# Create log
+touch "$LOGFILE" 2>/dev/null || true
+chown "$LOGIN_USER":"$LOGIN_USER" "$LOGFILE" 2>/dev/null || true
+
+# Start as user
+exec su - "$LOGIN_USER" -c "$DAEMON >>$LOGFILE 2>&1"

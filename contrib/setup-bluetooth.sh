@@ -20,6 +20,15 @@
 
 set -eu
 
+# Detect OS
+IS_VOID=false
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "void" ]; then
+        IS_VOID=true
+    fi
+fi
+
 TARGET_USER="${1:-}"
 
 # Helper: print and run
@@ -69,7 +78,10 @@ else
 fi
 
 # Best-effort reload of dbus and polkit to pick up new policies (no systemd dependency)
-if command -v service >/dev/null 2>&1; then
+if $IS_VOID && command -v sv >/dev/null 2>&1; then
+    sv reload dbus >/dev/null 2>&1 || true
+    sv restart polkitd >/dev/null 2>&1 || true
+elif command -v service >/dev/null 2>&1; then
     service dbus reload >/dev/null 2>&1 || true
     service polkit restart >/dev/null 2>&1 || true
 fi

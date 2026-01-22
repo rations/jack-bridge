@@ -1,0 +1,57 @@
+#!/bin/sh
+# runit run script for bluealsad
+# Based on contrib/init.d/bluealsad
+
+exec 2>&1
+
+DAEMON="/usr/local/bin/bluealsad"
+PIDFILE="/var/run/bluealsad.pid"
+
+# Defaults
+BLUEALSAD_USER="${BLUEALSAD_USER:-bluealsa}"
+BLUEALSAD_ARGS="${BLUEALSAD_ARGS:---keep-alive=-1 -p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs}"
+BLUEALSAD_LOG="${BLUEALSAD_LOG:-/var/log/bluealsad.log}"
+
+# Load overrides
+if [ -r /etc/default/bluealsad ]; then
+    . /etc/default/bluealsad
+fi
+
+# Ensure runtime dirs
+if [ ! -d /var/lib/bluealsa ]; then
+    mkdir -p /var/lib/bluealsa 2>/dev/null || true
+    chown "$BLUEALSAD_USER":"$BLUEALSAD_USER" /var/lib/bluealsa 2>/dev/null || true
+    chmod 0700 /var/lib/bluealsa 2>/dev/null || true
+fi
+touch "$BLUEALSAD_LOG" 2>/dev/null || true
+chown "$BLUEALSAD_USER":"$BLUEALSAD_USER" "$BLUEALSAD_LOG" 2>/dev/null || true
+
+# Wait for D-Bus
+i=0
+while [ $i -lt 10 ]; do
+    if command -v gdbus >/dev/null 2>&1; then
+        if gdbus call --system --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+            break
+        fi
+    else
+        sleep 1
+        break
+    fi
+    sleep 1
+    i=$((i+1))
+done
+
+# Ensure user exists
+if ! id "$BLUEALSAD_USER" >/dev/null 2>&1; then
+    echo "User '$BLUEALSAD_USER' does not exist"
+    exit 1
+fi
+
+# Check daemon
+if [ ! -x "$DAEMON" ]; then
+    echo "Binary not found: $DAEMON"
+    exit 1
+fi
+
+# Start
+exec su "$BLUEALSAD_USER" -s /bin/sh -c "exec $DAEMON $BLUEALSAD_ARGS >>$BLUEALSAD_LOG 2>&1"

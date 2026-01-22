@@ -53,6 +53,8 @@
 
 **Debian-based distributions** Without systemd. Using sysVinit. Should be compatible with OpenRC but has not been tested. Testing done on Devuan 5 XFCE and Mate Desktop Environments using sysVinit.
 
+**Void Linux** with runit init system. The installer automatically detects Void and adapts accordingly.
+
 **Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. Removing PulseAudio is not required as the installer Disables PulseAudio autospawn system-wide and if you need pulseaudio for steam games you can start and stop pulseaudio as needed in a terminal with pulseaudio --start and pulseaudio --kill. As it is now steams version of proton does not support jack and steams runtime would have to be rebuilt as a custom binary and everytime there is an upgrade it would stop working. Until I can figure something out unfortunatly jack-bridge does not work with steam. If you use wine for gaming jack-bridge works fine. 
 
 ## Installation
@@ -93,12 +95,32 @@ sudo sh contrib/install.sh
 sudo reboot
 ```
 
+### Void Linux Installation
+
+For Void Linux with runit:
+
+```bash
+# Clone repository
+git clone https://github.com/rations/jack-bridge.git
+```
+```bash
+cd jack-bridge
+```
+```bash
+sudo sh contrib/install.sh
+```
+```bash
+sudo reboot
+```
+
+The installer detects Void Linux and uses `xbps-install` for packages, installs runit services instead of SysV init scripts.
+
 ### What Gets Installed
 
 The installer will:
-1. Install required packages (jackd, alsa-utils, bluez, etc.)
+1. Install required packages (jack, alsa-utils, bluez, etc.)
 2. Configure ALSA → JACK routing
-3. Install SysV init scripts for jackd-rt, bluealsad, bluetoothd, jack-bridge-ports
+3. Install runit services for jackd-rt, bluealsad, bluetoothd, jack-bridge-ports (on Void) or SysV init scripts (on Debian)
 4. Install Alsa Sound Connect GUI to `/usr/local/bin/mxeq`
 5. Create desktop launcher (Applications → Sound & Video → Alsa Sound Connect)
 6. Set up Bluetooth D-Bus policies and polkit rules
@@ -302,7 +324,7 @@ cd ~/jack-bridge
 sudo sh contrib/uninstall.sh
 
 The uninstaller removes:
-- All init scripts and service registrations
+- All init scripts/service registrations (SysV or runit)
 - Installed binaries (mxeq, BlueALSA tools)
 - Configuration files (/etc/asound.conf, /etc/jack-bridge/)
 - Desktop launcher
@@ -310,7 +332,7 @@ The uninstaller removes:
 - Helper scripts
 
 **Note:** The uninstaller does NOT remove:
-- Installed packages (jackd, alsa-utils, bluez, etc.)
+- Installed packages (jack/jackd2, alsa-utils, bluez, etc.)
 - User-created recordings in ~/Music/
 - User-specific configs in ~/.config/jack-bridge/
 
@@ -322,7 +344,7 @@ sudo apt autoremove
 
 ## Architecture
 
-### Service Stack (SysV Init)
+### Service Stack (SysV Init or runit)
 
 Boot Sequence:
 ├─ dbus (system)
@@ -363,11 +385,11 @@ Audio Output
 - `/usr/local/bin/bluealsa-aplay` - BlueALSA player
 - `/usr/local/bin/bluealsa-rfcomm` - Bluetooth RFCOMM terminal
 
-**Init Scripts:**
-- `/etc/init.d/jackd-rt` - JACK audio server
-- `/etc/init.d/bluealsad` - BlueALSA daemon
-- `/etc/init.d/bluetoothd` - BlueZ Bluetooth daemon
-- `/etc/init.d/jack-bridge-ports` - Bridge ports
+**Init Scripts/Services:**
+- `/etc/init.d/jackd-rt` (SysV) or `/etc/sv/jackd-rt` (runit) - JACK audio server
+- `/etc/init.d/bluealsad` (SysV) or `/etc/sv/bluealsad` (runit) - BlueALSA daemon
+- `/etc/init.d/bluetoothd` (SysV) or `/etc/sv/bluetoothd` (runit) - BlueZ Bluetooth daemon
+- `/etc/init.d/jack-bridge-ports` (SysV) or `/etc/sv/jack-bridge-ports` (runit) - Bridge ports
 
 **Configuration:**
 - `/etc/asound.conf` - ALSA routing and EQ configuration

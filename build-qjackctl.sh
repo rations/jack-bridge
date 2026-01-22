@@ -5,17 +5,39 @@ set -e
 
 echo "Building custom qjackctl for jack-bridge..."
 
+# Detect OS
+IS_VOID=false
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "void" ]; then
+        IS_VOID=true
+    fi
+fi
+
 # Check for required packages (blocking version - we need these to succeed)
 echo "Checking build dependencies..."
-REQUIRED_PKGS="cmake g++ qt6-base-dev qt6-svg-dev qt6-tools-dev-tools libjack-jackd2-dev libasound2-dev"
+if $IS_VOID; then
+    REQUIRED_PKGS="cmake gcc qt6-base-devel qt6-svg-devel qt6-tools-devel jack-devel alsa-lib-devel"
+else
+    REQUIRED_PKGS="cmake g++ qt6-base-dev qt6-svg-dev qt6-tools-dev-tools libjack-jackd2-dev libasound2-dev"
+fi
 MISSING_PKGS=""
 
-for pkg in $REQUIRED_PKGS; do
-    if ! dpkg -l | grep -q "^ii  $pkg"; then
-        echo "ERROR: Missing required package: $pkg"
-        MISSING_PKGS="$MISSING_PKGS $pkg"
-    fi
-done
+if $IS_VOID; then
+    for pkg in $REQUIRED_PKGS; do
+        if ! xbps-query -l | grep -q "$pkg"; then
+            echo "ERROR: Missing required package: $pkg"
+            MISSING_PKGS="$MISSING_PKGS $pkg"
+        fi
+    done
+else
+    for pkg in $REQUIRED_PKGS; do
+        if ! dpkg -l | grep -q "^ii  $pkg"; then
+            echo "ERROR: Missing required package: $pkg"
+            MISSING_PKGS="$MISSING_PKGS $pkg"
+        fi
+    done
+fi
 
 if [ -n "$MISSING_PKGS" ]; then
     echo "Missing required packages: $MISSING_PKGS"

@@ -1,0 +1,25 @@
+#!/bin/sh
+# runit run script for jack-bridge-dbus
+# Based on contrib/init.d/jack-bridge-dbus
+
+exec 2>&1
+
+DAEMON=/usr/local/bin/jack-bridge-dbus
+PIDFILE=/var/run/jack-bridge-dbus.pid
+NAME=jack-bridge-dbus
+
+if [ ! -x $DAEMON ]; then
+    exit 0
+fi
+
+# Check if already running
+if [ -f $PIDFILE ]; then
+    pid=$(cat $PIDFILE 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        exit 0
+    fi
+    rm -f $PIDFILE 2>/dev/null || true
+fi
+
+# Start
+exec $DAEMON
