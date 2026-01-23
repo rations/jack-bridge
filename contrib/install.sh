@@ -650,27 +650,6 @@ else
     echo "  ! aplay not found; skipping ALSA verification"
 fi
 
-# Install udev rules for persistent ALSA card naming (robust USB override fix)
-UDEV_RULE_SRC="contrib/etc/udev/rules.d/90-jack-bridge-alsa.rules"
-UDEV_RULE_DST="/etc/udev/rules.d/90-jack-bridge-alsa.rules"
-if [ -f "$UDEV_RULE_SRC" ]; then
-    echo "Installing udev rules for persistent ALSA card naming to $UDEV_RULE_DST"
-    mkdir -p "$(dirname "$UDEV_RULE_DST")"
-    install -m 0644 "$UDEV_RULE_SRC" "$UDEV_RULE_DST" || true
-    echo "  ✓ Installed udev rules for persistent card naming"
-    echo "  ✓ Internal audio will be named 'Internal' regardless of probe order"
-    echo "  ✓ USB audio will be named 'USB'"
-    # Reload udev rules (best-effort)
-    if command -v udevadm >/dev/null 2>&1; then
-        udevadm control --reload-rules >/dev/null 2>&1 || true
-        udevadm trigger --subsystem-match=sound >/dev/null 2>&1 || true
-        echo "  ✓ Reloaded udev rules and triggered sound subsystem"
-    fi
-else
-    echo "WARNING: udev rules not found at $UDEV_RULE_SRC; persistent naming disabled"
-    echo "         USB devices may still override jack-bridge on boot"
-fi
-
 # Install polkit rule to authorize BlueZ Adapter/Device operations for users in 'audio' or 'bluetooth'
 POLKIT_RULE_SRC="contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
 POLKIT_RULE_DST="/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
