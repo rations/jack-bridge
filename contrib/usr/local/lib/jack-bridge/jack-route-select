@@ -125,6 +125,29 @@ save_user_kv() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Detect internal card number (first non-USB card, returns 0 if none found)
+get_internal_card_number() {
+    if have aplay; then
+        # Parse aplay -l output to find first non-USB card
+        aplay -l 2>/dev/null | awk '
+            /^card [0-9]+:/ {
+                card_num = $2;
+                sub(/:/, "", card_num);
+                card_line = $0;
+                if (card_line !~ /USB/) {
+                    print card_num;
+                    exit 0;
+                }
+            }
+            END {
+                print "0";
+            }
+        '
+    else
+        echo "0"
+    fi
+}
+
 jack_rate() {
   if have jack_samplerate; then
     r=$(jack_samplerate 2>/dev/null | awk '/sample rate/ {print $3; exit}')
@@ -429,7 +452,9 @@ route() {
   out_pcm=""
   case "$target" in
     internal)
-      out_pcm="${INTERNAL_DEVICE:-hw:0}"
+      # Detect the actual internal card (first non-USB card)
+      internal_card=$(get_internal_card_number)
+      out_pcm="${INTERNAL_DEVICE:-hw:${internal_card}}"
       ;;
     usb)
       # Detect USB card/device as in ensure_usb_out
