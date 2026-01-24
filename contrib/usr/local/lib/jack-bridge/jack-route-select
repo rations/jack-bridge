@@ -532,11 +532,17 @@ route() {
       ;;
     usb)
       # Kill on-demand HDMI and Bluetooth clients when switching to USB
+      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
       pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
-      ensure_usb_out || log "WARNING: ensure_usb_out failed"
-      # Spawn usb_in for USB capture (usb_in:capture_1/2 ports for manual connection in qjackctl)
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true  # Clean up any existing usb_in
+
+      # Try to spawn usb_in first (for full-duplex support)
       ensure_usb_in || log "WARNING: ensure_usb_in failed"
+
+      # Then spawn usb_out
+      ensure_usb_out || log "WARNING: ensure_usb_out failed"
+
       newpref="usb_out:playback_"
       ;;
     hdmi)
