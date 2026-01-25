@@ -1017,6 +1017,7 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_signal_connect(set_input_btn, "clicked", G_CALLBACK(on_bt_set_output_clicked), NULL);
 }
 
+
 /* Detect internal card number (first non-USB card, returns 0 if none found) */
 static int get_internal_card_number(void) {
     // Use system call to get aplay output, similar to detection script
@@ -1292,24 +1293,30 @@ static const char *JB_BEGIN = "# BEGIN jack-bridge";
 static const char *JB_END   = "# END jack-bridge";
 
 
-/* Detect USB card number (returns -1 if no USB found) */
+/* Detect USB card number (first USB card, returns -1 if none found) */
 static int get_usb_card_number(void) {
-    FILE *f = fopen("/proc/asound/cards", "r");
-    if (!f) return -1;
-    char line[512];
-    int card = -1;
-    while (fgets(line, sizeof(line), f)) {
-        /* Look for "card N: ... [USB" or "card N: USB" */
-        if (strstr(line, "USB")) {
-            /* Extract card number from "card N:" prefix */
-            if (sscanf(line, " %d", &card) == 1) {
-                fclose(f);
-                return card;
+    // Use system call to get aplay output
+    FILE *fp = popen("aplay -l 2>/dev/null", "r");
+    if (!fp) return -1;
+
+    char line[256];
+    int card_num;
+    while (fgets(line, sizeof(line), fp)) {
+        // Check for card header
+        if (sscanf(line, "card %d:", &card_num) == 1) {
+            // Check if this card section contains "usb" anywhere (case-insensitive)
+            char *lower_line = g_ascii_strdown(line, -1);
+            if (lower_line && strstr(lower_line, "usb")) {
+                g_free(lower_line);
+                pclose(fp);
+                return card_num; // Found USB card
             }
+            g_free(lower_line);
         }
     }
-    fclose(f);
-    return -1;
+
+    pclose(fp);
+    return -1; // No USB card found
 }
 
 static gboolean is_usb_present(void) {
@@ -1653,8 +1660,9 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
 
     if (g_strcmp0(label, "Internal") == 0) {
         ok = route_to_target_async("internal");
-        /* Switch mixer to show internal card (hw:0) controls */
-        rebuild_mixer_for_card(0);
+        /* Switch mixer to show detected internal card controls */
+        int internal_card = get_internal_card_number();
+        rebuild_mixer_for_card(internal_card);
     } else if (g_strcmp0(label, "USB") == 0) {
         ok = route_to_target_async("usb");
         /* Switch mixer to show USB card controls */
@@ -1665,10 +1673,12 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     } else if (g_strcmp0(label, "HDMI") == 0) {
         ok = route_to_target_async("hdmi");
         /* HDMI uses internal card for capture, so show internal mixer */
-        rebuild_mixer_for_card(0);
+        int internal_card = get_internal_card_number();
+        rebuild_mixer_for_card(internal_card);
     } else if (g_strcmp0(label, "Bluetooth") == 0) {
         /* Bluetooth uses internal card for capture, so show internal mixer */
-        rebuild_mixer_for_card(0);
+        int internal_card = get_internal_card_number();
+        rebuild_mixer_for_card(internal_card);
         
         /* Get MAC from BT panel selection */
         char *obj = NULL;
@@ -1800,19 +1810,38 @@ static void create_devices_panel(GtkWidget *main_box) {
     g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
 
-    /* Initialize from persisted preference, but fall back if device not present */
+    /* Initialize radio button based on current JACK routing state, fallback to persisted preference */
     gchar *pref = load_preferred_output();
     gboolean have_usb = gtk_widget_get_sensitive(ui->rb_usb);
     gboolean have_hdmi = gtk_widget_get_sensitive(ui->rb_hdmi);
     gboolean have_bt = gtk_widget_get_sensitive(ui->rb_bt);
 
-    if (g_strcmp0(pref, "usb") == 0 && have_usb) {
+    /* Check current routing state by looking for active JACK ports */
+    gboolean usb_active = FALSE;
+    gboolean bt_active = FALSE;
+
+    /* Check if usb_out ports exist (indicates USB routing is active) */
+    if (have_usb) {
+        FILE *fp = popen("jack_lsp 2>/dev/null | grep -q '^usb_out:'", "r");
+        if (fp) {
+            usb_active = (pclose(fp) == 0);
+        }
+    }
+
+    /* Check if bluealsa ports exist (indicates Bluetooth routing is active) */
+    if (have_bt) {
+        bt_active = bluealsa_ports_exist();
+    }
+
+    /* Set radio button based on current routing state, fallback to preference */
+    if (bt_active) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
+    } else if (usb_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
     } else if (g_strcmp0(pref, "hdmi") == 0 && have_hdmi) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
-    } else if (g_strcmp0(pref, "bluetooth") == 0 && have_bt) {
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
     } else {
+        /* Default to Internal for any other case */
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
     }
     g_free(pref);

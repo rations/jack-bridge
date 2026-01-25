@@ -128,24 +128,16 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Detect internal card number (first non-USB card, returns 0 if none found)
 get_internal_card_number() {
     if have aplay; then
-        # Parse aplay -l output to find first non-USB card
-        aplay -l 2>/dev/null | awk '
-            /^card [0-9]+:/ {
-                card_num = $2;
-                sub(/:/, "", card_num);
-                card_line = $0;
-                if (card_line !~ /USB/) {
-                    print card_num;
-                    exit 0;
-                }
-            }
-            END {
-                print "0";
-            }
-        '
-    else
-        echo "0"
+        aplay_out=$(aplay -l 2>/dev/null)
+        for card in 0 1 2 3 4 5 6 7 8 9; do
+            section=$(echo "$aplay_out" | sed -n "/^card $card:/,/^card $((card+1)):/p" | head -n -1)
+            if [ -n "$section" ] && ! echo "$section" | grep -qi "usb"; then
+                echo "$card"
+                return
+            fi
+        done
     fi
+    echo "0"
 }
 
 jack_rate() {
@@ -336,11 +328,11 @@ ensure_hdmi_out() {
 ensure_usb_in() {
   # ON-DEMAND capture: spawn alsa_in reading from USB audio interface
   # This creates usb_in:capture_1/2 ports for USB microphones/guitars
-  
+
   # Kill any existing usb_in process
   pkill -f "alsa_in -j usb_in" 2>/dev/null || true
   sleep 0.3
-  
+
   # Detect USB capture device
   usb_card=""
   usb_dev=""
