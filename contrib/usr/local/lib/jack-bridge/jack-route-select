@@ -537,11 +537,17 @@ route() {
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
       pkill -f "alsa_in -j usb_in" 2>/dev/null || true  # Clean up any existing usb_in
 
-      # Try to spawn usb_in first (for full-duplex support)
-      ensure_usb_in || log "WARNING: ensure_usb_in failed"
+      # Spawn usb_out first
+      if ! ensure_usb_out; then
+        log "ERROR: ensure_usb_out failed - USB output not available"
+        return 1
+      fi
 
-      # Then spawn usb_out
-      ensure_usb_out || log "WARNING: ensure_usb_out failed"
+      # Then try to spawn usb_in (for full-duplex support)
+      if ! ensure_usb_in; then
+        log "ERROR: ensure_usb_in failed - USB capture may not be available"
+        # Continue anyway - usb_out is working
+      fi
 
       newpref="usb_out:playback_"
       ;;

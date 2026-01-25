@@ -1017,6 +1017,45 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_signal_connect(set_input_btn, "clicked", G_CALLBACK(on_bt_set_output_clicked), NULL);
 }
 
+/* Detect internal card number (first non-USB card, returns 0 if none found) */
+static int get_internal_card_number(void) {
+    // Use system call to get aplay output, similar to detection script
+    FILE *fp = popen("aplay -l 2>/dev/null", "r");
+    if (!fp) return 0;
+
+    char line[256];
+    int card_num;
+    int found_non_usb = -1;
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Check for card header
+        if (sscanf(line, "card %d:", &card_num) == 1) {
+            // If we found a non-USB card from previous iteration, return it
+            if (found_non_usb != -1) {
+                pclose(fp);
+                return found_non_usb;
+            }
+            // Assume this card is non-USB until we find "usb" in its section
+            found_non_usb = card_num;
+        }
+
+        // Check if current card section contains "usb" anywhere (case-insensitive)
+        if (found_non_usb == card_num) {
+            char *lower_line = g_ascii_strdown(line, -1);
+            if (lower_line && strstr(lower_line, "usb")) {
+                // This card is USB, mark as invalid
+                found_non_usb = -1;
+            }
+            g_free(lower_line);
+        }
+    }
+
+    pclose(fp);
+
+    // Return the last valid non-USB card found, or 0 as fallback
+    return (found_non_usb != -1) ? found_non_usb : 0;
+}
+
 /* Main function starts here */
 int main(int argc, char *argv[]) {
     /* Forward-declared Bluetooth helpers are defined in src/gui_bt.c */
@@ -1035,7 +1074,9 @@ int main(int argc, char *argv[]) {
     gtk_window_set_default_icon_name("alsa-sound-connect");
 
     MixerData mixer_data = {0};
-    init_alsa_mixer(&mixer_data, 0);  /* Start with card 0 (internal) */
+    int internal_card = get_internal_card_number();
+    fprintf(stderr, "mxeq: Detected internal card %d for mixer initialization\n", internal_card);
+    init_alsa_mixer(&mixer_data, internal_card);  /* Start with detected internal card */
     /* Store global reference for dynamic mixer switching */
     g_mixer_data = &mixer_data;
     /* Ensure per-user ALSA override exists so Recorder works without root/system writes */

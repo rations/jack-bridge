@@ -15,9 +15,6 @@ log() {
 }
 
 log "Starting ALSA device detection"
-# Wait for udev to settle - increased to 5s to handle USB device timing variations
-sleep 5
-log "Slept 5 seconds for udev to settle"
 
 aplay_cmd=$(command -v aplay 2>/dev/null || true)
 arecord_cmd=$(command -v arecord 2>/dev/null || true)
@@ -28,13 +25,34 @@ if [ -z "${aplay_cmd}" ] || [ -z "${arecord_cmd}" ]; then
     exit 0
 fi
 
-# Capture listings
-log "Running aplay -l and arecord -l"
-aplay_out=$("${aplay_cmd}" -l 2>/dev/null || true)
-arecord_out=$("${arecord_cmd}" -l 2>/dev/null || true)
+# Retry loop for device detection - handles varying boot times
+retry_count=0
+max_retries=5
+while [ $retry_count -lt $max_retries ]; do
+    log "Device detection attempt $((retry_count + 1))/$max_retries"
 
-log "Raw aplay output: $aplay_out"
-log "Raw arecord output: $arecord_out"
+    # Capture listings
+    log "Running aplay -l and arecord -l"
+    aplay_out=$("${aplay_cmd}" -l 2>/dev/null || true)
+    arecord_out=$("${arecord_cmd}" -l 2>/dev/null || true)
+
+    log "Raw aplay output: $aplay_out"
+    log "Raw arecord output: $arecord_out"
+
+    # Check if we have any cards at all
+    if printf '%s\n' "$aplay_out" | grep -q "^card [0-9]"; then
+        log "Found ALSA cards, proceeding"
+        break
+    else
+        log "No ALSA cards found yet, waiting 1 second before retry"
+        sleep 1
+        retry_count=$((retry_count + 1))
+    fi
+done
+
+if [ $retry_count -ge $max_retries ]; then
+    log "WARNING: No ALSA cards found after $max_retries attempts, using fallback"
+fi
 
 # Extract lines "card N: NAME [DESC]" -> "N|NAME|DESC" for playback/capture
 # Note: sed regex handles the brackets to extract description
