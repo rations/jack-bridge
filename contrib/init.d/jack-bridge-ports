@@ -102,15 +102,15 @@ start() {
     fi
     
     # Wait for JACK to be ready (optimized for fast boot - shorter timeouts)
-    # Cold boot: 2s, Restart: 1s (since JACK should be ready much faster)
+    # Cold boot: 2s, Restart: 1.5s (since JACK should be ready much faster)
     WAIT_SECS=2
-    WAIT_INTERVAL=0.2
+    WAIT_INTERVAL=0.5
     waited=0
 
     # Detect restart scenario for faster response
     if [ -f /var/run/jackd-rt.pid.old ] || [ -f /var/run/jack-bridge-dbus.pid ]; then
         echo "jack-bridge-ports: Detected restart scenario, using fast path"
-        WAIT_SECS=1  # Much faster for restarts
+        WAIT_SECS=1.5
     fi
     
     echo "jack-bridge-ports: Waiting for JACK to be ready (max ${WAIT_SECS}s)..." >> "$LOGFILE" 2>&1
