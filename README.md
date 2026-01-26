@@ -6,7 +6,7 @@
 
 ![Alsa Sound Connect GUI](Alsa-sound-connect-gui.png)
 
-**jack-bridge** provides a complete, lightweight audio stack for Debian-based Linux systems using JACK and ALSA — without systemd, PulseAudio, or PipeWire. Perfect for users who want minimal dependencies and maximum control.
+**jack-bridge** provides a complete, lightweight audio stack for Linux systems using JACK and ALSA — without systemd, PulseAudio, or PipeWire. Perfect for users who want minimal dependencies and maximum control.
 
 ## Features
 
@@ -53,9 +53,19 @@
 
 ## Requirements
 
-**Debian-based distributions** Without systemd. Using sysVinit. Should be compatible with OpenRC but has not been tested. Testing done on Devuan 5 XFCE and Mate Desktop Environments using sysVinit.
+**Supported Distributions:**
 
-**Void Linux** with runit init system. The installer automatically detects Void and adapts accordingly.
+- **Debian-based distributions** (Devuan, etc.) with SysV init or OpenRC
+- **Arch Linux-based distributions** (Artix, etc.) with OpenRC
+- **Void Linux** with runit init system
+
+**Init Systems:** SysV init, OpenRC, or runit (no systemd support)
+
+**Testing Status:**
+- ✅ Debian-based with SysV init (Devuan 5 XFCE/Mate)
+- 🧪 UNTESTED Arch Linux with OpenRC 
+- 🧪 UNTESTED Debian-based with OpenRC 
+- 🧪 UNTESTED Void Linux with runit 
 
 **Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. Removing PulseAudio is not required as the installer Disables PulseAudio autospawn system-wide and if you need pulseaudio for steam games you can start and stop pulseaudio as needed in a terminal with pulseaudio --start and pulseaudio --kill. As it is now steams version of proton does not support jack and steams runtime would have to be rebuilt as a custom binary and everytime there is an upgrade it would stop working. Until I can figure something out unfortunatly jack-bridge does not work with steam. If you use wine for gaming jack-bridge works fine. 
 
@@ -63,13 +73,13 @@
 
 ### Quick Install
 
-Download `jack-bridge-20260126.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-UNTESTED-runit-Void-version.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260126.tar.gz
+tar -xf jack-bridge-UNTESTED-runit-Void-version.tar.gz
 ```
 ```bash
-cd jack-bridge-20260126
+cd jack-bridge-UNTESTED-runit-Void-version
 ```
 ```bash
 sudo sh contrib/install.sh
@@ -339,14 +349,30 @@ The uninstaller removes:
 - User-specific configs in ~/.config/jack-bridge/
 
 To also remove packages:
-bash
+
+**For Debian-based systems:**
+```bash
 sudo apt remove jackd2 qjackctl bluez bluez-tools libasound2-plugins \
   alsa-utils apulse swh-plugins
 sudo apt autoremove
+```
+
+**For Arch-based systems:**
+```bash
+sudo pacman -R jack2 qjackctl bluez bluez-tools alsa-plugins \
+  alsa-utils apulse swh-plugins
+sudo pacman -Qdtq | pacman -Rns -  # Remove orphans
+```
+
+**For Void Linux:**
+```bash
+sudo xbps-remove jack jack-devel qjackctl bluez bluez-tools alsa-plugins \
+  alsa-utils apulse swh-plugins
+```
 
 ## Architecture
 
-### Service Stack (SysV Init or runit)
+### Service Stack (SysV Init, OpenRC, or runit)
 
 Boot Sequence:
 ├─ dbus (system)
@@ -388,10 +414,10 @@ Audio Output
 - `/usr/local/bin/bluealsa-rfcomm` - Bluetooth RFCOMM terminal
 
 **Init Scripts/Services:**
-- `/etc/init.d/jackd-rt` (SysV) or `/etc/sv/jackd-rt` (runit) - JACK audio server
-- `/etc/init.d/bluealsad` (SysV) or `/etc/sv/bluealsad` (runit) - BlueALSA daemon
-- `/etc/init.d/bluetoothd` (SysV) or `/etc/sv/bluetoothd` (runit) - BlueZ Bluetooth daemon
-- `/etc/init.d/jack-bridge-ports` (SysV) or `/etc/sv/jack-bridge-ports` (runit) - Bridge ports
+- `/etc/init.d/jackd-rt` (SysV), `/etc/init.d/jackd-rt` (OpenRC), or `/etc/sv/jackd-rt` (runit) - JACK audio server
+- `/etc/init.d/bluealsad` (SysV), `/etc/init.d/bluealsad` (OpenRC), or `/etc/sv/bluealsad` (runit) - BlueALSA daemon
+- `/etc/init.d/bluetoothd` (SysV), `/etc/init.d/bluetoothd` (OpenRC), or `/etc/sv/bluetoothd` (runit) - BlueZ Bluetooth daemon
+- `/etc/init.d/jack-bridge-ports` (SysV), `/etc/init.d/jack-bridge-ports` (OpenRC), or `/etc/sv/jack-bridge-ports` (runit) - Bridge ports
 
 **Configuration:**
 - `/etc/asound.conf` - ALSA routing and EQ configuration
