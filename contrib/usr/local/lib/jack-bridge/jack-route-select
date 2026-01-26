@@ -125,6 +125,21 @@ save_user_kv() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Detect internal card number (first non-USB card, returns 0 if none found)
+get_internal_card_number() {
+    if have aplay; then
+        aplay_out=$(aplay -l 2>/dev/null)
+        for card in 0 1 2 3 4 5 6 7 8 9; do
+            section=$(echo "$aplay_out" | sed -n "/^card $card:/,/^card $((card+1)):/p" | head -n -1)
+            if [ -n "$section" ] && ! echo "$section" | grep -qi "usb"; then
+                echo "$card"
+                return
+            fi
+        done
+    fi
+    echo "0"
+}
+
 jack_rate() {
   if have jack_samplerate; then
     r=$(jack_samplerate 2>/dev/null | awk '/sample rate/ {print $3; exit}')
@@ -313,11 +328,11 @@ ensure_hdmi_out() {
 ensure_usb_in() {
   # ON-DEMAND capture: spawn alsa_in reading from USB audio interface
   # This creates usb_in:capture_1/2 ports for USB microphones/guitars
-  
+
   # Kill any existing usb_in process
   pkill -f "alsa_in -j usb_in" 2>/dev/null || true
   sleep 0.3
-  
+
   # Detect USB capture device
   usb_card=""
   usb_dev=""
@@ -429,7 +444,9 @@ route() {
   out_pcm=""
   case "$target" in
     internal)
-      out_pcm="${INTERNAL_DEVICE:-hw:0}"
+      # Detect the actual internal card (first non-USB card)
+      internal_card=$(get_internal_card_number)
+      out_pcm="${INTERNAL_DEVICE:-hw:${internal_card}}"
       ;;
     usb)
       # Detect USB card/device as in ensure_usb_out
@@ -507,11 +524,23 @@ route() {
       ;;
     usb)
       # Kill on-demand HDMI and Bluetooth clients when switching to USB
+      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
       pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
-      ensure_usb_out || log "WARNING: ensure_usb_out failed"
-      # Spawn usb_in for USB capture (usb_in:capture_1/2 ports for manual connection in qjackctl)
-      ensure_usb_in || log "WARNING: ensure_usb_in failed"
+      pkill -f "alsa_in -j usb_in" 2>/dev/null || true  # Clean up any existing usb_in
+
+      # Spawn usb_out first
+      if ! ensure_usb_out; then
+        log "ERROR: ensure_usb_out failed - USB output not available"
+        return 1
+      fi
+
+      # Then try to spawn usb_in (for full-duplex support)
+      if ! ensure_usb_in; then
+        log "ERROR: ensure_usb_in failed - USB capture may not be available"
+        # Continue anyway - usb_out is working
+      fi
+
       newpref="usb_out:playback_"
       ;;
     hdmi)
