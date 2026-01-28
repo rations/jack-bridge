@@ -19,10 +19,25 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
+# Detect Devuan version for package compatibility
+DEVUAN_VERSION=""
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$ID" = "devuan" ]; then
+        DEVUAN_VERSION=$(echo "$VERSION_ID" | cut -d. -f1)
+    fi
+fi
+
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
 # Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
-REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
+    # Devuan 6 uses polkitd and t64 package names
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 bluez bluez-tools dbus polkitd imagemagick libasound2-plugin-bluez libb2-1 libqt6core6t64 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0t64 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+else
+    # Devuan 5 and other Debian-like systems
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+fi
 
 echo "Installing jack-bridge contrib files"
 
