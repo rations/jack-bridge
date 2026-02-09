@@ -33,7 +33,7 @@ fi
 # Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
 if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
     # Devuan 6 uses polkitd and t64 package names
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 bluez bluez-tools dbus polkitd imagemagick libasound2-plugin-bluez libb2-1 libqt6core6t64 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0t64 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 bluez bluez-tools dbus polkitd imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libqt6core6t64 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0t64 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
 else
     # Devuan 5 and other Debian-like systems
     REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
