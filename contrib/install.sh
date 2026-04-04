@@ -32,7 +32,7 @@ fi
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
 if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
     # Devuan 6 uses polkitd and t64 package names
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
 else
     # Devuan 5 and other Debian-like systems
     REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 libgtkmm-3.0-1v5 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
@@ -609,6 +609,34 @@ if [ -f "$POLKIT_RULE_SRC" ]; then
     fi
 else
     echo "Polkit rule not found at $POLKIT_RULE_SRC; skipping (Pair/Connect may prompt/deny without it)."
+fi
+
+# Install polkit rule for jack-graph to manage jackd-rt service (no password for audio group)
+JACK_POLKIT_RULE_SRC="contrib/polkit/50-jack-bridge.rules"
+JACK_POLKIT_RULE_DST="/etc/polkit-1/rules.d/50-jack-bridge.rules"
+if [ -f "$JACK_POLKIT_RULE_SRC" ]; then
+    echo "Installing jack-graph polkit rule to $JACK_POLKIT_RULE_DST"
+    mkdir -p "$(dirname "$JACK_POLKIT_RULE_DST")"
+    install -m 0644 "$JACK_POLKIT_RULE_SRC" "$JACK_POLKIT_RULE_DST" || true
+    # Reload polkit
+    if pidof polkitd >/dev/null 2>&1; then
+        kill -HUP "$(pidof polkitd | awk '{print $1}')" 2>/dev/null || true
+    fi
+    if command -v service >/dev/null 2>&1; then
+        service polkit restart >/dev/null 2>&1 || true
+    fi
+else
+    echo "WARNING: jack-graph polkit rule not found at $JACK_POLKIT_RULE_SRC"
+fi
+
+# Install jack-bridge service helper script (for jack-graph Start/Stop)
+if [ -f "contrib/usr/local/lib/jack-bridge/jack-bridge-service-helper" ]; then
+    echo "Installing jack-bridge-service-helper script..."
+    mkdir -p "${USR_LIB_DIR}"
+    install -m 0755 contrib/usr/local/lib/jack-bridge/jack-bridge-service-helper "${USR_LIB_DIR}/jack-bridge-service-helper"
+    echo "  ✓ Installed jack-bridge-service-helper to ${USR_LIB_DIR}/jack-bridge-service-helper"
+else
+    echo "WARNING: jack-bridge-service-helper not found"
 fi
 
 # --- jack-bridge Bluetooth adapter convenience helper ---

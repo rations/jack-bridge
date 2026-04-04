@@ -1,0 +1,42 @@
+#!/bin/sh
+# /usr/local/lib/jack-bridge/jack-bridge-service-helper
+# Helper script to manage jackd-rt service with proper settings
+# Called by jack-graph via pkexec
+# Usage: jack-bridge-service-helper {start|stop} [device] [sample_rate] [frames_per_period] [periods_per_buffer] [midi_driver]
+
+set -e
+
+ACTION="$1"
+DEVICE="${2:-}"
+SR="${3:-48000}"
+PERIOD="${4:-256}"
+NPERIODS="${5:-3}"
+MIDI="${6:-seq}"
+
+DEFAULTS_FILE="/etc/default/jackd-rt"
+
+case "$ACTION" in
+    start)
+        # Update /etc/default/jackd-rt with new settings
+        cat > "$DEFAULTS_FILE" <<EOF
+# /etc/default/jackd-rt - Updated by jack-graph
+JACKD_DEVICE="$DEVICE"
+JACKD_SR=$SR
+JACKD_PERIOD=$PERIOD
+JACKD_NPERIODS=$NPERIODS
+JACKD_MIDI="$MIDI"
+JACKD_ARGS=""
+EOF
+        chmod 644 "$DEFAULTS_FILE"
+        
+        # Start the service
+        service jackd-rt start
+        ;;
+    stop)
+        service jackd-rt stop
+        ;;
+    *)
+        echo "Usage: $0 {start|stop} [device] [sample_rate] [frames_per_period] [periods_per_buffer] [midi_driver]"
+        exit 1
+        ;;
+esac

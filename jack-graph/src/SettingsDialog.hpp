@@ -55,7 +55,6 @@ private:
     Gtk::CheckButton m_sync_check;
 
     Gtk::Box m_button_box;
-    Gtk::Button m_apply_btn;
     Gtk::Button m_close_btn;
 
     ApplyCallback m_apply_cb;

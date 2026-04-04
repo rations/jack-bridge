@@ -10,17 +10,13 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-JackServerControl::JackServerControl() : m_jack_pid(0) {
+JackServerControl::JackServerControl() {
 }
 
 JackServerControl::~JackServerControl() {
-    if (m_jack_pid > 0) {
-        stop();
-    }
 }
 
 bool JackServerControl::is_running() const {
-    // This is the standard reliable check used by all jack GUIs
     jack_client_t *test = jack_client_open("status_check", JackNoStartServer, NULL);
     if (test) {
         jack_client_close(test);
@@ -38,69 +34,45 @@ std::string JackServerControl::get_status() const {
 
 bool JackServerControl::start(const JackSettings& settings) {
     if (is_running()) {
+        fprintf(stderr, "jack-graph: JACK is already running.\n");
         return true;
     }
 
-    pid_t pid = fork();
-    if (pid < 0) {
+    fprintf(stderr, "jack-graph: Starting jackd-rt service with new settings via pkexec...\n");
+    
+    // Use pkexec to run the helper script with root privileges
+    // The helper updates /etc/default/jackd-rt and starts the service
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "pkexec /usr/local/lib/jack-bridge/jack-bridge-service-helper start "
+        "\"%s\" %d %d %d \"%s\" 2>&1",
+        settings.interface.c_str(),
+        settings.sample_rate,
+        settings.frames_per_period,
+        settings.periods_per_buffer,
+        settings.midi_driver.c_str());
+    
+    fprintf(stderr, "jack-graph: Running: %s\n", cmd);
+    
+    int ret = system(cmd);
+    if (ret != 0) {
+        fprintf(stderr, "jack-graph: Failed to start jackd-rt service (exit code %d)\n", ret);
         return false;
     }
-
-    if (pid == 0) {
-        std::vector<std::string> args;
-        args.push_back("jackd");
-        args.push_back("-d");
-        args.push_back("alsa");
-
-        if (!settings.interface.empty()) {
-            args.push_back("-d");
-            args.push_back(settings.interface);
-        }
-
-        args.push_back("-r");
-        args.push_back(std::to_string(settings.sample_rate));
-
-        args.push_back("-p");
-        args.push_back(std::to_string(settings.frames_per_period));
-
-        args.push_back("-n");
-        args.push_back(std::to_string(settings.periods_per_buffer));
-
-        if (settings.midi_driver == "seq") {
-            args.push_back("-X");
-            args.push_back("seq");
-        } else if (settings.midi_driver == "none") {
-            args.push_back("-X");
-            args.push_back("none");
-        }
-
-        std::vector<char*> cargs;
-        for (auto& a : args) {
-            cargs.push_back(const_cast<char*>(a.c_str()));
-        }
-        cargs.push_back(nullptr);
-
-        execvp("jackd", cargs.data());
-        _exit(1);
-    }
-
-    m_jack_pid = pid;
-    usleep(1000000);
+    
+    usleep(2000000);
     return is_running();
 }
 
 bool JackServerControl::stop() {
-    const pid_t old_pid = m_jack_pid;
+    fprintf(stderr, "jack-graph: Stopping jackd-rt service via pkexec...\n");
     
-    // Clear m_jack_pid INSTANTLY BEFORE killing
-    m_jack_pid = 0;
-
-    if (old_pid > 0) {
-        kill(old_pid, SIGTERM);
+    // Use pkexec to run the helper script with root privileges
+    int ret = system("pkexec /usr/local/lib/jack-bridge/jack-bridge-service-helper stop 2>&1");
+    if (ret != 0) {
+        fprintf(stderr, "jack-graph: Failed to stop jackd-rt service (exit code %d)\n", ret);
+        return false;
     }
-
-    FILE* fp = popen("pkill -x jackd 2>/dev/null", "r");
-    if (fp) pclose(fp);
     
     return true;
 }

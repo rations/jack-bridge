@@ -2,7 +2,7 @@
 
 #include <string>
 #include <vector>
-#include <sys/types.h>
+#include "Config.hpp"
 
 struct JackSettings {
     std::string interface;
@@ -28,5 +28,5 @@ public:
     std::string list_audio_devices() const;
 
 private:
-    pid_t m_jack_pid;
+    Config m_config;
 };

@@ -218,6 +218,12 @@ if [ -f "$POLKIT_RULE_BLUETOOTH" ]; then
   log "  Removed $POLKIT_RULE_BLUETOOTH"
 fi
 
+# Remove jack-graph polkit rule
+if [ -f "/etc/polkit-1/rules.d/50-jack-bridge.rules" ]; then
+  rm -f "/etc/polkit-1/rules.d/50-jack-bridge.rules"
+  log "  Removed 50-jack-bridge.rules"
+fi
+
 # Remove D-Bus policies and services
 if [ -f "$DBUS_BLUEALSA" ]; then
   rm -f "$DBUS_BLUEALSA"
@@ -245,7 +251,7 @@ for legacy in \
   /usr/share/icons/hicolor/scalable/apps/qjackctl.svg \
   /usr/share/dbus-1/system-services/org.jackaudio.service.service \
   /usr/share/dbus-1/system.d/org.jackaudio.service.conf \
-  /etc/polkit-1/rules.d/50-jack-bridge.rules \
+  /usr/local/lib/jack-bridge/jack-bridge-service-helper \
   ; do
   if [ -e "$legacy" ]; then
     rm -f "$legacy"

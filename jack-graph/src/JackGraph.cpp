@@ -12,6 +12,24 @@ JackGraph::JackGraph()
     setup_ui();
     setup_menu();
 
+    // Connect to JACK if it's already running (system service)
+    m_jack_connected = m_jack.connect("jack-graph");
+    if (m_jack_connected) {
+        std::cerr << "jack-graph: Connected to running JACK server" << std::endl;
+        m_jack.set_port_callback([this]() {
+            Glib::signal_idle().connect_once([this]() {
+                refresh_ports();
+            });
+        });
+        m_jack.set_xrun_callback([this]() {
+            Glib::signal_idle().connect_once([this]() {
+                update_status_bar();
+            });
+        });
+    } else {
+        std::cerr << "jack-graph: JACK not running. Use Settings to start it." << std::endl;
+    }
+
     m_alsa_connected = m_alsa.connect("jack-graph");
 
     refresh_ports();
