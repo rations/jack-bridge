@@ -52,6 +52,8 @@ echo "  - Alsa-sound-connect-gui.png (screenshot)"
 echo "  - build-bluealsa-plugins.sh (build script)"
 echo "  - BUILD_PLUGINS_GUIDE.md (developer docs)"
 echo "  - .gitignore (git file)"
+echo "  - .kilo/ (Kilo IDE config)"
+echo "  - old-dbus/ (old D-Bus service files)"
 echo
 
 # Create the tarball

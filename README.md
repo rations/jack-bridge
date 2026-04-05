@@ -16,13 +16,13 @@
 
 ### JACK Audio Connection Kit - Professional audio server ([JACK Audio Connection Kit](https://jackaudio.org/))
 
-### BlueALSA - Bluetooth audio ALSA backend by Arkadiusz Bokowy ([BlueALSA](https://github.com/Arkq/bluez-alsa))
-
-### jack-graph - JACK and ALSA port connection manager with visual graph interface
+### BlueALSA - Bluetooth audio ALSA backend by Arkadiusz Bokowy ([BlueALSA](https://github.com/Arkq/bluez-alsa)) 
 
 ### BlueZ - Official Linux Bluetooth stack ([BlueZ](http://www.bluez.org/))
 
 ### ALSA - Advanced Linux Sound Architecture ([ALSA](https://www.alsa-project.org/))
+
+### jack-graph - Custom built JACK and ALSA port connection manager with visual graph and Jack settings interface
 
 ### Huge thanks to all these great devs.
 
@@ -34,22 +34,22 @@
 - **Bluetooth panel** - Scan, pair, trust, connect devices with visual feedback
 - **Device switching** - Change output between Internal/USB/HDMI/Bluetooth without restarting JACK
 
-### 🔊 Audio Routing
+### Audio Routing
 - **ALSA → JACK pipeline** - All ALSA apps route through JACK, without systemd, PulseAudio, or PipeWire
 - **Multi-device support** - Seamlessly switch between internal, USB, HDMI, and Bluetooth outputs
 - **Persistent bridge ports** - USB/HDMI/Bluetooth ports spawned on-demand
 - **Capture-aware** - Records from JACK's `system:capture` `system:midi_capture` ports and custom `usb_in:capture` for external audio interface.
-- **jack-graph** - Visually route audio to and from multiple apps and sources using a drag-to-connect graph interface. 
+- **jack-graph** - Change Jack settings and visually route audio to and from multiple apps and sources using our custom built drag-to-connect graph interface. 
 
-### 🎵 Bluetooth Audio Integration
+### Bluetooth Audio Integration
 - **BlueZ + BlueALSA** - Full A2DP/HFP/HSP support without PulseAudio/PipeWire
 - **GUI controls** - Scan, pair, trust, connect, and remove devices
 - **On-demand spawning** - Bluetooth ports created only when needed (prevents boot errors)
 - **Device state tracking** - Buttons auto-enable based on connection status
 
-### ⚙️ System Integration
+### System Integration
 - **SysV init scripts** - Clean startup/shutdown (no systemd required)
-- **Graceful shutdown** - Daemons stop cleanly on reboot/shutdown (still need to fix warnings)
+- **Graceful shutdown** - Daemons stop cleanly on reboot/shutdown
 - **Auto-detection** - Finds audio devices, detects users automatically
 - **Non-root operation** - GUI runs as regular user with polkit for Bluetooth
 
@@ -66,16 +66,10 @@
 Download `jack-bridge-20260209.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260209.tar.gz
-```
-```bash
 cd jack-bridge-20260209
 ```
 ```bash
-sudo chmod +x contrib/install.sh
-```
-```bash
-sudo ./contrib/install.sh
+sudo sh contrib/install.sh
 ```
 ```bash
 sudo reboot
@@ -90,14 +84,8 @@ git clone https://github.com/rations/jack-bridge.git
 ```bash
 cd jack-bridge
 ```
-```bash 
-sudo apt update
-```
 ```bash
-sudo chmod +x contrib/install.sh
-```
-```bash
-sudo ./contrib/install.sh
+sudo sh contrib/install.sh
 ```
 ```bash
 sudo reboot
@@ -121,7 +109,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 ### First Launch
 
 1. Open **Alsa Sound Connect** from Applications menu
-2. Mixer controls for internal audio card will be visible (expandable/collapsible)
+2. Mixer controls for internal audio card will be visible (expandable/collapsible) check under master volume slider that mute is note enabled.
 3. All sections (Recording, Bluetooth, Devices) are collapsed by default - expand as needed
 
 ### Mixer Controls
@@ -141,8 +129,8 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 ### Device Switching
 
 1. Expand "Devices" section
-2. Select Internal, USB, HDMI, or Bluetooth
-3. Mixer automatically updates to show that device's controls
+2. Select Internal, USB, HDMI, or Bluetooth. DO NOT CHANGE INTERFACE IN JACK SETTINGS USING JACK-GRAPH
+3. Mixer automatically updates to show that device's controls (Internal & USB only, HDMI & Bluetooth are controlled by the device
 4. Audio routes to selected output immediately
 
 ### Bluetooth Setup
@@ -152,6 +140,7 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 3. Select device → **Pair** → **Trust** → **Connect**
 4. Click **Set as Output** to route audio through Bluetooth
 5. OR use Devices panel → Bluetooth radio button
+6. After connecting your device if you close Alsa Sound Connect upon opening Alsa Sound Connect again you might need to remove the device from the list and connect again.
 
 **Button Logic:**
 - **Pair**: Enabled if device not paired
@@ -175,7 +164,7 @@ Bluetooth Device ←→ bluetoothd ←→ bluealsad ←→ ALSA bluealsa plugin 
 
 ### On-Demand Port Spawning
 
-USB/HDMi/Bluetooth ports are spawned **on-demand** because:
+USB/HDMI/Bluetooth ports are spawned **on-demand** because:
 - BlueALSA PCM requires an active connection
 - Spawning BlueAlsa at boot would fail if no device connected
 - On-demand prevents error messages and saves resources
@@ -189,15 +178,9 @@ When you select Bluetooth output:
 ### Troubleshooting
 
 **Bluetooth not working**
-If your system has bluetooth already it will conflict with the custom bluealsa setup.
+If your system has bluetooth already it may conflict with the custom bluealsa setup.
 You need to remove/delete 20-bluealsa.conf in /usr/share/alsa/alsa.conf.d or /etc/alsa/conf.d
 Also remove bluez package and run sudo sh contrib/install.sh again to resolve the conflicts. 
-
-**Discovery finds nothing:**
-bash
-rfkill list                    # Check if Bluetooth blocked
-sudo rfkill unblock bluetooth  # Unblock if needed
-service bluetoothd status      # Ensure daemon running
 
 **Cannot pair/connect:**
 - Verify user groups: `id -nG` (should show `audio`, optionally `bluetooth`)
@@ -209,9 +192,7 @@ bash
 jack_lsp | grep bluealsa       # Verify ports exist
 service bluealsad status       # Ensure daemon running
 
-Re-select Bluetooth in Devices panel or run:
-bash
-/usr/local/lib/jack-bridge/jack-route-select bluetooth
+Remove device from list and scan again. Pair, Trust, Connect and Set as Output 
 
 ## Building from Source
 
@@ -412,7 +393,6 @@ This project is open source. Individual components retain their original license
 - BlueALSA: MIT License
 - JACK: LGPL/GPL
 - ALSA: LGPL
-- jack-graph: GPL-2.0
 - jack-graph: GPL-2.0
 
 ## Support

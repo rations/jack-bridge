@@ -6,4 +6,4 @@ Comment=Bluetooth & sound control in ALSA
 Exec=/usr/local/bin/mxeq
 Icon=alsa-sound-connect
 Terminal=false
-Categories=AudioVideo;Audio;
+Categories=AudioVideo;Audio;Multimedia;Multimedia;
