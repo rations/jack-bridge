@@ -205,9 +205,6 @@ if [ -f "contrib/usr/share/applications/jack-graph.desktop" ]; then
 else
     echo "WARNING: jack-graph.desktop not found"
 fi
-else
-    echo "WARNING: jack-graph.desktop not found"
-fi
 
 # Ensure ALSA override directory exists and install default current_input.conf -> input_card0
 ASOUND_D_DIR="${ETC_DIR}/asound.conf.d"
