@@ -173,27 +173,38 @@ if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
 fi
 
 # Install jack-graph binary (JACK/ALSA port connection manager)
-if [ -f "contrib/bin/jack-graph" ]; then
+# Use version-specific binary for compatibility
+if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
+    JACK_GRAPH_SRC="contrib/bin/jack-graph"
+else
+    # Devuan 5 or older - use the Devuan 5 compiled binary
+    JACK_GRAPH_SRC="contrib/bin/jack-graph-devuan-five-version"
+fi
+
+if [ -f "$JACK_GRAPH_SRC" ]; then
     echo "Installing jack-graph (JACK/ALSA port connection manager)..."
     mkdir -p /usr/local/bin
-    install -m 0755 contrib/bin/jack-graph /usr/local/bin/jack-graph
+    install -m 0755 "$JACK_GRAPH_SRC" /usr/local/bin/jack-graph
     echo "  ✓ Installed jack-graph to /usr/local/bin/jack-graph"
 else
-    echo "WARNING: jack-graph binary not found at contrib/bin/jack-graph"
+    echo "WARNING: jack-graph binary not found at $JACK_GRAPH_SRC"
     echo "         Build with: cd jack-graph && make"
 fi
 
 # Install jack-graph desktop file
-if [ -f "jack-graph/resources/jack-graph.desktop" ]; then
+if [ -f "contrib/usr/share/applications/jack-graph.desktop" ]; then
     echo "Installing jack-graph desktop file..."
     mkdir -p /usr/share/applications
-    install -m 0644 jack-graph/resources/jack-graph.desktop /usr/share/applications/jack-graph.desktop
+    install -m 0644 contrib/usr/share/applications/jack-graph.desktop /usr/share/applications/jack-graph.desktop
     echo "  ✓ Installed jack-graph desktop file"
 
     # Update desktop database
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
     fi
+else
+    echo "WARNING: jack-graph.desktop not found"
+fi
 else
     echo "WARNING: jack-graph.desktop not found"
 fi
