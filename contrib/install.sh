@@ -30,19 +30,22 @@ fi
 
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
-# Note: qjackctl removed from packages (we provide custom build in contrib/bin/)
 if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
     # Devuan 6 uses polkitd and t64 package names
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 bluez bluez-tools dbus polkitd imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libqt6core6t64 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0t64 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
 else
     # Devuan 5 and other Debian-like systems
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libqt6core6 libqt6dbus6 libqt6gui6 libqt6network6 libqt6widgets6 libqt6xml6 libts0 qt6-gtk-platformtheme qt6-qpa-plugins qt6-translations-l10n"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 libgtkmm-3.0-1v5 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
 fi
 
 echo "Installing jack-bridge contrib files"
 
 # Non-interactive package installation for Debian-like systems (will prompt for sudo password)
 if command -v apt >/dev/null 2>&1; then
+    # Hold packages that jackd2 pulls in but are not needed
+    echo "Holding unnecessary packages that jackd2 pulls as dependencies..."
+    sudo apt-mark hold qjackctl qt6-wayland qt6-translations-l10n qt6-svg-plugins qt6-qpa-plugins qt6-gtk-platformtheme 2>/dev/null || true
+
     echo "Detected apt. Installing required packages: $REQUIRED_PACKAGES"
     if ! apt update; then
         echo "Warning: apt update failed; continuing to install may still work."
@@ -169,106 +172,39 @@ if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
     echo "Installed jack-autoconnect to ${USR_LIB_DIR}/jack-autoconnect"
 fi
 
-# Install custom qjackctl binary (SYSTEM bus integration)
-if [ -f "contrib/bin/qjackctl" ]; then
-    echo "Installing custom qjackctl (jack-bridge SYSTEM bus integration)..."
-    install -m 0755 contrib/bin/qjackctl /usr/local/bin/qjackctl
-    echo "  ✓ Installed custom qjackctl to /usr/local/bin/qjackctl"
-    echo "  ✓ This binary connects to SYSTEM D-Bus (not SESSION bus)"
+# Install jack-graph binary (JACK/ALSA port connection manager)
+# Use version-specific binary for compatibility
+if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
+    JACK_GRAPH_SRC="contrib/bin/jack-graph"
 else
-    echo "WARNING: Custom qjackctl binary not found at contrib/bin/qjackctl"
-    echo "         Run './build-qjackctl.sh' to build it from qjackctl-1.0.4/ source"
-    echo "         Installing distro qjackctl as fallback..."
-    apt install -y qjackctl || true
-    echo "  ! Distro qjackctl uses SESSION bus (will not integrate with jack-bridge)"
+    # Devuan 5 or older - use the Devuan 5 compiled binary
+    JACK_GRAPH_SRC="contrib/bin/jack-graph-devuan-five-version"
 fi
 
-# Install qjackctl icon for desktop file
-echo "Installing qjackctl icon..."
-mkdir -p /usr/share/icons/hicolor/scalable/apps
-mkdir -p /usr/share/icons/hicolor/128x128/apps
-mkdir -p /usr/share/icons/hicolor/64x64/apps
-mkdir -p /usr/share/icons/hicolor/48x48/apps
-mkdir -p /usr/share/icons/hicolor/32x32/apps
-mkdir -p /usr/share/icons/hicolor/16x16/apps
-
-# Install SVG icon
-if [ -f "contrib/usr/share/icons/hicolor/scalable/apps/qjackctl.svg" ]; then
-    install -m 0644 contrib/usr/share/icons/hicolor/scalable/apps/qjackctl.svg /usr/share/icons/hicolor/scalable/apps/qjackctl.svg
-    echo "  ✓ Installed qjackctl SVG icon"
+if [ -f "$JACK_GRAPH_SRC" ]; then
+    echo "Installing jack-graph (JACK/ALSA port connection manager)..."
+    mkdir -p /usr/local/bin
+    install -m 0755 "$JACK_GRAPH_SRC" /usr/local/bin/jack-graph
+    echo "  ✓ Installed jack-graph to /usr/local/bin/jack-graph"
+else
+    echo "WARNING: jack-graph binary not found at $JACK_GRAPH_SRC"
+    echo "         Build with: cd jack-graph && make"
 fi
 
-# Install PNG icons
-if [ -f "contrib/usr/share/icons/hicolor/128x128/apps/qjackctl.png" ]; then
-    install -m 0644 contrib/usr/share/icons/hicolor/128x128/apps/qjackctl.png /usr/share/icons/hicolor/128x128/apps/qjackctl.png
-    echo "  ✓ Installed qjackctl 128x128 icon"
+# Install jack-graph desktop file
+if [ -f "contrib/usr/share/applications/jack-graph.desktop" ]; then
+    echo "Installing jack-graph desktop file..."
+    mkdir -p /usr/share/applications
+    install -m 0644 contrib/usr/share/applications/jack-graph.desktop /usr/share/applications/jack-graph.desktop
+    echo "  ✓ Installed jack-graph desktop file"
+
+    # Update desktop database
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    fi
+else
+    echo "WARNING: jack-graph.desktop not found"
 fi
-
-if [ -f "contrib/usr/share/icons/hicolor/64x64/apps/qjackctl.png" ]; then
-    install -m 0644 contrib/usr/share/icons/hicolor/64x64/apps/qjackctl.png /usr/share/icons/hicolor/64x64/apps/qjackctl.png
-    echo "  ✓ Installed qjackctl 64x64 icon"
-fi
-
-if [ -f "contrib/usr/share/icons/hicolor/48x48/apps/qjackctl.png" ]; then
-    install -m 0644 contrib/usr/share/icons/hicolor/48x48/apps/qjackctl.png /usr/share/icons/hicolor/48x48/apps/qjackctl.png
-    echo "  ✓ Installed qjackctl 48x48 icon"
-fi
-
-if [ -f "contrib/usr/share/icons/hicolor/32x32/apps/qjackctl.png" ]; then
-    install -m 0644 contrib/usr/share/icons/hicolor/32x32/apps/qjackctl.png /usr/share/icons/hicolor/32x32/apps/qjackctl.png
-    echo "  ✓ Installed qjackctl 32x32 icon"
-fi
-
-if [ -f "contrib/usr/share/icons/hicolor/16x16/apps/qjackctl.png" ]; then
-    install -m 0644 contrib/usr/share/icons/hicolor/16x16/apps/qjackctl.png /usr/share/icons/hicolor/16x16/apps/qjackctl.png
-    echo "  ✓ Installed qjackctl 16x16 icon"
-fi
-
-# Refresh icon cache
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
-fi
-
-# Install qjackctl desktop file
-echo "Installing qjackctl desktop file..."
-mkdir -p /usr/share/applications
-cat > /usr/share/applications/qjackctl.desktop <<'EOF'
-[Desktop Entry]
-Name=QjackCtl
-Comment=JACK Audio Connection Kit Control Panel
-Exec=/usr/local/bin/qjackctl
-Icon=qjackctl
-Terminal=false
-Type=Application
-Categories=AudioVideo;Audio;Midi;
-StartupNotify=true
-EOF
-chmod 644 /usr/share/applications/qjackctl.desktop
-echo "  ✓ Installed qjackctl desktop file to /usr/share/applications/qjackctl.desktop"
-
-# Update desktop database so menus pick up new .desktop files
-echo "Updating desktop database..."
-if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
-    echo "  ✓ Updated desktop database"
-fi
-
-# Install qjackctl autostart entry
-echo "Installing qjackctl autostart entry..."
-mkdir -p /etc/xdg/autostart
-cat > /etc/xdg/autostart/qjackctl.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=QjackCtl (Auto)
-Comment=Launch QjackCtl minimized; JACK is already started by system service
-TryExec=/usr/local/bin/qjackctl
-Exec=/usr/local/bin/qjackctl --start-minimized
-X-GNOME-Autostart-enabled=true
-NoDisplay=false
-OnlyShowIn=XFCE;LXDE;LXQt;MATE;GNOME;KDE;
-EOF
-chmod 644 /etc/xdg/autostart/qjackctl.desktop
-echo "  ✓ Installed qjackctl autostart entry to /etc/xdg/autostart/qjackctl.desktop"
 
 # Ensure ALSA override directory exists and install default current_input.conf -> input_card0
 ASOUND_D_DIR="${ETC_DIR}/asound.conf.d"
@@ -683,6 +619,34 @@ else
     echo "Polkit rule not found at $POLKIT_RULE_SRC; skipping (Pair/Connect may prompt/deny without it)."
 fi
 
+# Install polkit rule for jack-graph to manage jackd-rt service (no password for audio group)
+JACK_POLKIT_RULE_SRC="contrib/polkit/50-jack-bridge.rules"
+JACK_POLKIT_RULE_DST="/etc/polkit-1/rules.d/50-jack-bridge.rules"
+if [ -f "$JACK_POLKIT_RULE_SRC" ]; then
+    echo "Installing jack-graph polkit rule to $JACK_POLKIT_RULE_DST"
+    mkdir -p "$(dirname "$JACK_POLKIT_RULE_DST")"
+    install -m 0644 "$JACK_POLKIT_RULE_SRC" "$JACK_POLKIT_RULE_DST" || true
+    # Reload polkit
+    if pidof polkitd >/dev/null 2>&1; then
+        kill -HUP "$(pidof polkitd | awk '{print $1}')" 2>/dev/null || true
+    fi
+    if command -v service >/dev/null 2>&1; then
+        service polkit restart >/dev/null 2>&1 || true
+    fi
+else
+    echo "WARNING: jack-graph polkit rule not found at $JACK_POLKIT_RULE_SRC"
+fi
+
+# Install jack-bridge service helper script (for jack-graph Start/Stop)
+if [ -f "contrib/usr/local/lib/jack-bridge/jack-bridge-service-helper" ]; then
+    echo "Installing jack-bridge-service-helper script..."
+    mkdir -p "${USR_LIB_DIR}"
+    install -m 0755 contrib/usr/local/lib/jack-bridge/jack-bridge-service-helper "${USR_LIB_DIR}/jack-bridge-service-helper"
+    echo "  ✓ Installed jack-bridge-service-helper to ${USR_LIB_DIR}/jack-bridge-service-helper"
+else
+    echo "WARNING: jack-bridge-service-helper not found"
+fi
+
 # --- jack-bridge Bluetooth adapter convenience helper ---
 # Create a small helper script that ensures the primary adapter is Discoverable/Pairable
 # and sets DiscoverableTimeout=0 (stay discoverable) when invoked. The installer runs
@@ -769,90 +733,6 @@ else
     echo "WARNING: contrib/init.d/jack-connection-manager not found"
 fi
 
-# Install D-Bus service for qjackctl integration
-echo ""
-echo "Installing jack-bridge D-Bus service for qjackctl integration..."
-
-# Build D-Bus service if not already built
-if [ ! -f "contrib/bin/jack-bridge-dbus" ]; then
-    echo "Building jack-bridge-dbus..."
-    if command -v make >/dev/null 2>&1; then
-        make dbus || {
-            echo "WARNING: Failed to build jack-bridge-dbus"
-            echo "         qjackctl Start/Stop buttons will not work"
-            echo "         Run 'make dbus' manually to enable this feature"
-        }
-    else
-        echo "WARNING: make not found, cannot build jack-bridge-dbus"
-        echo "         qjackctl Start/Stop buttons will not work"
-    fi
-fi
-
-# Install D-Bus service binary
-if [ -f "contrib/bin/jack-bridge-dbus" ]; then
-    install -m 0755 contrib/bin/jack-bridge-dbus /usr/local/bin/jack-bridge-dbus
-    echo "  ✓ Installed jack-bridge-dbus to /usr/local/bin"
-else
-    echo "  ! jack-bridge-dbus binary not found, skipping D-Bus service install"
-    echo "    qjackctl Start/Stop will not work without this service"
-fi
-
-# Install D-Bus service activation file
-if [ -f "contrib/dbus/org.jackaudio.service.service" ]; then
-    mkdir -p /usr/share/dbus-1/system-services
-    install -m 0644 contrib/dbus/org.jackaudio.service.service \
-        /usr/share/dbus-1/system-services/org.jackaudio.service.service
-    echo "  ✓ Installed D-Bus service activation file"
-fi
-
-# Install D-Bus policy
-if [ -f "contrib/dbus/org.jackaudio.service.conf" ]; then
-    mkdir -p /usr/share/dbus-1/system.d
-    install -m 0644 contrib/dbus/org.jackaudio.service.conf \
-        /usr/share/dbus-1/system.d/org.jackaudio.service.conf
-    echo "  ✓ Installed D-Bus policy"
-else
-    echo "  ! D-Bus policy not found, qjackctl may require manual authorization"
-fi
-
-# Install polkit rules for password-less control
-if [ -f "contrib/polkit/50-jack-bridge.rules" ]; then
-    mkdir -p /etc/polkit-1/rules.d
-    install -m 0644 contrib/polkit/50-jack-bridge.rules \
-        /etc/polkit-1/rules.d/50-jack-bridge.rules
-    echo "  ✓ Installed polkit rules (audio group gets password-less JACK control)"
-    
-    # Reload polkit
-    if pidof polkitd >/dev/null 2>&1; then
-        kill -HUP $(pidof polkitd | awk '{print $1}') 2>/dev/null || true
-    fi
-else
-    echo "  ! Polkit rules not found, users may be prompted for password"
-fi
-
-# Install jack-bridge-dbus init script
-if [ -f "contrib/init.d/jack-bridge-dbus" ]; then
-    install -m 0755 contrib/init.d/jack-bridge-dbus "${INIT_DIR}/jack-bridge-dbus"
-    echo "  ✓ Installed jack-bridge-dbus init script"
-    
-    # Register with update-rc.d (must start early, before qjackctl launches)
-    if command -v update-rc.d >/dev/null 2>&1; then
-        update-rc.d -f jack-bridge-dbus remove >/dev/null 2>&1 || true
-        update-rc.d jack-bridge-dbus defaults 01 99 || true
-        echo "  ✓ Registered jack-bridge-dbus: starts at priority 01 (very early)"
-    fi
-fi
-
-# Reload D-Bus to pick up new service
-if command -v service >/dev/null 2>&1; then
-    service dbus reload >/dev/null 2>&1 || true
-    echo "  ✓ Reloaded D-Bus configuration"
-fi
-
-echo "D-Bus service installation complete"
-echo "qjackctl Start/Stop buttons will now control the system JACK service"
-echo ""
-
 # Install jack-bridge devices config (authoritative; overwrite without backup)
 mkdir -p /etc/jack-bridge
 cat > /etc/jack-bridge/devices.conf <<'DEVCONF'
@@ -905,100 +785,14 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
     fi
 done
 
-# Install qjackctl helper scripts to /usr/local/bin
-echo ""
-echo "Installing qjackctl D-Bus configuration helpers..."
-if [ -f "contrib/usr/local/bin/jack-bridge-qjackctl-setup" ]; then
-    install -m 0755 contrib/usr/local/bin/jack-bridge-qjackctl-setup /usr/local/bin/jack-bridge-qjackctl-setup
-    echo "  ✓ Installed jack-bridge-qjackctl-setup"
-fi
-
-if [ -f "contrib/usr/local/bin/jack-bridge-verify-qjackctl" ]; then
-    install -m 0755 contrib/usr/local/bin/jack-bridge-verify-qjackctl /usr/local/bin/jack-bridge-verify-qjackctl
-    echo "  ✓ Installed jack-bridge-verify-qjackctl"
-fi
-
-# Configure qjackctl to use D-Bus mode for jack-bridge integration
-# This is CRITICAL - without this, qjackctl spawns its own jackd instead of using our D-Bus service
-echo ""
-echo "Configuring qjackctl for D-Bus mode integration..."
-
-# Create skeleton config for new users
-QJACKCTL_SKEL_DIR="/etc/skel/.config/rncbc.org"
-mkdir -p "$QJACKCTL_SKEL_DIR"
-cat > "$QJACKCTL_SKEL_DIR/QjackCtl.conf" <<'QJACKCTL_SKEL'
-[General]
-DBusEnabled=true
-JackDBusEnabled=true
-StartJack=false
-ServerName=default
-QJACKCTL_SKEL
-chmod 644 "$QJACKCTL_SKEL_DIR/QjackCtl.conf" || true
-echo "  ✓ Created skeleton qjackctl config in /etc/skel/"
-
-# Configure qjackctl for each existing desktop user
-for u in $(awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd); do
-    home_dir="$(getent passwd "$u" | awk -F: '{print $6}')"
-    if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
-        qjackctl_conf_dir="$home_dir/.config/rncbc.org"
-        qjackctl_conf="$qjackctl_conf_dir/QjackCtl.conf"
-        
-        # Create config directory
-        mkdir -p "$qjackctl_conf_dir"
-        
-        if [ -f "$qjackctl_conf" ]; then
-            # Update existing configuration
-            backup_file="${qjackctl_conf}.backup-$(date +%Y%m%d-%H%M%S)"
-            cp "$qjackctl_conf" "$backup_file" 2>/dev/null && \
-                echo "  ✓ Backed up existing config for user $u"
-            
-            # Update or add D-Bus settings
-            if grep -q '^DBusEnabled=' "$qjackctl_conf"; then
-                sed -i 's/^DBusEnabled=.*/DBusEnabled=true/' "$qjackctl_conf"
-            else
-                echo "DBusEnabled=true" >> "$qjackctl_conf"
-            fi
-            
-            if grep -q '^JackDBusEnabled=' "$qjackctl_conf"; then
-                sed -i 's/^JackDBusEnabled=.*/JackDBusEnabled=true/' "$qjackctl_conf"
-            else
-                echo "JackDBusEnabled=true" >> "$qjackctl_conf"
-            fi
-            
-            echo "  ✓ Updated qjackctl D-Bus settings for user $u"
-        else
-            # Create new minimal D-Bus-enabled config
-            cat > "$qjackctl_conf" <<'QJACKCTL_CONF'
-[General]
-DBusEnabled=true
-JackDBusEnabled=true
-StartJack=false
-ServerName=default
-QJACKCTL_CONF
-            echo "  ✓ Created qjackctl D-Bus config for user $u"
-        fi
-        
-        # Fix ownership
-        chown -R "$u:$u" "$qjackctl_conf_dir" 2>/dev/null || true
-    fi
-done
-
-echo ""
-echo "qjackctl D-Bus mode configuration complete!"
-echo ""
-echo "Verification:"
-echo "  Users can run: jack-bridge-verify-qjackctl"
-echo "  To reconfigure: jack-bridge-qjackctl-setup"
-echo ""
-
 echo "============================================================================"
 echo "Installation complete! Changes take effect after reboot."
 echo ""
 echo "Next steps:"
 echo "Reboot: sudo reboot"
 echo ""
-echo "Important: qjackctl is now configured to use jack-bridge D-Bus mode."
-echo "           Start/Stop buttons will control the system jackd-rt service."
+echo "Use jack-graph to view and connect JACK/ALSA ports visually."
+echo "Use the Alsa Sound Connect GUI (mxeq) to switch outputs and manage Bluetooth."
 echo "============================================================================"
 echo ""
 

@@ -44,9 +44,7 @@ cp -r usr/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 cp Makefile "$TEMP_DIR/jack-bridge-${VERSION}/"
 
 echo "Excluded development files:"
-echo "  - qjackctl-1.0.4-jack-bridge-mod/ (build directory)"
 echo "  - plans/ (developer documentation)"
-echo "  - build-qjackctl.sh (build script)"
 echo "  - test-bluetooth.sh (test script)"
 echo "  - blue-alsaREADME.md (upstream docs)"
 echo "  - bluealsa-INSTALL.md (upstream docs)"
@@ -54,6 +52,8 @@ echo "  - Alsa-sound-connect-gui.png (screenshot)"
 echo "  - build-bluealsa-plugins.sh (build script)"
 echo "  - BUILD_PLUGINS_GUIDE.md (developer docs)"
 echo "  - .gitignore (git file)"
+echo "  - .kilo/ (Kilo IDE config)"
+echo "  - old-dbus/ (old D-Bus service files)"
 echo
 
 # Create the tarball

@@ -5,3 +5,9 @@
 *.obj
 *.swp
 *.log
+
+# Kilo IDE config
+.kilo/
+
+# Kilo IDE config
+.kilo/

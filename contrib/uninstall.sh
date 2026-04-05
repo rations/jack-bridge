@@ -20,7 +20,7 @@ echo "========================================="
 echo ""
 echo "This will remove:"
 echo "  - Init scripts and service registrations"
-echo "  - Installed binaries (mxeq, BlueALSA tools, qjackctl)"
+echo "  - Installed binaries (mxeq, BlueALSA tools, jack-graph)"
 echo "  - Configuration files"
 echo "  - Desktop launchers and icons"
 echo "  - Polkit rules and D-Bus policies"
@@ -38,6 +38,10 @@ case "$answer" in
 esac
 echo ""
 
+# Unhold packages that were held during install
+log "Unholding packages that were held during install..."
+sudo apt-mark unhold qjackctl qt6-wayland qt6-translations-l10n qt6-svg-plugins qt6-qpa-plugins qt6-gtk-platformtheme 2>/dev/null || true
+
 # Paths and artifacts managed by this project
 INIT_JACK="/etc/init.d/jackd-rt"
 INIT_BLUEALSA="/etc/init.d/bluealsad"
@@ -45,7 +49,6 @@ INIT_BLUETOOTH="/etc/init.d/bluetoothd"
 INIT_PORTS="/etc/init.d/jack-bridge-ports"
 INIT_BLUETOOTH_CONFIG="/etc/init.d/jack-bridge-bluetooth-config"
 INIT_CONNECTION_MANAGER="/etc/init.d/jack-connection-manager"
-INIT_DBUS="/etc/init.d/jack-bridge-dbus"
 DEF_JACK="/etc/default/jackd-rt"
 DEF_BLUEALSA="/etc/default/bluealsad"
 USR_LIB="/usr/local/lib/jack-bridge"
@@ -55,10 +58,7 @@ BIN_BLUEALSActl="/usr/local/bin/bluealsactl"
 BIN_BLUEALSA_APLAY="/usr/local/bin/bluealsa-aplay"
 BIN_BLUEALSA_RFCOMM="/usr/local/bin/bluealsa-rfcomm"
 BIN_JACK_CONNECTION_MANAGER="/usr/local/bin/jack-connection-manager"
-BIN_JACK_BRIDGE_DBUS="/usr/local/bin/jack-bridge-dbus"
-BIN_JACK_BRIDGE_QJACKCTL_SETUP="/usr/local/bin/jack-bridge-qjackctl-setup"
-BIN_JACK_BRIDGE_VERIFY_QJACKCTL="/usr/local/bin/jack-bridge-verify-qjackctl"
-BIN_QJACKCTL="/usr/local/bin/qjackctl"
+BIN_JACK_GRAPH="/usr/local/bin/jack-graph"
 APULSE_FIREFOX="/usr/bin/apulse-firefox"
 APULSE_CHROMIUM="/usr/bin/apulse-chromium"
 ASOUND_CONF="/etc/asound.conf"
@@ -66,20 +66,15 @@ ASOUND_CONF_D="/etc/asound.conf.d"
 DEVCONF="/etc/jack-bridge/devices.conf"
 DEVCONFDIR="/etc/jack-bridge"
 DESKTOP_LAUNCHER="/usr/share/applications/mxeq.desktop"
-DESKTOP_QJACKCTL="/usr/share/applications/qjackctl.desktop"
-XDG_AUTOSTART="/etc/xdg/autostart/qjackctl.desktop"
+DESKTOP_JACK_GRAPH="/usr/share/applications/jack-graph.desktop"
 POLKIT_RULE_BLUETOOTH="/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
-POLKIT_RULE_JACK="/etc/polkit-1/rules.d/50-jack-bridge.rules"
 DBUS_BLUEALSA="/usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_BLUEALSA_CONF="/etc/asound.conf.d/20-jack-bridge-bluealsa.conf"
-DBUS_JACKAUDIO_SERVICE="/usr/share/dbus-1/system-services/org.jackaudio.service.service"
-DBUS_JACKAUDIO_CONF="/usr/share/dbus-1/system.d/org.jackaudio.service.conf"
 LIMITS_CONF="/etc/security/limits.d/audio.conf"
 PULSE_AUTOSPAWN_CONF="/etc/pulse/client.conf.d/01-no-autospawn.conf"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 ICON_FILE="$ICON_DIR/alsasoundconnectlogo.png"
 ICON_ALSA_SOUND_CONNECT="$ICON_DIR/alsa-sound-connect.png"
-ICON_QJACKCTL_SVG="/usr/share/icons/hicolor/scalable/apps/qjackctl.svg"
 ALSA_PLUGIN_DIR="/usr/lib/x86_64-linux-gnu/alsa-lib"
 BLUEALSA_PCM_PLUGIN="$ALSA_PLUGIN_DIR/libasound_module_pcm_bluealsa.so"
 BLUEALSA_CTL_PLUGIN="$ALSA_PLUGIN_DIR/libasound_module_ctl_bluealsa.so"
@@ -88,7 +83,7 @@ ALSA_CONF_DIRS="/usr/share/alsa/alsa.conf.d /etc/alsa/conf.d"
 log "Stopping services..."
 
 # Stop all services we manage
-for service in jack-bridge-ports jackd-rt bluealsad bluetoothd jack-bridge-bluetooth-config jack-connection-manager jack-bridge-dbus; do
+for service in jack-bridge-ports jackd-rt bluealsad bluetoothd jack-bridge-bluetooth-config jack-connection-manager; do
   if command -v service >/dev/null 2>&1; then
     service "$service" stop 2>/dev/null || true
   fi
@@ -98,7 +93,7 @@ log "Deregistering init scripts..."
 
 # Deregister SysV init scripts
 if command -v update-rc.d >/dev/null 2>&1; then
-  for script in jackd-rt bluealsad bluetoothd jack-bridge-ports jack-bridge-bluetooth-config jack-connection-manager jack-bridge-dbus; do
+  for script in jackd-rt bluealsad bluetoothd jack-bridge-ports jack-bridge-bluetooth-config jack-connection-manager; do
     update-rc.d -f "$script" remove 2>/dev/null || true
   done
 fi
@@ -106,7 +101,7 @@ fi
 log "Removing init scripts..."
 
 # Remove init scripts and defaults
-for f in "$INIT_JACK" "$INIT_BLUEALSA" "$INIT_BLUETOOTH" "$INIT_PORTS" "$INIT_BLUETOOTH_CONFIG" "$INIT_CONNECTION_MANAGER" "$INIT_DBUS" "$DEF_JACK" "$DEF_BLUEALSA"; do
+for f in "$INIT_JACK" "$INIT_BLUEALSA" "$INIT_BLUETOOTH" "$INIT_PORTS" "$INIT_BLUETOOTH_CONFIG" "$INIT_CONNECTION_MANAGER" "$DEF_JACK" "$DEF_BLUEALSA"; do
   if [ -e "$f" ]; then
     rm -f "$f"
     log "  Removed $f"
@@ -122,7 +117,7 @@ if [ -d "$USR_LIB" ]; then
 fi
 
 # Remove GUI and BlueALSA binaries
-for f in "$BIN_MXEQ" "$BIN_BLUEALSAD" "$BIN_BLUEALSActl" "$BIN_BLUEALSA_APLAY" "$BIN_BLUEALSA_RFCOMM" "$BIN_JACK_CONNECTION_MANAGER" "$BIN_JACK_BRIDGE_DBUS" "$BIN_JACK_BRIDGE_QJACKCTL_SETUP" "$BIN_JACK_BRIDGE_VERIFY_QJACKCTL" "$BIN_QJACKCTL"; do
+for f in "$BIN_MXEQ" "$BIN_BLUEALSAD" "$BIN_BLUEALSActl" "$BIN_BLUEALSA_APLAY" "$BIN_BLUEALSA_RFCOMM" "$BIN_JACK_CONNECTION_MANAGER" "$BIN_JACK_GRAPH"; do
   if [ -f "$f" ]; then
     rm -f "$f"
     log "  Removed $f"
@@ -193,16 +188,10 @@ if [ -f "$DESKTOP_LAUNCHER" ]; then
   log "  Removed $DESKTOP_LAUNCHER"
 fi
 
-# Remove qjackctl desktop file
-if [ -f "$DESKTOP_QJACKCTL" ]; then
-  rm -f "$DESKTOP_QJACKCTL"
-  log "  Removed $DESKTOP_QJACKCTL"
-fi
-
-# Remove desktop autostart for qjackctl
-if [ -f "$XDG_AUTOSTART" ]; then
-  rm -f "$XDG_AUTOSTART"
-  log "  Removed $XDG_AUTOSTART"
+# Remove jack-graph desktop file
+if [ -f "$DESKTOP_JACK_GRAPH" ]; then
+  rm -f "$DESKTOP_JACK_GRAPH"
+  log "  Removed $DESKTOP_JACK_GRAPH"
 fi
 
 # Remove icons
@@ -214,11 +203,6 @@ fi
 if [ -f "$ICON_ALSA_SOUND_CONNECT" ]; then
   rm -f "$ICON_ALSA_SOUND_CONNECT"
   log "  Removed $ICON_ALSA_SOUND_CONNECT"
-fi
-
-if [ -f "$ICON_QJACKCTL_SVG" ]; then
-  rm -f "$ICON_QJACKCTL_SVG"
-  log "  Removed $ICON_QJACKCTL_SVG"
 fi
 
 # Update icon cache if possible
@@ -234,9 +218,10 @@ if [ -f "$POLKIT_RULE_BLUETOOTH" ]; then
   log "  Removed $POLKIT_RULE_BLUETOOTH"
 fi
 
-if [ -f "$POLKIT_RULE_JACK" ]; then
-  rm -f "$POLKIT_RULE_JACK"
-  log "  Removed $POLKIT_RULE_JACK"
+# Remove jack-graph polkit rule
+if [ -f "/etc/polkit-1/rules.d/50-jack-bridge.rules" ]; then
+  rm -f "/etc/polkit-1/rules.d/50-jack-bridge.rules"
+  log "  Removed 50-jack-bridge.rules"
 fi
 
 # Remove D-Bus policies and services
@@ -250,16 +235,6 @@ if [ -f "$DBUS_BLUEALSA_CONF" ]; then
   log "  Removed $DBUS_BLUEALSA_CONF"
 fi
 
-if [ -f "$DBUS_JACKAUDIO_SERVICE" ]; then
-  rm -f "$DBUS_JACKAUDIO_SERVICE"
-  log "  Removed $DBUS_JACKAUDIO_SERVICE"
-fi
-
-if [ -f "$DBUS_JACKAUDIO_CONF" ]; then
-  rm -f "$DBUS_JACKAUDIO_CONF"
-  log "  Removed $DBUS_JACKAUDIO_CONF"
-fi
-
 log "Cleaning up legacy artifacts..."
 
 # Remove legacy/obsolete artifacts from older versions (cleanup)
@@ -267,6 +242,16 @@ for legacy in \
   /etc/init.d/jack-bluealsa-autobridge \
   /usr/local/bin/jack-bluealsa-autobridge \
   /etc/jack-bridge/bluetooth.conf \
+  /usr/local/bin/jack-bridge-dbus \
+  /etc/init.d/jack-bridge-dbus \
+  /usr/local/bin/jack-bridge-qjackctl-setup \
+  /usr/local/bin/jack-bridge-verify-qjackctl \
+  /usr/share/applications/qjackctl.desktop \
+  /etc/xdg/autostart/qjackctl.desktop \
+  /usr/share/icons/hicolor/scalable/apps/qjackctl.svg \
+  /usr/share/dbus-1/system-services/org.jackaudio.service.service \
+  /usr/share/dbus-1/system.d/org.jackaudio.service.conf \
+  /usr/local/lib/jack-bridge/jack-bridge-service-helper \
   ; do
   if [ -e "$legacy" ]; then
     rm -f "$legacy"
@@ -331,7 +316,7 @@ echo ""
 echo "jack-bridge has been removed from your system."
 echo ""
 echo "To also remove installed packages, run:"
-echo "  sudo apt remove jackd2 qjackctl bluez bluez-tools \\"
+echo "  sudo apt remove jackd2 bluez bluez-tools \\"
 echo "  apulse libasound2-plugin-equal"
 echo ""
 echo "  sudo apt autoremove"
