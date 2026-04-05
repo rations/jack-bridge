@@ -66,6 +66,9 @@
 Download `jack-bridge-20260405.tar.gz` from releases on GitHub. Then:
 
 ```bash
+tar -xf jack-bridge-20260405
+```
+```bash
 cd jack-bridge-20260405
 ```
 ```bash
@@ -78,7 +81,6 @@ sudo reboot
 Or clone the repository:
 
 ```bash
-# Clone repository
 git clone https://github.com/rations/jack-bridge.git
 ```
 ```bash
