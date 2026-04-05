@@ -12,6 +12,7 @@ public:
 
     using ApplyCallback = std::function<void()>;
     void set_apply_callback(ApplyCallback cb) { m_apply_cb = std::move(cb); }
+    void set_disconnect_callback(ApplyCallback cb) { m_disconnect_cb = std::move(cb); }
 
 private:
     void build_ui();
@@ -58,4 +59,5 @@ private:
     Gtk::Button m_close_btn;
 
     ApplyCallback m_apply_cb;
+    ApplyCallback m_disconnect_cb;
 };

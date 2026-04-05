@@ -214,13 +214,14 @@ void JackGraph::on_menu_zoom_normal() {
 
 void JackGraph::on_menu_settings() {
     SettingsDialog dialog(*this, m_server, m_config);
+    
+    // Callback for Start (reconnect after server starts)
     dialog.set_apply_callback([this]() {
-        bool server_running = m_server.is_running();
         if (m_jack.is_connected()) {
             m_jack.disconnect();
             m_jack_connected = false;
         }
-        if (server_running) {
+        if (m_server.is_running()) {
             m_jack_connected = m_jack.connect("jack-graph");
             if (m_jack_connected) {
                 m_jack.set_port_callback([this]() {
@@ -238,6 +239,17 @@ void JackGraph::on_menu_settings() {
         }
         update_status_bar();
     });
+    
+    // Callback for Stop (just disconnect, don't reconnect)
+    dialog.set_disconnect_callback([this]() {
+        if (m_jack.is_connected()) {
+            m_jack.disconnect();
+            m_jack_connected = false;
+        }
+        refresh_ports();
+        update_status_bar();
+    });
+    
     dialog.run();
 }
 

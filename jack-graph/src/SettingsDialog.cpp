@@ -219,12 +219,13 @@ void SettingsDialog::on_start() {
 }
 
 void SettingsDialog::on_stop() {
-    m_server.stop();
-
-    // Notify main window
-    if (m_apply_cb) {
-        m_apply_cb();
+    // Disconnect JACK client FIRST (without reconnecting) to prevent callbacks during server shutdown
+    if (m_disconnect_cb) {
+        m_disconnect_cb();
     }
+
+    // Now stop the server
+    m_server.stop();
 
     // Update button states
     usleep(200000);

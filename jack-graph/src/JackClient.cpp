@@ -37,11 +37,16 @@ bool JackClient::connect(const std::string& client_name) {
 }
 
 void JackClient::disconnect() {
-    if (m_client) {
-        jack_deactivate(m_client);
-        jack_client_close(m_client);
-        m_client = nullptr;
-    }
+    if (!m_client) return;
+    
+    // Clear callbacks FIRST to prevent them firing during shutdown
+    m_port_callback = nullptr;
+    m_xrun_callback = nullptr;
+    
+    jack_deactivate(m_client);
+    jack_client_close(m_client);
+    m_client = nullptr;
+    
     std::lock_guard<std::mutex> lock(m_mutex);
     m_ports.clear();
 }
