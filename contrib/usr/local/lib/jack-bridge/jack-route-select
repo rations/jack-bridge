@@ -589,18 +589,26 @@ route() {
     exit 0
   fi
 
-  # Reconnect all previous sources to new sink
-  echo "$sources" | while IFS= read -r src; do
-    # Simple channel mapping using grep to avoid complex case patterns
-    if echo "$src" | grep -qE "(:out_1|:out_000|:left|:L)$"; then
-        jack_connect "$src" "${newpref}1" 2>/dev/null || true
-    elif echo "$src" | grep -qE "(:out_2|:out_001|:right|:R)$"; then
-        jack_connect "$src" "${newpref}2" 2>/dev/null || true
-    else
-        # Mono or unknown: connect to both
-        jack_connect "$src" "${newpref}1" 2>/dev/null || true
-        jack_connect "$src" "${newpref}2" 2>/dev/null || true
-    fi
+  # Reconnect all previous sources to new sink.
+  # Group by client and connect positionally: JACK registration order is
+  # always L before R for stereo apps, so port[N] -> sink[N] is correct
+  # without any port-name heuristics.
+  clients=$(echo "$sources" | sed 's/:.*//' | sort -u)
+  echo "$clients" | while IFS= read -r cname; do
+    [ -z "$cname" ] && continue
+    # Collect all source ports for this client preserving JACK order
+    client_srcs=$(echo "$sources" | while IFS= read -r s; do
+      case "$s" in "${cname}:"*) echo "$s" ;; esac
+    done)
+    # Get target sink input ports in JACK order
+    sink_ports=$(jack_lsp 2>/dev/null | grep "^${newpref}")
+    idx=1
+    echo "$client_srcs" | while IFS= read -r src; do
+      [ -z "$src" ] && continue
+      dst=$(echo "$sink_ports" | sed -n "${idx}p")
+      [ -n "$dst" ] && jack_connect "$src" "$dst" 2>/dev/null || true
+      idx=$((idx + 1))
+    done
   done
 }
 

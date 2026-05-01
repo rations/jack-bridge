@@ -116,13 +116,13 @@ static void disconnect_from_other_sinks(const char *source_port, const char *kee
     const char **connections;
     jack_port_t *port;
     int i, ret;
-    
+
     port = jack_port_by_name(client, source_port);
     if (!port) return;
-    
+
     connections = jack_port_get_all_connections(client, port);
     if (!connections) return;
-    
+
     /* Disconnect from any known sink port EXCEPT those matching keep_prefix */
     for (i = 0; connections[i]; i++) {
         if (is_sink_port(connections[i])) {
@@ -137,70 +137,56 @@ static void disconnect_from_other_sinks(const char *source_port, const char *kee
             }
         }
     }
-    
+
     jack_free(connections);
 }
 
-/* Connect source port to target sink with smart channel mapping */
-static void connect_source_to_sink(const char *source_port) {
-    char target1[128], target2[128];
-    int ret;
-    
+/* Connect all output ports of client_name to target sink positionally.
+ * JACK guarantees ports are returned in registration order; stereo apps
+ * always register L before R, so port[0]->sink[0], port[1]->sink[1]
+ * is the correct JACK-standard mapping — no name heuristics needed.
+ * all_ports is the full JackPortIsOutput list from process_connections. */
+static void connect_client_to_sink(const char *client_name, size_t name_len, const char **all_ports) {
+    const char **sink_ports;
+    int i, sink_idx, ret;
+    char target1[128];
+
     snprintf(target1, sizeof(target1), "%s1", target_sink_prefix);
-    snprintf(target2, sizeof(target2), "%s2", target_sink_prefix);
-    
-    /* Verify target ports exist before trying to connect */
-    if (!jack_port_by_name(client, target1) || !jack_port_by_name(client, target2)) {
-        fprintf(stderr, "jack-connection-manager: ERROR: Target ports %s/%s do not exist!\n",
-                target1, target2);
-        fprintf(stderr, "jack-connection-manager: Bridge ports may not be spawned yet. Skipping.\n");
+    if (!jack_port_by_name(client, target1)) {
+        fprintf(stderr, "jack-connection-manager: ERROR: Target sink %s not available, skipping\n",
+                target_sink_prefix);
         return;
     }
-    
-    /* STEP 1: Disconnect from all sinks EXCEPT our target */
-    disconnect_from_other_sinks(source_port, target_sink_prefix);
-    
-    /* STEP 2: Connect to target sink */
-    /* Smart channel mapping based on port name.
-     * CRITICAL: Check more specific patterns FIRST (e.g., :out_001 before :out_0)
-     * to avoid substring collision where ":out_001" matches ":out_0". */
-    
-    /* Right channel patterns - CHECK FIRST (more specific) */
-    if (strstr(source_port, ":out_2") || strstr(source_port, ":out_001") ||
-        strstr(source_port, ":right") || strstr(source_port, ":R") ||
-        strstr(source_port, "playback_2")) {
-        /* Right channel only */
-        ret = jack_connect(client, source_port, target2);
-        if (ret != 0 && ret != EEXIST) {
-            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
-                    source_port, target2, ret);
-        }
-    /* Left channel patterns - CHECK SECOND (less specific :out_0 can match :out_001) */
-    } else if (strstr(source_port, ":out_1") || strstr(source_port, ":out_0") ||
-               strstr(source_port, ":out_000") || strstr(source_port, ":left") ||
-               strstr(source_port, ":L") || strstr(source_port, "playback_1")) {
-        /* Left channel only */
-        ret = jack_connect(client, source_port, target1);
-        if (ret != 0 && ret != EEXIST) {
-            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
-                    source_port, target1, ret);
-        }
-    } else {
-        /* Mono or unknown: connect to both */
-        ret = jack_connect(client, source_port, target1);
-        if (ret != 0 && ret != EEXIST) {
-            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
-                    source_port, target1, ret);
-        }
-        ret = jack_connect(client, source_port, target2);
-        if (ret != 0 && ret != EEXIST) {
-            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
-                    source_port, target2, ret);
-        }
+
+    sink_ports = jack_get_ports(client, target_sink_prefix, NULL, JackPortIsInput);
+    if (!sink_ports) {
+        fprintf(stderr, "jack-connection-manager: ERROR: No input ports found for %s\n",
+                target_sink_prefix);
+        return;
     }
-    
-    /* STEP 3: Disconnect AGAIN from OTHER sinks (ALSA plugin may have reconnected) */
-    disconnect_from_other_sinks(source_port, target_sink_prefix);
+
+    sink_idx = 0;
+    for (i = 0; all_ports[i]; i++) {
+        /* Skip ports not belonging to this client */
+        if (strncmp(all_ports[i], client_name, name_len) != 0 || all_ports[i][name_len] != ':')
+            continue;
+        /* Skip non-audio ports */
+        if (is_sink_port(all_ports[i]) || is_capture_port(all_ports[i]) || is_midi_port(all_ports[i]))
+            continue;
+        /* Stop if we have more source channels than sink channels */
+        if (!sink_ports[sink_idx])
+            break;
+
+        disconnect_from_other_sinks(all_ports[i], target_sink_prefix);
+
+        ret = jack_connect(client, all_ports[i], sink_ports[sink_idx]);
+        if (ret != 0 && ret != EEXIST)
+            fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
+                    all_ports[i], sink_ports[sink_idx], ret);
+        sink_idx++;
+    }
+
+    jack_free(sink_ports);
 }
 
 /* Port registration callback - called when ports appear/disappear
@@ -219,52 +205,81 @@ static void port_registration_callback(jack_port_id_t port_id, int registered, v
 /* Process all pending connections (called from main thread, safe for jack_connect) */
 static void process_connections(void) {
     const char **ports;
-    int i;
-    
-    /* Prevent concurrent execution - if already processing, skip this call */
+    int i, k;
+    char seen_clients[64][128];
+    int seen_count = 0;
+
+    /* Prevent concurrent execution */
     if (is_processing) {
         fprintf(stderr, "jack-connection-manager: Skipping concurrent process_connections call\n");
         return;
     }
     is_processing = 1;
-    
+
     /* Reload config to catch GUI changes */
     load_config();
-    
+
     /* Get all output ports */
     ports = jack_get_ports(client, NULL, NULL, JackPortIsOutput);
-    if (!ports) return;
-    
+    if (!ports) { is_processing = 0; return; }
+
     for (i = 0; ports[i]; i++) {
         const char *port_name = ports[i];
-        
-        /* Skip sink ports, capture ports, and MIDI ports */
+
         if (is_sink_port(port_name) || is_capture_port(port_name) || is_midi_port(port_name))
             continue;
-        
-        /* Check if this source is already connected to our target */
-        const char **connections = jack_port_get_all_connections(client, jack_port_by_name(client, port_name));
-        int already_connected = 0;
-        
-        if (connections) {
-            for (int j = 0; connections[j]; j++) {
-                if (strstr(connections[j], target_sink_prefix) != NULL) {
-                    already_connected = 1;
-                    break;
-                }
-            }
-            jack_free(connections);
+
+        /* Extract client name (text before ':') */
+        const char *colon = strchr(port_name, ':');
+        if (!colon) continue;
+        size_t name_len = (size_t)(colon - port_name);
+        if (name_len >= sizeof(seen_clients[0])) continue;
+
+        char client_name[128];
+        memcpy(client_name, port_name, name_len);
+        client_name[name_len] = '\0';
+
+        /* Skip clients already handled this pass */
+        int already_seen = 0;
+        for (k = 0; k < seen_count; k++) {
+            if (strcmp(seen_clients[k], client_name) == 0) { already_seen = 1; break; }
         }
-        
-        if (!already_connected) {
+        if (already_seen) continue;
+        if (seen_count < 64) {
+            strncpy(seen_clients[seen_count++], client_name, sizeof(seen_clients[0]) - 1);
+        }
+
+        /* Check if any port of this client is not yet routed to the target */
+        int needs_connect = 0;
+        for (k = 0; ports[k]; k++) {
+            if (strncmp(ports[k], client_name, name_len) != 0 || ports[k][name_len] != ':')
+                continue;
+            if (is_sink_port(ports[k]) || is_capture_port(ports[k]) || is_midi_port(ports[k]))
+                continue;
+
+            jack_port_t *p = jack_port_by_name(client, ports[k]);
+            if (!p) continue;
+            const char **conns = jack_port_get_all_connections(client, p);
+            int connected = 0;
+            if (conns) {
+                int m;
+                for (m = 0; conns[m]; m++) {
+                    if (strstr(conns[m], target_sink_prefix)) { connected = 1; break; }
+                }
+                jack_free(conns);
+            }
+            if (!connected) { needs_connect = 1; break; }
+        }
+
+        if (needs_connect) {
             fprintf(stderr, "jack-connection-manager: Routing '%s' -> %s\n",
-                    port_name, target_sink_prefix);
-            connect_source_to_sink(port_name);
+                    client_name, target_sink_prefix);
+            connect_client_to_sink(client_name, name_len, ports);
         }
     }
-    
+
     jack_free(ports);
-    is_processing = 0; /* Release lock */
+    is_processing = 0;
 }
 
 /* JACK shutdown callback */
