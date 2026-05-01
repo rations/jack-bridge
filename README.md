@@ -26,7 +26,7 @@
 
 ### Huge thanks to all these great devs.
 
-### UNTESTED VERSIONS in branches for OpenRC (Debian / Arch) and Void runit if anyone feels adventurous
+### UNTESTED VERSIONS in branches for Void runit if anyone feels adventurous
  
 ### Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 - **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB)
@@ -55,7 +55,7 @@
 
 ## Requirements
 
-**Debian-based distributions** Without systemd. Using sysVinit. Should be compatible with OpenRC but has not been tested. Testing done on Devuan 5 and 6 XFCE and Mate Desktop Environments using sysVinit.
+**Debian-based distributions** Without systemd. Using sysVinit. Testing done on Devuan 5 and 6 XFCE, Mate, JWM & Openbox using sysVinit.
 
 **Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. Removing PulseAudio is not required as the installer Disables PulseAudio autospawn system-wide and if you need pulseaudio for steam games you can start and stop pulseaudio as needed in a terminal with pulseaudio --start and pulseaudio --kill. As it is now steams version of proton does not support jack and steams runtime would have to be rebuilt as a custom binary and everytime there is an upgrade it would stop working. Until I can figure something out unfortunatly jack-bridge does not work with steam. If you use wine for gaming jack-bridge works fine. 
 
@@ -63,13 +63,13 @@
 
 ### Quick Install - During installation when prompted, select YES to Enable realtime priorities
 
-Download `jack-bridge-20260405.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260502.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260405
+tar -xf jack-bridge-20260502
 ```
 ```bash
-cd jack-bridge-20260405
+cd jack-bridge-20260502
 ```
 ```bash
 sudo sh contrib/install.sh
