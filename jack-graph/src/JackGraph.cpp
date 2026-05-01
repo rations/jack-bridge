@@ -36,6 +36,12 @@ JackGraph::JackGraph()
     update_status_bar();
 
     show_all_children();
+
+    /* Fit all nodes into the visible viewport on first launch.
+     * Deferred via signal_idle so GTK has finished allocating widget sizes. */
+    Glib::signal_idle().connect_once([this]() {
+        m_canvas.fit_to_window();
+    });
 }
 
 JackGraph::~JackGraph() {
