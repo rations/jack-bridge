@@ -627,10 +627,13 @@ static void handle_audio(uint32_t channel, const uint8_t *data, uint32_t len) {
         send_cmd(s->client_fd, &ev);
     }
 
-    /* Request more audio when ring buffer has room — not while corked (prebuffer fill) */
+    /* Request more audio only when the ring is below the target fill level.
+     * ring_target: 2 BUF_TLENGTH chunks in ring-float-bytes per channel (~42 ms). */
+    uint32_t bps_req = (s->format == PA_SAMPLE_S16LE) ? 2u : 4u;
+    uint32_t ring_chunk = BUF_TLENGTH / (bps_req * (uint32_t)s->channels) * (uint32_t)sizeof(float);
     if (s->client_fd != -1 && !s->corked &&
-        jack_ringbuffer_write_space(rb_L[channel]) >= BUF_MINREQ)
-        send_request(s->client_fd, channel, BUF_MINREQ);
+        jack_ringbuffer_read_space(rb_L[channel]) < ring_chunk * 2u)
+        send_request(s->client_fd, channel, BUF_TLENGTH);
 }
 
 static void cmd_cork_playback_stream(Client *cl, TsR *ts, uint32_t tag) {
@@ -934,10 +937,30 @@ static void dispatch(Client *cl, uint32_t channel,
         send_reply_empty(cl->fd, tag);  /* empty list = no cards */
         break;
 
+    /* FLUSH: reply must include write_index + read_index (s64 each), then REQUEST */
+    case PA_CMD_FLUSH_PLAYBACK_STREAM: {
+        uint32_t idx = 0;
+        tr_u32(&ts, &idx);
+        if (idx < MAX_STREAMS && streams[idx].active) {
+            jack_ringbuffer_reset(rb_L[idx]);
+            jack_ringbuffer_reset(rb_R[idx]);
+        }
+        uint64_t widx = (idx < MAX_STREAMS && streams[idx].active)
+                        ? streams[idx].write_index : 0u;
+        TsW rep = {0};
+        tw_u32(&rep, PA_CMD_REPLY);
+        tw_u32(&rep, tag);
+        tw_u64(&rep, 'r', widx);   /* write_index (PA_TAG_S64) */
+        tw_u64(&rep, 'r', widx);   /* read_index = write_index: buffer flushed */
+        send_cmd(cl->fd, &rep);
+        if (idx < MAX_STREAMS && streams[idx].active && !streams[idx].corked)
+            send_request(cl->fd, idx, BUF_TLENGTH);
+        break;
+    }
+
     /* Acknowledge-only commands */
     case PA_CMD_DRAIN_PLAYBACK_STREAM:
     case PA_CMD_PREBUF_PLAYBACK_STREAM:
-    case PA_CMD_FLUSH_PLAYBACK_STREAM:
     case PA_CMD_SET_DEFAULT_SINK:
     case PA_CMD_SET_DEFAULT_SOURCE:
     case 39u:  /* PA_COMMAND_SET_SINK_MUTE */
@@ -1296,10 +1319,20 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        int ret = poll(pfds, (unsigned)nfds, 1000);
+        int ret = poll(pfds, (unsigned)nfds, 10);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
+        }
+
+        /* Proactive REQUEST: restart flow when ring drains below target but client
+         * has no budget left (handle_audio won't fire until it writes more). */
+        for (int i = 0; i < MAX_STREAMS; i++) {
+            if (!streams[i].active || streams[i].corked || streams[i].client_fd < 0) continue;
+            uint32_t bps = (streams[i].format == PA_SAMPLE_S16LE) ? 2u : 4u;
+            uint32_t rchunk = BUF_TLENGTH / (bps * (uint32_t)streams[i].channels) * (uint32_t)sizeof(float);
+            if (jack_ringbuffer_read_space(rb_L[i]) < rchunk * 2u)
+                send_request(streams[i].client_fd, i, BUF_TLENGTH);
         }
 
         /* New connections */
