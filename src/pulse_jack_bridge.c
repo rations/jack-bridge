@@ -2,7 +2,7 @@
  * pulse_jack_bridge.c
  * Minimal PulseAudio native-protocol server that routes audio to JACK.
  *
- * Creates a PA UNIX socket that pressure-vessel (Steam Runtime 3.0 "Sniper")
+ * Creates a PA UNIX socket that pressure-vessel (Steam Runtime 3.0 "Sniper" and 4.0)
  * finds and forwards into the game container. Games connect via libpulse,
  * send PCM over the socket; this bridge writes it to JACK ring buffers and
  * sums all streams into stereo output ports in the JACK process callback.

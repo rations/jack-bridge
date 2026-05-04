@@ -113,6 +113,19 @@ void GraphCanvas::layout(bool preserve_positions) {
             mixed.push_back(&box);
     }
 
+    /* Sort each column so MIDI clients appear above audio clients. */
+    auto is_midi = [](const ClientBox* b) {
+        for (const auto& p : b->inputs)  if (p->type == PortType::MIDI) return true;
+        for (const auto& p : b->outputs) if (p->type == PortType::MIDI) return true;
+        return false;
+    };
+    auto midi_first = [&](const ClientBox* a, const ClientBox* b) {
+        return is_midi(a) > is_midi(b);
+    };
+    std::stable_sort(sources.begin(), sources.end(), midi_first);
+    std::stable_sort(sinks.begin(),   sinks.end(),   midi_first);
+    std::stable_sort(mixed.begin(),   mixed.end(),   midi_first);
+
     double max_box_width = 0;
     for (const auto& box : m_client_boxes)
         max_box_width = std::max(max_box_width, box.width);
@@ -121,18 +134,7 @@ void GraphCanvas::layout(bool preserve_positions) {
     double mid_x   = m_offset_x + max_box_width + COL_GAP;
     double right_x = m_offset_x + max_box_width * 2 + COL_GAP * 2;
 
-    /* Place a single box at (col_x, col_y) or at its saved position,
-     * then advance col_y past it for the next box in the same column. */
-    auto place = [&](ClientBox* box, double col_x, double& col_y) {
-        auto it = m_saved_positions.find(box->client_name);
-        if (it != m_saved_positions.end()) {
-            box->x = it->second.x;
-            box->y = it->second.y;
-        } else {
-            box->x = col_x;
-            box->y = col_y;
-        }
-
+    auto position_ports = [&](ClientBox* box) {
         for (size_t i = 0; i < box->inputs.size(); ++i) {
             box->inputs[i]->x = box->x + ClientBox::SIDE_PAD;
             box->inputs[i]->y = box->y + ClientBox::HEADER_HEIGHT + ClientBox::PORT_PAD +
@@ -147,22 +149,39 @@ void GraphCanvas::layout(bool preserve_positions) {
             box->outputs[i]->width  = ClientBox::COL_WIDTH;
             box->outputs[i]->height = ClientBox::PORT_HEIGHT;
         }
-
-        col_y = box->y + box->height + ROW_GAP;
     };
 
     double left_y  = m_offset_y;
     double mid_y   = m_offset_y;
     double right_y = m_offset_y;
 
-    for (auto* box : sources)
-        place(box, left_x, left_y);
+    /* Pass 1: restore saved boxes at their saved positions and find the
+     * lowest occupied Y in each column so new boxes never overlap them. */
+    auto place_saved = [&](ClientBox* box, double& col_floor) {
+        auto it = m_saved_positions.find(box->client_name);
+        if (it == m_saved_positions.end()) return;
+        box->x = it->second.x;
+        box->y = it->second.y;
+        position_ports(box);
+        col_floor = std::max(col_floor, box->y + box->height + ROW_GAP);
+    };
 
-    for (auto* box : mixed)
-        place(box, mid_x, mid_y);
+    for (auto* box : sources) place_saved(box, left_y);
+    for (auto* box : mixed)   place_saved(box, mid_y);
+    for (auto* box : sinks)   place_saved(box, right_y);
 
-    for (auto* box : sinks)
-        place(box, right_x, right_y);
+    /* Pass 2: place new (unsaved) boxes below all saved content in their column. */
+    auto place_new = [&](ClientBox* box, double col_x, double& col_y) {
+        if (m_saved_positions.count(box->client_name)) return;
+        box->x = col_x;
+        box->y = col_y;
+        position_ports(box);
+        col_y += box->height + ROW_GAP;
+    };
+
+    for (auto* box : sources) place_new(box, left_x, left_y);
+    for (auto* box : mixed)   place_new(box, mid_x, mid_y);
+    for (auto* box : sinks)   place_new(box, right_x, right_y);
 
     /* Compute canvas bounds to fit all boxes including user-dragged ones */
     double max_x = 0, max_y = 0;
