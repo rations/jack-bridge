@@ -10,8 +10,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-/* Forward declaration for Devices panel (Playback switching) */
+/* Forward declarations for panels defined after main() */
 static void create_devices_panel(GtkWidget *main_box);
+static void create_steam_panel(GtkWidget *main_box);
 
 /* Forward declarations needed by earlier callers */
 static int write_string_atomic(const char *path, const char *content);
@@ -43,6 +44,7 @@ static GtkWidget *g_mixer_expander = NULL;
 static GtkWidget *g_eq_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
 static GtkWidget *g_dev_expander = NULL;
+static GtkWidget *g_steam_expander = NULL;
 
 /* Approximate heights for precise window resizing to avoid blank space */
 #define EXPANDER_HEADER_HEIGHT 5
@@ -50,6 +52,7 @@ static GtkWidget *g_dev_expander = NULL;
 #define EQ_CONTENT_HEIGHT 100
 #define BT_CONTENT_HEIGHT 150
 #define DEV_CONTENT_HEIGHT 50
+#define STEAM_CONTENT_HEIGHT 65
 #define WINDOW_BASE_HEIGHT 40  /* borders, spacing */
 /* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
 static GtkWidget *g_bt_tree = NULL;
@@ -77,11 +80,13 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
     (void)pspec;
     (void)user_data;
 
-    if (g_main_window && g_mixer_expander && g_eq_expander && g_bt_expander && g_dev_expander) {
+    if (g_main_window && g_mixer_expander && g_eq_expander && g_bt_expander &&
+        g_dev_expander && g_steam_expander) {
         gboolean mixer_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_mixer_expander));
         gboolean eq_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_eq_expander));
         gboolean bt_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_bt_expander));
         gboolean dev_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_dev_expander));
+        gboolean steam_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_steam_expander));
 
         /* Calculate exact height based on expanded state to eliminate blank space */
         int height = WINDOW_BASE_HEIGHT;
@@ -89,6 +94,7 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
         height += eq_exp ? EQ_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
         height += bt_exp ? BT_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
         height += dev_exp ? DEV_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
+        height += steam_exp ? STEAM_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
 
         gtk_window_resize(GTK_WINDOW(g_main_window), 600, height);
     }
@@ -1253,6 +1259,9 @@ int main(int argc, char *argv[]) {
     /* Devices panel (Playback) */
     create_devices_panel(main_box);
 
+    /* Steam Gaming Mode panel */
+    create_steam_panel(main_box);
+
     gtk_widget_show_all(window);
     gtk_main();
 
@@ -1762,6 +1771,110 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         gtk_widget_destroy(d);
     }
 }
+
+/* ======================================================================
+ * Steam Gaming Mode panel — starts/stops pulse-jack-bridge
+ * ====================================================================== */
+
+static GPid      bridge_pid          = 0;
+static guint     bridge_timer_id     = 0;
+static GtkWidget *bridge_status_lbl  = NULL;
+static GtkWidget *bridge_toggle_btn  = NULL;
+
+static gboolean bridge_poll_timer(gpointer user_data) {
+    (void)user_data;
+    if (bridge_pid == 0) return FALSE;
+
+    int wstatus;
+    pid_t r = waitpid((pid_t)bridge_pid, &wstatus, WNOHANG);
+    if (r == (pid_t)bridge_pid || r == -1) {
+        g_spawn_close_pid(bridge_pid);
+        bridge_pid      = 0;
+        bridge_timer_id = 0;
+        if (bridge_status_lbl)
+            gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: inactive");
+        if (bridge_toggle_btn)
+            gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Enable Steam Mode");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void on_bridge_toggle_clicked(GtkButton *btn, gpointer user_data) {
+    (void)user_data;
+
+    if (bridge_pid != 0) {
+        kill((pid_t)bridge_pid, SIGTERM);
+        g_spawn_close_pid(bridge_pid);
+        bridge_pid = 0;
+        if (bridge_timer_id) { g_source_remove(bridge_timer_id); bridge_timer_id = 0; }
+        gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: inactive");
+        gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Enable Steam Mode");
+        return;
+    }
+
+    /* Verify JACK is running before spawning */
+    gchar *out = NULL; gint st = 0;
+    gboolean jack_ok = g_spawn_command_line_sync("jack_lsp", &out, NULL, &st, NULL) &&
+                       WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (out) g_free(out);
+    if (!jack_ok) {
+        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(btn));
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL,
+            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "JACK is not running.\n\nStart JACK first via the Settings dialog.");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        return;
+    }
+
+    GError *err = NULL;
+    gchar *argv_bridge[] = { (gchar *)"pulse-jack-bridge", NULL };
+    gboolean ok = g_spawn_async(NULL, argv_bridge, NULL,
+                                G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD,
+                                NULL, NULL, &bridge_pid, &err);
+    if (!ok) {
+        GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(btn));
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL,
+            GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "Failed to start pulse-jack-bridge:\n%s\n\n"
+            "Ensure it is installed: sudo install.sh",
+            err ? err->message : "unknown error");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        if (err) g_error_free(err);
+        return;
+    }
+
+    gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: active (JACK connected)");
+    gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Disable Steam Mode");
+    bridge_timer_id = g_timeout_add(1000, bridge_poll_timer, NULL);
+}
+
+static void create_steam_panel(GtkWidget *main_box) {
+    GtkWidget *expander = gtk_expander_new("Steam Gaming Mode");
+    gtk_expander_set_expanded(GTK_EXPANDER(expander), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_box), expander, FALSE, FALSE, 0);
+
+    g_steam_expander = expander;
+    g_signal_connect(G_OBJECT(expander), "notify::expanded",
+                     G_CALLBACK(on_any_expander_toggled), NULL);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(vbox), 8);
+    gtk_container_add(GTK_CONTAINER(expander), vbox);
+
+    bridge_status_lbl = gtk_label_new("Bridge: inactive");
+    gtk_widget_set_halign(bridge_status_lbl, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(vbox), bridge_status_lbl, FALSE, FALSE, 0);
+
+    bridge_toggle_btn = gtk_button_new_with_label("Enable Steam Mode");
+    gtk_box_pack_start(GTK_BOX(vbox), bridge_toggle_btn, FALSE, FALSE, 0);
+    g_signal_connect(bridge_toggle_btn, "clicked",
+                     G_CALLBACK(on_bridge_toggle_clicked), NULL);
+}
+
+/* ====================================================================== */
 
 static void create_devices_panel(GtkWidget *main_box) {
     GtkWidget *dev_expander = gtk_expander_new("Devices");

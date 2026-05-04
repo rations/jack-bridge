@@ -28,6 +28,15 @@
 
 ### UNTESTED VERSIONS in branches for Void runit if anyone feels adventurous
  
+### Steam Gaming Mode — play Steam games through JACK with no PulseAudio or Pipewire required
+
+`pulse-jack-bridge` is a minimal PulseAudio protocol server built into jack-bridge. It creates a PulseAudio-compatible UNIX socket that Steam's pressure-vessel container finds automatically, routing game audio straight into JACK without installing PulseAudio or PipeWire.
+
+- Enable from **Alsa Sound Connect → Steam Gaming Mode → Enable Steam Mode**
+- Or run `pulse-jack-bridge` in a terminal before launching Steam
+- Tested with Steam Runtime 3.0 & 4.0 (pressure-vessel) — survives Steam updates
+- No wrapper scripts or custom Steam launch options required
+
 ### Professional audio control interface Alsa Sound Connect (`mxeq`) with:
 - **Dynamic mixer controls** - Automatically shows hardware controls for active device (Internal/USB)
 - **Built-in recorder** - Record in mono/stereo at 44.1kHz or 48kHz, saves to ~/Music
@@ -57,19 +66,19 @@
 
 **Debian-based distributions** Without systemd. Using sysVinit. Testing done on Devuan 5 and 6 XFCE, Mate, JWM & Openbox using sysVinit.
 
-**Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. Removing PulseAudio is not required as the installer Disables PulseAudio autospawn system-wide and if you need pulseaudio for steam games you can start and stop pulseaudio as needed in a terminal with pulseaudio --start and pulseaudio --kill. As it is now steams version of proton does not support jack and steams runtime would have to be rebuilt as a custom binary and everytime there is an upgrade it would stop working. Until I can figure something out unfortunatly jack-bridge does not work with steam. If you use wine for gaming jack-bridge works fine. 
+**Recommended:** Remove PulseAudio and PipeWire before installation to avoid conflicts. The installer disables PulseAudio autospawn system-wide. Steam games work via the built-in **pulse-jack-bridge** — see [Steam Gaming](#steam-gaming) below. Wine gaming works without any extra steps.
 
 ## Installation
 
 ### Quick Install - During installation when prompted, select YES to Enable realtime priorities
 
-Download `jack-bridge-20260502.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260504.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260502
+tar -xf jack-bridge-20260504
 ```
 ```bash
-cd jack-bridge-20260502
+cd jack-bridge-20260504
 ```
 ```bash
 sudo sh contrib/install.sh
@@ -100,9 +109,10 @@ The installer will:
 2. Configure ALSA → JACK routing
 3. Install SysV init scripts for jackd-rt, bluealsad, bluetoothd, jack-bridge-ports
 4. Install Alsa Sound Connect GUI to `/usr/local/bin/mxeq`
-5. Create desktop launcher (Applications → Sound & Video → Alsa Sound Connect)
-6. Set up Bluetooth D-Bus policies and polkit rules
-7. Configure audio group permissions
+5. Install Steam audio bridge to `/usr/local/bin/pulse-jack-bridge`
+6. Create desktop launcher (Applications → Sound & Video → Alsa Sound Connect)
+7. Set up Bluetooth D-Bus policies and polkit rules
+8. Configure audio group permissions
 
 After reboot, launch **Alsa Sound Connect** from your applications menu.
 
@@ -149,6 +159,24 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 - **Trust**: Enabled after pairing
 - **Connect**: Enabled for paired devices
 - **Remove**: Removes device from system
+
+### Steam Gaming
+
+1. JACK must be running (starts automatically at boot; Start/Stop button in jack-graph)
+2. Open **Alsa Sound Connect** → expand **Steam Gaming Mode**
+3. Click **Enable Steam Mode** — status shows "Bridge: active (JACK connected)"
+4. Launch Steam normally — game audio routes through your selected JACK output
+5. Click **Disable Steam Mode** (or close the terminal) to stop the bridge
+
+**From the terminal:**
+```bash
+pulse-jack-bridge &   # starts bridge in background
+steam &               # launch Steam
+```
+
+**Why no wrapper script or launch options are needed:** Steam's pressure-vessel container scans for a PulseAudio socket at startup. When `pulse-jack-bridge` is running it creates that socket, and pressure-vessel sets `PULSE_SERVER` inside the container automatically — the same mechanism used by real PulseAudio installs. Because this socket-discovery step is structural to pressure-vessel, the bridge survives Steam Runtime upgrades without any maintenance.
+
+**Output routing:** `pulse-jack-bridge` appears as a JACK client called `steam-pulse-bridge`. `jack-connection-manager` auto-connects it to whichever output device is selected in the Devices panel (Internal, USB, HDMI, or Bluetooth) — no extra routing steps needed.
 
 ## Bluetooth Details
 
@@ -267,14 +295,15 @@ Per-binary minimal compile commands (useful for producing a single utility if yo
 - bluealsad (daemon)
   - The daemon links multiple internal sources and should be built with the Autotools workflow (no supported single-file gcc command). Use the example configure+make sequence above.
 
-### Building GUI (mxeq)
+### Building GUI and bridge
 
-bash
+```bash
 cd ~/jack-bridge
-make clean && make
+make clean && make        # builds mxeq + jack-connection-manager
+make bridge               # builds pulse-jack-bridge (Steam audio bridge)
+```
 
-
-The Makefile builds `mxeq` (GUI) and `jack-connection-manager` (event-driven daemon).
+The Makefile builds `mxeq` (GUI), `jack-connection-manager` (event-driven daemon), and `pulse-jack-bridge` (Steam audio bridge). Build dependency for the bridge: `libjack-jackd2-dev` (already required by jack-bridge).
 
 ### Building jack-graph
 
@@ -328,12 +357,12 @@ Shutdown Sequence (reverse order with graceful termination)
 
 ### Audio Pipeline
 
-
-Application (ALSA API)
-    ↓
-/etc/asound.conf (routing config)
-    ↓
-ALSA JACK Plugin (bridge to JACK)
+```
+ALSA Application                 Steam Game (pressure-vessel)
+    ↓                                     ↓
+/etc/asound.conf                 PA socket (pulse-jack-bridge)
+    ↓                                     ↓
+ALSA JACK Plugin          ───────────────►┘
     ↓
 JACK Audio Server (jackd)
     ├─ system:playback_1/2 (internal)
@@ -344,12 +373,14 @@ JACK Audio Server (jackd)
 ALSA Device (hw:X)
     ↓
 Audio Output
+```
 
 
 ### File Locations
 
 **Binaries:**
 - `/usr/local/bin/mxeq` - Alsa Sound Connect GUI
+- `/usr/local/bin/pulse-jack-bridge` - Steam audio bridge (PA protocol → JACK)
 - `/usr/local/bin/bluealsad` - BlueALSA daemon
 - `/usr/local/bin/bluealsactl` - BlueALSA control utility
 - `/usr/local/bin/bluealsa-aplay` - BlueALSA player
