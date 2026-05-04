@@ -28,13 +28,13 @@
 
 ### UNTESTED VERSIONS in branches for Void runit if anyone feels adventurous
  
-### Steam Gaming Mode — play Steam games through JACK with no PulseAudio required
+### Steam Gaming Mode — play Steam games through JACK with no PulseAudio or Pipewire required
 
 `pulse-jack-bridge` is a minimal PulseAudio protocol server built into jack-bridge. It creates a PulseAudio-compatible UNIX socket that Steam's pressure-vessel container finds automatically, routing game audio straight into JACK without installing PulseAudio or PipeWire.
 
 - Enable from **Alsa Sound Connect → Steam Gaming Mode → Enable Steam Mode**
 - Or run `pulse-jack-bridge` in a terminal before launching Steam
-- Works with Steam Runtime 3.0 "Sniper" (pressure-vessel) — survives Steam updates
+- Tested with Steam Runtime 3.0 & 4.0 (pressure-vessel) — survives Steam updates
 - No wrapper scripts or custom Steam launch options required
 
 ### Professional audio control interface Alsa Sound Connect (`mxeq`) with:
@@ -72,13 +72,13 @@
 
 ### Quick Install - During installation when prompted, select YES to Enable realtime priorities
 
-Download `jack-bridge-20260502.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260504.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260502
+tar -xf jack-bridge-20260504
 ```
 ```bash
-cd jack-bridge-20260502
+cd jack-bridge-20260504
 ```
 ```bash
 sudo sh contrib/install.sh
