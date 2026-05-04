@@ -166,6 +166,14 @@ else
     echo "WARNING: jack-connection-manager not found (run 'make manager' to build it)"
 fi
 
+# Install pulse-jack-bridge (Steam Runtime 3.0 Sniper audio bridge)
+if [ -f "contrib/bin/pulse-jack-bridge" ]; then
+    install -m 0755 contrib/bin/pulse-jack-bridge /usr/local/bin/pulse-jack-bridge
+    echo "Installed pulse-jack-bridge to /usr/local/bin/pulse-jack-bridge"
+else
+    echo "WARNING: pulse-jack-bridge not found (run 'make bridge' to build it)"
+fi
+
 # Install autoconnect helper (from contrib; force overwrite)
 if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
     install -m 0755 contrib/usr/lib/jack-bridge/jack-autoconnect "${USR_LIB_DIR}/jack-autoconnect"

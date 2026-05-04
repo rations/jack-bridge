@@ -1,5 +1,5 @@
 /.vscode
-
+/.claude
 # Common local artifacts
 *.o
 *.obj

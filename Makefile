@@ -23,6 +23,14 @@ MANAGER_SRCS = src/jack_connection_manager.c
 MANAGER_LIBS = -ljack
 MANAGER_CFLAGS = -D_POSIX_C_SOURCE=200809L -Wall -Wextra -std=c11
 
+# Build pulse-jack-bridge (PA protocol server → JACK)
+# Requires: libjack-jackd2-dev (build-time only)
+BRIDGE_TARGET = $(BIN_DIR)/pulse-jack-bridge
+BRIDGE_SRCS = src/pulse_jack_bridge.c
+BRIDGE_CFLAGS = -O2 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -std=c11 \
+                $(shell $(PKG_CONFIG) --cflags jack)
+BRIDGE_LIBS   = $(shell $(PKG_CONFIG) --libs jack)
+
 CFLAGS_COMMON = -Wall -Wextra -std=c11
 
 all: mxeq manager
@@ -40,7 +48,12 @@ manager: $(BIN_DIR) $(MANAGER_TARGET)
 $(MANAGER_TARGET): $(MANAGER_SRCS) | $(BIN_DIR)
 	$(CC) $(MANAGER_CFLAGS) -o $@ $(MANAGER_SRCS) $(MANAGER_LIBS)
 
-clean:
-	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager
+bridge: $(BIN_DIR) $(BRIDGE_TARGET)
 
-.PHONY: all clean mxeq manager
+$(BRIDGE_TARGET): $(BRIDGE_SRCS) | $(BIN_DIR)
+	$(CC) $(BRIDGE_CFLAGS) -o $@ $(BRIDGE_SRCS) $(BRIDGE_LIBS)
+
+clean:
+	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager $(BIN_DIR)/pulse-jack-bridge
+
+.PHONY: all clean mxeq manager bridge
