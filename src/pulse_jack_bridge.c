@@ -568,9 +568,6 @@ static void cmd_delete_playback_stream(Client *cl, TsR *ts, uint32_t tag) {
 static void handle_audio(uint32_t channel, const uint8_t *data, uint32_t len) {
     if (channel >= MAX_STREAMS || !streams[channel].active) return;
     PaStream *s = &streams[channel];
-    if (g_debug)
-        fprintf(stderr, "pulse-jack-bridge: audio ch=%u len=%u fmt=%u\n",
-                channel, len, s->format);
 
     uint32_t bps         = (s->format == PA_SAMPLE_S16LE) ? 2u : 4u;
     uint32_t frame_bytes = bps * s->channels;
@@ -602,14 +599,6 @@ static void handle_audio(uint32_t channel, const uint8_t *data, uint32_t len) {
     jack_ringbuffer_write(rb_R[channel], (char *)conv_R, nframes * sizeof(float));
 
     streams[channel].write_index += len;
-
-    if (g_debug) {
-        fprintf(stderr, "pulse-jack-bridge: stream %u: wrote %u frames, rb_L=%zu bytes buffered\n",
-                channel, nframes, jack_ringbuffer_read_space(rb_L[channel]));
-        fprintf(stderr, "pulse-jack-bridge: stream %u: sample[0] L=%.6f R=%.6f (raw: %02x%02x%02x%02x %02x%02x%02x%02x)\n",
-                channel, conv_L[0], conv_R[0],
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
-    }
 
     /* Send PA_COMMAND_STARTED once the prebuffer is full — but ONLY for uncorked streams.
      * For corked streams (PA_STREAM_START_CORKED), STARTED must be deferred until UNCORK:
