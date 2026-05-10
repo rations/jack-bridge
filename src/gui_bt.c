@@ -1176,10 +1176,6 @@ int gui_bt_remove_device_by_object(const char *object_path) {
 
 #include <gio/gio.h>
 
-/* Forward declarations of GUI helpers in this file */
-int gui_bt_add_device(const char *display, const char *object_path);
-int gui_bt_remove_device_by_object(const char *object_path);
-
 static guint bluez_interfaces_added_sub = 0;
 static guint bluez_interfaces_removed_sub = 0;
 static guint bluez_device_props_changed_sub = 0;

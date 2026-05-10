@@ -17,9 +17,14 @@ JackGraph::JackGraph()
     if (m_jack_connected) {
         std::cerr << "jack-graph: Connected to running JACK server" << std::endl;
         m_jack.set_port_callback([this]() {
-            Glib::signal_idle().connect_once([this]() {
-                refresh_ports();
-            });
+            bool expected = false;
+            if (m_refresh_pending.compare_exchange_strong(expected, true)) {
+                Glib::signal_timeout().connect([this]() -> bool {
+                    m_refresh_pending.store(false);
+                    refresh_ports();
+                    return false;
+                }, 100);
+            }
         });
         m_jack.set_xrun_callback([this]() {
             Glib::signal_idle().connect_once([this]() {
@@ -57,6 +62,21 @@ void JackGraph::setup_ui() {
     m_scrolled_window.add(m_canvas);
     m_main_box.pack_start(m_scrolled_window, Gtk::PACK_EXPAND_WIDGET);
 
+    auto* btn_bar = Gtk::manage(new Gtk::ButtonBox(Gtk::ORIENTATION_HORIZONTAL));
+    btn_bar->set_layout(Gtk::BUTTONBOX_CENTER);
+    btn_bar->set_spacing(8);
+    auto* btn_refresh = Gtk::manage(new Gtk::Button("Refresh"));
+    auto* btn_settings = Gtk::manage(new Gtk::Button("JACK Settings"));
+    btn_refresh->signal_clicked().connect(
+        sigc::mem_fun(*this, &JackGraph::on_menu_refresh));
+    btn_settings->signal_clicked().connect(
+        sigc::mem_fun(*this, &JackGraph::on_menu_settings));
+    btn_bar->add(*btn_refresh);
+    btn_bar->add(*btn_settings);
+    m_main_box.pack_start(*btn_bar, Gtk::PACK_SHRINK);
+
+    m_statusbar.set_halign(Gtk::ALIGN_CENTER);
+    m_statusbar.set_hexpand(true);
     m_main_box.pack_start(m_statusbar, Gtk::PACK_SHRINK);
 
     m_canvas.set_connect_callback(
@@ -129,15 +149,14 @@ void JackGraph::setup_menu() {
         sigc::mem_fun(*this, &JackGraph::on_menu_about));
     help_menu->append(*about_item);
 
-    m_status_context_id = m_statusbar.get_context_id("jack-graph");
 }
 
 void JackGraph::refresh_ports() {
+    m_jack.scan_ports();
     m_canvas.remove_all();
 
     if (m_jack_connected) {
         std::string our_client = m_jack.get_actual_client_name();
-        std::cerr << "JACK client name: " << our_client << std::endl;
         auto ports = m_jack.get_ports();
         for (const auto& p : ports) {
             if (p.client == our_client) continue;
@@ -208,6 +227,7 @@ void JackGraph::on_disconnect_alsa(const std::string& source, const std::string&
 
 void JackGraph::on_menu_refresh() {
     refresh_ports();
+    m_canvas.fit_to_window();
 }
 
 void JackGraph::on_menu_zoom_in() {
@@ -235,9 +255,14 @@ void JackGraph::on_menu_settings() {
             m_jack_connected = m_jack.connect("jack-graph");
             if (m_jack_connected) {
                 m_jack.set_port_callback([this]() {
-                    Glib::signal_idle().connect_once([this]() {
-                        refresh_ports();
-                    });
+                    bool expected = false;
+                    if (m_refresh_pending.compare_exchange_strong(expected, true)) {
+                        Glib::signal_timeout().connect([this]() -> bool {
+                            m_refresh_pending.store(false);
+                            refresh_ports();
+                            return false;
+                        }, 100);
+                    }
                 });
                 m_jack.set_xrun_callback([this]() {
                     Glib::signal_idle().connect_once([this]() {
@@ -273,8 +298,17 @@ void JackGraph::on_menu_about() {
     dialog.run();
 }
 
+bool JackGraph::on_delete_event(GdkEventAny*) {
+    m_jack.disconnect();
+    m_jack_connected = false;
+    if (auto app = get_application()) {
+        app->quit();
+    }
+    return false;
+}
+
 void JackGraph::on_menu_quit() {
-    hide();
+    on_delete_event(nullptr);
 }
 
 void JackGraph::update_status_bar() {
@@ -295,5 +329,5 @@ void JackGraph::update_status_bar() {
         status += " | ALSA MIDI: connected";
     }
 
-    m_statusbar.push(status, m_status_context_id);
+    m_statusbar.set_text(status);
 }

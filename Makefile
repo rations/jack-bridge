@@ -1,8 +1,9 @@
 # Makefile - build binaries for jack-bridge project
 # Usage:
-#   make        # builds mxeq (GUI) and jack-connection-manager
+#   make        # builds mxeq (GUI), jack-connection-manager, and pulse-jack-bridge
 #   make mxeq   # build GUI binary only
 #   make manager # build connection manager only
+#   make bridge # build pulse-jack-bridge only
 #   make clean
 CC = gcc
 PKG_CONFIG = pkg-config
@@ -33,7 +34,7 @@ BRIDGE_LIBS   = $(shell $(PKG_CONFIG) --libs jack)
 
 CFLAGS_COMMON = -Wall -Wextra -std=c11
 
-all: mxeq manager
+all: mxeq manager bridge
 
 $(BIN_DIR):
 	$(MKDIR_P) $(BIN_DIR)

@@ -18,16 +18,10 @@ SettingsDialog::SettingsDialog(Gtk::Window& parent, JackServerControl& server, C
       m_frames_label("Frames/Period:"),
       m_periods_label("Periods/Buffer:"),
       m_midi_frame("MIDI"),
-      m_midi_label("MIDI Driver:"),
-      m_options_frame("Options"),
-      m_options_box(Gtk::ORIENTATION_VERTICAL, 4),
-      m_realtime_check("Realtime"),
-      m_sync_check("Use Server Synchronous Mode"),
-      m_button_box(Gtk::ORIENTATION_HORIZONTAL, 10),
-      m_close_btn("Close") {
-    set_default_size(420, 500);
+      m_midi_label("MIDI Driver:") {
+    set_default_size(420, -1);
 
-    add_action_widget(m_close_btn, Gtk::RESPONSE_CLOSE);
+    add_button("Close", Gtk::RESPONSE_CLOSE);
 
     build_ui();
     load_current_settings();
@@ -68,11 +62,6 @@ void SettingsDialog::build_ui() {
     m_midi_frame.add(m_midi_grid);
     m_content_box.pack_start(m_midi_frame, false, false, 0);
 
-    m_options_box.pack_start(m_realtime_check, false, false, 0);
-    m_options_box.pack_start(m_sync_check, false, false, 0);
-    m_options_frame.add(m_options_box);
-    m_content_box.pack_start(m_options_frame, false, false, 0);
-
     m_sample_rate_combo.append("44100", "44100");
     m_sample_rate_combo.append("48000", "48000");
     m_sample_rate_combo.append("88200", "88200");
@@ -96,9 +85,6 @@ void SettingsDialog::build_ui() {
 
     m_midi_combo.append("none", "None");
     m_midi_combo.append("seq", "ALSA SEQ");
-
-    m_button_box.pack_start(m_close_btn, false, false, 0);
-    m_content_box.pack_start(m_button_box, false, false, 0);
 
     m_start_btn.signal_clicked().connect(sigc::mem_fun(*this, &SettingsDialog::on_start));
     m_stop_btn.signal_clicked().connect(sigc::mem_fun(*this, &SettingsDialog::on_stop));
@@ -193,8 +179,8 @@ void SettingsDialog::on_start() {
     settings.sample_rate = std::stoi(sr_str);
     settings.frames_per_period = std::stoi(fpp_str);
     settings.periods_per_buffer = std::stoi(ppb_str);
-    settings.realtime = m_realtime_check.get_active();
-    settings.synchronous = m_sync_check.get_active();
+    settings.realtime = true;
+    settings.synchronous = false;
     settings.midi_driver = m_midi_combo.get_active_id();
 
     // Update internal config too

@@ -181,6 +181,16 @@ static gboolean export_agent_object(GDBusConnection *conn, GError **error) {
 /* Call org.bluez.AgentManager1.RegisterAgent and RequestDefault if available */
 static gboolean register_agent_with_bluez(GDBusConnection *conn, GError **error) {
     GError *err = NULL;
+    /* Best-effort pre-unregister: if a previous process exited before BlueZ cleaned
+     * up its agent entry, RegisterAgent below would fail with "already registered".
+     * Unregistering first (ignoring errors) avoids that timing race. */
+    GVariant *pre = g_dbus_connection_call_sync(conn, "org.bluez", "/org/bluez",
+        "org.bluez.AgentManager1", "UnregisterAgent",
+        g_variant_new("(o)", AGENT_PATH), NULL,
+        G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &err);
+    if (pre) g_variant_unref(pre);
+    if (err) { g_error_free(err); err = NULL; }
+
     /* Call RegisterAgent(path, capability) */
     GVariant *res = g_dbus_connection_call_sync(conn,
                                                 "org.bluez",
@@ -269,6 +279,18 @@ gboolean bt_agent_register(GDBusConnection *conn, GError **error) {
 void bt_agent_unregister(GDBusConnection *conn) {
     (void)conn;
     if (agent_conn && registration_id != 0) {
+        /* Tell BlueZ to remove the agent registration before we close the object.
+         * Without this, BlueZ may not notice the agent is gone until the D-Bus
+         * connection fully closes, creating a timing window where a fast GUI
+         * restart gets "Agent already registered" from RegisterAgent. */
+        GError *err = NULL;
+        GVariant *res = g_dbus_connection_call_sync(
+            agent_conn, "org.bluez", "/org/bluez",
+            "org.bluez.AgentManager1", "UnregisterAgent",
+            g_variant_new("(o)", AGENT_PATH), NULL,
+            G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &err);
+        if (res) g_variant_unref(res);
+        if (err) g_error_free(err); /* ignore — BlueZ may have already cleaned up */
         g_dbus_connection_unregister_object(agent_conn, registration_id);
         registration_id = 0;
         g_info("bt_agent: unregistered agent object");
