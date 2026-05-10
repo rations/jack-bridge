@@ -41,7 +41,7 @@ typedef struct {
 static GtkWidget *g_main_window = NULL;
 static GtkWidget *g_main_box = NULL;
 static GtkWidget *g_mixer_expander = NULL;
-static GtkWidget *g_eq_expander = NULL;
+static GtkWidget *g_rec_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
 static GtkWidget *g_dev_expander = NULL;
 static GtkWidget *g_steam_expander = NULL;
@@ -49,7 +49,7 @@ static GtkWidget *g_steam_expander = NULL;
 /* Approximate heights for precise window resizing to avoid blank space */
 #define EXPANDER_HEADER_HEIGHT 5
 #define MIXER_CONTENT_HEIGHT 320
-#define EQ_CONTENT_HEIGHT 100
+#define REC_CONTENT_HEIGHT 100
 #define BT_CONTENT_HEIGHT 150
 #define DEV_CONTENT_HEIGHT 50
 #define STEAM_CONTENT_HEIGHT 65
@@ -80,10 +80,10 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
     (void)pspec;
     (void)user_data;
 
-    if (g_main_window && g_mixer_expander && g_eq_expander && g_bt_expander &&
+    if (g_main_window && g_mixer_expander && g_rec_expander && g_bt_expander &&
         g_dev_expander && g_steam_expander) {
         gboolean mixer_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_mixer_expander));
-        gboolean eq_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_eq_expander));
+        gboolean rec_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_rec_expander));
         gboolean bt_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_bt_expander));
         gboolean dev_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_dev_expander));
         gboolean steam_exp = gtk_expander_get_expanded(GTK_EXPANDER(g_steam_expander));
@@ -91,7 +91,7 @@ static void on_any_expander_toggled(GObject *object, GParamSpec *pspec, gpointer
         /* Calculate exact height based on expanded state to eliminate blank space */
         int height = WINDOW_BASE_HEIGHT;
         height += mixer_exp ? MIXER_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
-        height += eq_exp ? EQ_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
+        height += rec_exp ? REC_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
         height += bt_exp ? BT_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
         height += dev_exp ? DEV_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
         height += steam_exp ? STEAM_CONTENT_HEIGHT : EXPANDER_HEADER_HEIGHT;
@@ -854,7 +854,6 @@ static void create_recorder_ui(GtkWidget *main_box) {
     gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->record_btn, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(rec_box), rec_ui->stop_btn, FALSE, FALSE, 5);
 
-/* Removed nested Bluetooth callbacks: moved to file scope above */
     gtk_widget_set_sensitive(rec_ui->stop_btn, FALSE); // initially disabled
 
     g_signal_connect(rec_ui->record_btn, "clicked", G_CALLBACK(start_recording), NULL);
@@ -871,14 +870,14 @@ static void on_bt_selection_changed(GtkTreeSelection *sel, gpointer user_data) {
     GtkWidget *trust_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "trust_btn"));
     GtkWidget *connect_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "connect_btn"));
     GtkWidget *remove_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "remove_btn"));
-    GtkWidget *set_input_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "set_input_btn"));
+    GtkWidget *set_output_btn = GTK_WIDGET(g_object_get_data(G_OBJECT(tv), "set_output_btn"));
 
     /* Default: disable all until we have state */
     if (pair_btn) gtk_widget_set_sensitive(pair_btn, FALSE);
     if (trust_btn) gtk_widget_set_sensitive(trust_btn, FALSE);
     if (connect_btn) gtk_widget_set_sensitive(connect_btn, FALSE);
     if (remove_btn) gtk_widget_set_sensitive(remove_btn, has);
-    if (set_input_btn) gtk_widget_set_sensitive(set_input_btn, has);
+    if (set_output_btn) gtk_widget_set_sensitive(set_output_btn, has);
 
     if (!has) return;
 
@@ -976,20 +975,19 @@ static void create_bt_panel(GtkWidget *main_box) {
     GtkWidget *trust_btn = gtk_button_new_with_label("Trust");
     GtkWidget *connect_btn = gtk_button_new_with_label("Connect");
     GtkWidget *remove_btn = gtk_button_new_with_label("Remove");
-    /* Use clearer label for playback routing (this routes output to the selected device) */
-    GtkWidget *set_input_btn = gtk_button_new_with_label("Set as Output");
+    GtkWidget *set_output_btn = gtk_button_new_with_label("Set as Output");
     gtk_box_pack_start(GTK_BOX(bt_action_row), pair_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), trust_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), connect_btn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bt_action_row), remove_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(bt_action_row), set_input_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bt_action_row), set_output_btn, FALSE, FALSE, 0);
 
     /* Disable action buttons until a device is selected */
     gtk_widget_set_sensitive(pair_btn, FALSE);
     gtk_widget_set_sensitive(trust_btn, FALSE);
     gtk_widget_set_sensitive(connect_btn, FALSE);
     gtk_widget_set_sensitive(remove_btn, FALSE);
-    gtk_widget_set_sensitive(set_input_btn, FALSE);
+    gtk_widget_set_sensitive(set_output_btn, FALSE);
 
     /* Bind device store to GUI BT helpers, register listeners, and populate existing devices */
     gui_bt_set_device_store_widget(tree, store);
@@ -1001,14 +999,14 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_object_set_data(G_OBJECT(trust_btn), "device_tree", tree);
     g_object_set_data(G_OBJECT(connect_btn), "device_tree", tree);
     g_object_set_data(G_OBJECT(remove_btn), "device_tree", tree);
-    g_object_set_data(G_OBJECT(set_input_btn), "device_tree", tree);
+    g_object_set_data(G_OBJECT(set_output_btn), "device_tree", tree);
 
     /* Expose buttons via the tree so selection-changed can toggle sensitivity */
     g_object_set_data(G_OBJECT(tree), "pair_btn", pair_btn);
     g_object_set_data(G_OBJECT(tree), "trust_btn", trust_btn);
     g_object_set_data(G_OBJECT(tree), "connect_btn", connect_btn);
     g_object_set_data(G_OBJECT(tree), "remove_btn", remove_btn);
-    g_object_set_data(G_OBJECT(tree), "set_input_btn", set_input_btn);
+    g_object_set_data(G_OBJECT(tree), "set_output_btn", set_output_btn);
 
     GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(tree));
     g_signal_connect(sel, "changed", G_CALLBACK(on_bt_selection_changed), NULL);
@@ -1020,7 +1018,7 @@ static void create_bt_panel(GtkWidget *main_box) {
     g_signal_connect(trust_btn, "clicked", G_CALLBACK(on_trust_clicked), NULL);
     g_signal_connect(connect_btn, "clicked", G_CALLBACK(on_connect_clicked), NULL);
     g_signal_connect(remove_btn, "clicked", G_CALLBACK(on_remove_clicked), NULL);
-    g_signal_connect(set_input_btn, "clicked", G_CALLBACK(on_bt_set_output_clicked), NULL);
+    g_signal_connect(set_output_btn, "clicked", G_CALLBACK(on_bt_set_output_clicked), NULL);
 }
 
 
@@ -1236,22 +1234,22 @@ int main(int argc, char *argv[]) {
     }
 
     // Recording expander (collapsed by default to minimize vertical footprint)
-    GtkWidget *eq_expander = gtk_expander_new("Recording");
-    gtk_expander_set_expanded(GTK_EXPANDER(eq_expander), FALSE);
-    gtk_box_pack_start(GTK_BOX(main_box), eq_expander, FALSE, FALSE, 0);
+    GtkWidget *rec_expander = gtk_expander_new("Recording");
+    gtk_expander_set_expanded(GTK_EXPANDER(rec_expander), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_box), rec_expander, FALSE, FALSE, 0);
 
     /* keep a reference so the expander toggle handler can resize the window */
-    g_eq_expander = eq_expander;
-    g_signal_connect(G_OBJECT(eq_expander), "notify::expanded", G_CALLBACK(on_any_expander_toggled), NULL);
+    g_rec_expander = rec_expander;
+    g_signal_connect(G_OBJECT(rec_expander), "notify::expanded", G_CALLBACK(on_any_expander_toggled), NULL);
 
     /* Recording content box: pack directly into the expander so its height
        naturally follows the Recorder UI without leaving extra blank space
        when expanded or collapsed (similar behaviour to the Devices expander). */
-    GtkWidget *eq_content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_container_add(GTK_CONTAINER(eq_expander), eq_content_vbox);
+    GtkWidget *rec_content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_add(GTK_CONTAINER(rec_expander), rec_content_vbox);
 
     // Recorder UI inside Recording expander
-    create_recorder_ui(eq_content_vbox);
+    create_recorder_ui(rec_content_vbox);
 
     /* Bluetooth panel (collapsible) */
     create_bt_panel(main_box);
@@ -1573,11 +1571,6 @@ void ensure_user_asoundrc_bootstrap(void) {
 
 
 
-/* Input Devices panel removed in favor of the new Playback "Devices" panel.
- * Keep a small unused stub to avoid build warnings/errors on systems that
- * reference this symbol in older branches.
- */
-
 
 /* ---- Devices panel (Internal / USB / HDMI / Bluetooth) ----
  * Provides runtime JACK routing without restarting jackd by invoking:
@@ -1626,6 +1619,30 @@ static gchar *load_preferred_output(void) {
     }
     if (user_conf) g_free(user_conf);
     return g_strdup("internal");
+}
+
+static gchar *load_bluetooth_device_mac(void) {
+    const char *home = g_get_home_dir();
+    if (!home) return NULL;
+    gchar *path = g_build_filename(home, ".config", "jack-bridge", "devices.conf", NULL);
+    if (!file_exists_readable(path)) { g_free(path); return NULL; }
+    FILE *f = fopen(path, "r");
+    g_free(path);
+    if (!f) return NULL;
+    char line[512];
+    gchar *mac = NULL;
+    while (fgets(line, sizeof(line), f)) {
+        if (!g_str_has_prefix(line, "BLUETOOTH_DEVICE=")) continue;
+        char *val = line + strlen("BLUETOOTH_DEVICE=");
+        while (*val == ' ' || *val == '\t' || *val == '"') val++;
+        char *dev = strstr(val, "DEV=");
+        if (!dev) break;
+        char *mac_start = dev + 4;
+        if (strlen(mac_start) >= 17) mac = g_strndup(mac_start, 17);
+        break;
+    }
+    fclose(f);
+    return mac;
 }
 
 static gboolean route_to_target_async_with_arg(const char *target, const char *opt_arg) {
@@ -1697,6 +1714,11 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
             if (obj) g_free(obj);
         }
         
+        if (!mac) {
+            /* Fall back to the MAC saved by jack-route-select on the last successful BT session */
+            mac = load_bluetooth_device_mac();
+        }
+
         if (!mac) {
             GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
                                                   "No Bluetooth device selected.\n\nPlease:\n1. Expand 'BLUETOOTH' panel\n2. Connect a device\n3. Try again");
@@ -1918,12 +1940,12 @@ static void create_devices_panel(GtkWidget *main_box) {
     gtk_widget_set_sensitive(ui->rb_hdmi, TRUE);  /* HDMI always available if card supports it */
     gtk_widget_set_sensitive(ui->rb_bt, is_bt_present());
 
-    g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
-    g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
-    g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
-    g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
-
-    /* Initialize radio button based on current JACK routing state, fallback to persisted preference */
+    /* Initialize radio button based on current JACK routing state, fallback to persisted preference.
+     * Signals are connected AFTER this block so setting the initial state does not trigger
+     * routing callbacks. Connecting first and then calling gtk_toggle_button_set_active()
+     * would fire on_device_radio_toggled() during init — the Bluetooth branch requires a
+     * device selected in the BT tree (which has no selection yet), causing a spurious
+     * error dialog and an unwanted re-route to Internal that kills the active alsa_out. */
     gchar *pref = load_preferred_output();
     gboolean have_usb = gtk_widget_get_sensitive(ui->rb_usb);
     gboolean have_hdmi = gtk_widget_get_sensitive(ui->rb_hdmi);
@@ -1933,7 +1955,6 @@ static void create_devices_panel(GtkWidget *main_box) {
     gboolean usb_active = FALSE;
     gboolean bt_active = FALSE;
 
-    /* Check if usb_out ports exist (indicates USB routing is active) */
     if (have_usb) {
         FILE *fp = popen("jack_lsp 2>/dev/null | grep -q '^usb_out:'", "r");
         if (fp) {
@@ -1941,12 +1962,10 @@ static void create_devices_panel(GtkWidget *main_box) {
         }
     }
 
-    /* Check if bluealsa ports exist (indicates Bluetooth routing is active) */
     if (have_bt) {
         bt_active = bluealsa_ports_exist();
     }
 
-    /* Set radio button based on current routing state, fallback to preference */
     if (bt_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
     } else if (usb_active) {
@@ -1954,10 +1973,15 @@ static void create_devices_panel(GtkWidget *main_box) {
     } else if (g_strcmp0(pref, "hdmi") == 0 && have_hdmi) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
     } else {
-        /* Default to Internal for any other case */
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
     }
     g_free(pref);
+
+    /* Connect routing signals only after initial state is set (see comment above) */
+    g_signal_connect(ui->rb_internal, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+    g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
 }
 
 
@@ -1991,44 +2015,6 @@ static char *mac_from_bluez_object(const char *s) {
     }
     for (char *q = mac; *q; ++q) if (*q == '_') *q = ':';
     return mac;
-}
-
-/* Write /etc/asound.conf.d/input_bt.conf to map input_bt -> bluealsa MAC (unused with per-user override) */
-static int __attribute__((unused)) write_bt_input_override(const char *mac) {
-    if (!mac || strlen(mac) < 11) return -1;
-    const char *dst = "/etc/asound.conf.d/input_bt.conf";
-
-    /* Ensure parent dir exists */
-    char *dir = g_path_get_dirname(dst);
-    if (dir && dir[0]) g_mkdir_with_parents(dir, 0755);
-    if (dir) g_free(dir);
-
-    char *tmp = g_strdup_printf("%s.tmp", dst);
-    FILE *f = fopen(tmp, "w");
-    if (!f) { g_free(tmp); return -1; }
-
-    /* Minimal, safe-to-override mapping for BlueALSA capture */
-    fprintf(f,
-            "pcm.input_bt_raw {\n"
-            "    type bluealsa\n"
-            "    device \"%s\"\n"
-            "    profile \"a2dp\"\n"
-            "}\n"
-            "\n"
-            "pcm.input_bt {\n"
-            "    type plug\n"
-            "    slave.pcm \"input_bt_raw\"\n"
-            "}\n", mac);
-
-    fclose(f);
-
-    if (g_rename(tmp, dst) != 0) {
-        g_unlink(tmp);
-        g_free(tmp);
-        return -1;
-    }
-    g_free(tmp);
-    return 0;
 }
 
 
