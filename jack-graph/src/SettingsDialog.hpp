@@ -50,14 +50,6 @@ private:
     Gtk::Label m_midi_label;
     Gtk::ComboBoxText m_midi_combo;
 
-    Gtk::Frame m_options_frame;
-    Gtk::Box m_options_box;
-    Gtk::CheckButton m_realtime_check;
-    Gtk::CheckButton m_sync_check;
-
-    Gtk::Box m_button_box;
-    Gtk::Button m_close_btn;
-
     ApplyCallback m_apply_cb;
     ApplyCallback m_disconnect_cb;
 };
