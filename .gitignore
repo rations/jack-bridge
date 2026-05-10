@@ -3,6 +3,7 @@
 # Common local artifacts
 *.o
 *.obj
+*.d
 *.swp
 *.log
 
