@@ -31,8 +31,12 @@ EOF
         
         # Start the service
         service jackd-rt start
+        # Restore preferred output (HDMI/USB) the same way boot does
+        service jack-bridge-ports start
         ;;
     stop)
+        # Stop bridge ports first so alsa_in/alsa_out disconnect cleanly
+        service jack-bridge-ports stop || true
         service jackd-rt stop
         ;;
     *)
