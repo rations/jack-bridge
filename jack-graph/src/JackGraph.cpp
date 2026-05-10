@@ -62,6 +62,21 @@ void JackGraph::setup_ui() {
     m_scrolled_window.add(m_canvas);
     m_main_box.pack_start(m_scrolled_window, Gtk::PACK_EXPAND_WIDGET);
 
+    auto* btn_bar = Gtk::manage(new Gtk::ButtonBox(Gtk::ORIENTATION_HORIZONTAL));
+    btn_bar->set_layout(Gtk::BUTTONBOX_CENTER);
+    btn_bar->set_spacing(8);
+    auto* btn_refresh = Gtk::manage(new Gtk::Button("Refresh"));
+    auto* btn_settings = Gtk::manage(new Gtk::Button("JACK Settings"));
+    btn_refresh->signal_clicked().connect(
+        sigc::mem_fun(*this, &JackGraph::on_menu_refresh));
+    btn_settings->signal_clicked().connect(
+        sigc::mem_fun(*this, &JackGraph::on_menu_settings));
+    btn_bar->add(*btn_refresh);
+    btn_bar->add(*btn_settings);
+    m_main_box.pack_start(*btn_bar, Gtk::PACK_SHRINK);
+
+    m_statusbar.set_halign(Gtk::ALIGN_CENTER);
+    m_statusbar.set_hexpand(true);
     m_main_box.pack_start(m_statusbar, Gtk::PACK_SHRINK);
 
     m_canvas.set_connect_callback(
@@ -134,7 +149,6 @@ void JackGraph::setup_menu() {
         sigc::mem_fun(*this, &JackGraph::on_menu_about));
     help_menu->append(*about_item);
 
-    m_status_context_id = m_statusbar.get_context_id("jack-graph");
 }
 
 void JackGraph::refresh_ports() {
@@ -315,5 +329,5 @@ void JackGraph::update_status_bar() {
         status += " | ALSA MIDI: connected";
     }
 
-    m_statusbar.push(status, m_status_context_id);
+    m_statusbar.set_text(status);
 }

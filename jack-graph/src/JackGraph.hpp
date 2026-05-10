@@ -46,8 +46,7 @@ private:
     Gtk::MenuBar m_menu_bar;
     Gtk::ScrolledWindow m_scrolled_window;
     GraphCanvas m_canvas;
-    Gtk::Statusbar m_statusbar;
-    guint m_status_context_id;
+    Gtk::Label m_statusbar;
 
     JackClient m_jack;
     AlsaClient m_alsa;
