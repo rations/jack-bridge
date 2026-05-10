@@ -1705,7 +1705,12 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         /* Bluetooth uses internal card for capture, so show internal mixer */
         int internal_card = get_internal_card_number();
         rebuild_mixer_for_card(internal_card);
-        
+
+        /* If BT bridge is already active, nothing more to do — avoid re-routing and
+         * the spurious "no device selected" dialog that fires if the tree is still empty
+         * (e.g. on GUI open when alsa_out was already running from a previous session). */
+        if (bluealsa_ports_exist()) return;
+
         /* Get MAC from BT panel selection */
         char *obj = NULL;
         if (g_bt_tree && GTK_IS_TREE_VIEW(g_bt_tree)) {
@@ -1953,25 +1958,36 @@ static void create_devices_panel(GtkWidget *main_box) {
 
     /* Check current routing state by looking for active JACK ports */
     gboolean usb_active = FALSE;
+    gboolean hdmi_active = FALSE;
     gboolean bt_active = FALSE;
 
     if (have_usb) {
         FILE *fp = popen("jack_lsp 2>/dev/null | grep -q '^usb_out:'", "r");
-        if (fp) {
-            usb_active = (pclose(fp) == 0);
-        }
+        if (fp) { usb_active = (pclose(fp) == 0); }
+    }
+
+    if (have_hdmi) {
+        FILE *fp = popen("jack_lsp 2>/dev/null | grep -q '^hdmi_out:'", "r");
+        if (fp) { hdmi_active = (pclose(fp) == 0); }
     }
 
     if (have_bt) {
         bt_active = bluealsa_ports_exist();
     }
 
+    /* Track which on-demand device needs its alsa_out spawned.
+     * jack-bridge-ports restores HDMI/USB at boot; this is a fallback for when that
+     * didn't run (e.g. GUI opened without a full boot cycle).
+     * BT cannot be spawned here — requires an active BlueZ connection. */
+    const char *startup_route = NULL;
+
     if (bt_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
     } else if (usb_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
-    } else if (g_strcmp0(pref, "hdmi") == 0 && have_hdmi) {
+    } else if (hdmi_active || (g_strcmp0(pref, "hdmi") == 0 && have_hdmi)) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
+        if (!hdmi_active) startup_route = "hdmi"; /* ports not yet running */
     } else {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
     }
@@ -1982,6 +1998,13 @@ static void create_devices_panel(GtkWidget *main_box) {
     g_signal_connect(ui->rb_usb, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_hdmi, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
     g_signal_connect(ui->rb_bt, "toggled", G_CALLBACK(on_device_radio_toggled), NULL);
+
+    /* Spawn on-demand ports for the startup device. This replaces the accidental
+     * routing that previously fired because signals were connected before
+     * gtk_toggle_button_set_active() was called. */
+    if (startup_route) {
+        route_to_target_async(startup_route);
+    }
 }
 
 

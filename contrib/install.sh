@@ -44,7 +44,7 @@ echo "Installing jack-bridge contrib files"
 if command -v apt >/dev/null 2>&1; then
     # Hold packages that jackd2 pulls in but are not needed
     echo "Holding unnecessary packages that jackd2 pulls as dependencies..."
-    sudo apt-mark hold qjackctl qt6-wayland qt6-translations-l10n qt6-svg-plugins qt6-qpa-plugins qt6-gtk-platformtheme 2>/dev/null || true
+    sudo apt-mark hold qjackctl 2>/dev/null || true
 
     echo "Detected apt. Installing required packages: $REQUIRED_PACKAGES"
     if ! apt update; then

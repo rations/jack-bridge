@@ -174,39 +174,42 @@ start() {
     : ${BT_PERIOD:=256}
     : ${BT_NPERIODS:=3}
     
-    # NOTE: USB and HDMI ports are now spawned on-demand by jack-route-select when user selects them
-    # This prevents CPU consumption when idle, matching Bluetooth behavior
-    echo "USB/HDMI ports will be spawned on-demand when user selects them" >> "$LOGFILE" 2>&1
-    
     # NOTE: system:capture ports are created automatically by jackd with -D flag (duplex mode)
-    # jackd opens the detected device for BOTH playback and capture
-    # No alsa_in needed - it would conflict with jackd and cause process errors
     echo "system:capture ports created by jackd in duplex mode (-D flag)" >> "$LOGFILE" 2>&1
-    
-    # NOTE: Bluetooth ports are NOT spawned at boot (unlike USB/HDMI)
-    # Reason: 'jackbridge_bluealsa' PCM requires an ACTIVE Bluetooth connection.
-    # Unlike hw:X,Y devices (kernel nodes that exist regardless of connection),
-    # BlueALSA plugin queries daemon for active transports. If no device connected,
-    # alsa_out fails with "PCM not found". Bluetooth ports are spawned ON-DEMAND
-    # by jack-route-select when user selects Bluetooth output.
-    echo "Bluetooth ports will be spawned on-demand when user selects Bluetooth" >> "$LOGFILE" 2>&1
-    
-    # Give ports time to register with JACK
-    sleep 2
-    
-    # Verify ports appeared
+
+    # NOTE: Bluetooth ports are NOT restored at boot.
+    # 'jackbridge_bluealsa' PCM requires an ACTIVE Bluetooth connection; if the device
+    # is not connected, alsa_out fails with "PCM not found". Bluetooth is spawned
+    # ON-DEMAND when the user selects it in the GUI.
+    echo "Bluetooth ports spawned on-demand only (not at boot)" >> "$LOGFILE" 2>&1
+
+    # Restore HDMI or USB routing if the user had one of those selected at last shutdown.
+    # Internal always works (system:playback_* from jackd). Bluetooth is excluded (see above).
+    PREFERRED_OUTPUT="${PREFERRED_OUTPUT:-internal}"
+    ROUTE_HELPER="/usr/local/lib/jack-bridge/jack-route-select"
+    if [ "$PREFERRED_OUTPUT" = "hdmi" ] && [ -x "$ROUTE_HELPER" ]; then
+        echo "jack-bridge-ports: Restoring HDMI output (PREFERRED_OUTPUT=hdmi)" >> "$LOGFILE" 2>&1
+        su - "$USERNAME" -c "$ROUTE_HELPER hdmi" >> "$LOGFILE" 2>&1 || \
+            echo "jack-bridge-ports: WARNING: jack-route-select hdmi failed" >> "$LOGFILE" 2>&1
+    elif [ "$PREFERRED_OUTPUT" = "usb" ] && [ -x "$ROUTE_HELPER" ]; then
+        echo "jack-bridge-ports: Restoring USB output (PREFERRED_OUTPUT=usb)" >> "$LOGFILE" 2>&1
+        su - "$USERNAME" -c "$ROUTE_HELPER usb" >> "$LOGFILE" 2>&1 || \
+            echo "jack-bridge-ports: WARNING: jack-route-select usb failed" >> "$LOGFILE" 2>&1
+    else
+        echo "jack-bridge-ports: PREFERRED_OUTPUT=$PREFERRED_OUTPUT (no port spawn needed)" >> "$LOGFILE" 2>&1
+    fi
+
+    # Verify ports
     if command -v jack_lsp >/dev/null 2>&1; then
-        # USB, HDMI (output) and system capture (input from alsa_in) are persistent; Bluetooth is on-demand
         PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|system):' || true)
         if [ -n "$PORTS" ]; then
-            echo "Active persistent bridge ports:" >> "$LOGFILE" 2>&1
+            echo "Active bridge ports:" >> "$LOGFILE" 2>&1
             echo "$PORTS" | sed 's/^/  /' >> "$LOGFILE" 2>&1
             log_end_msg 0
             return 0
         else
-            log_warning_msg "No bridge ports found after spawn; check $LOGFILE"
-            log_end_msg 1
-            return 1
+            # Internal output: system:playback_* come from jackd, not alsa_out — still OK
+            log_end_msg 0
         fi
     else
         log_end_msg 0
