@@ -17,9 +17,14 @@ JackGraph::JackGraph()
     if (m_jack_connected) {
         std::cerr << "jack-graph: Connected to running JACK server" << std::endl;
         m_jack.set_port_callback([this]() {
-            Glib::signal_idle().connect_once([this]() {
-                refresh_ports();
-            });
+            bool expected = false;
+            if (m_refresh_pending.compare_exchange_strong(expected, true)) {
+                Glib::signal_timeout().connect([this]() -> bool {
+                    m_refresh_pending.store(false);
+                    refresh_ports();
+                    return false;
+                }, 100);
+            }
         });
         m_jack.set_xrun_callback([this]() {
             Glib::signal_idle().connect_once([this]() {
@@ -133,11 +138,11 @@ void JackGraph::setup_menu() {
 }
 
 void JackGraph::refresh_ports() {
+    m_jack.scan_ports();
     m_canvas.remove_all();
 
     if (m_jack_connected) {
         std::string our_client = m_jack.get_actual_client_name();
-        std::cerr << "JACK client name: " << our_client << std::endl;
         auto ports = m_jack.get_ports();
         for (const auto& p : ports) {
             if (p.client == our_client) continue;
@@ -208,6 +213,7 @@ void JackGraph::on_disconnect_alsa(const std::string& source, const std::string&
 
 void JackGraph::on_menu_refresh() {
     refresh_ports();
+    m_canvas.fit_to_window();
 }
 
 void JackGraph::on_menu_zoom_in() {
@@ -235,9 +241,14 @@ void JackGraph::on_menu_settings() {
             m_jack_connected = m_jack.connect("jack-graph");
             if (m_jack_connected) {
                 m_jack.set_port_callback([this]() {
-                    Glib::signal_idle().connect_once([this]() {
-                        refresh_ports();
-                    });
+                    bool expected = false;
+                    if (m_refresh_pending.compare_exchange_strong(expected, true)) {
+                        Glib::signal_timeout().connect([this]() -> bool {
+                            m_refresh_pending.store(false);
+                            refresh_ports();
+                            return false;
+                        }, 100);
+                    }
                 });
                 m_jack.set_xrun_callback([this]() {
                     Glib::signal_idle().connect_once([this]() {
@@ -273,8 +284,17 @@ void JackGraph::on_menu_about() {
     dialog.run();
 }
 
+bool JackGraph::on_delete_event(GdkEventAny*) {
+    m_jack.disconnect();
+    m_jack_connected = false;
+    if (auto app = get_application()) {
+        app->quit();
+    }
+    return false;
+}
+
 void JackGraph::on_menu_quit() {
-    hide();
+    on_delete_event(nullptr);
 }
 
 void JackGraph::update_status_bar() {

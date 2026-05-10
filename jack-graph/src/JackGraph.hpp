@@ -1,6 +1,7 @@
 #pragma once
 
 #include <gtkmm.h>
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <string>
@@ -39,6 +40,7 @@ private:
     void on_menu_quit();
 
     void update_status_bar();
+    bool on_delete_event(GdkEventAny* event) override;
 
     Gtk::Box m_main_box;
     Gtk::MenuBar m_menu_bar;
@@ -54,4 +56,5 @@ private:
 
     bool m_jack_connected;
     bool m_alsa_connected;
+    std::atomic<bool> m_refresh_pending{false};
 };
