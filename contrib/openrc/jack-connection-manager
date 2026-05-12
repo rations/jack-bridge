@@ -1,0 +1,58 @@
+#!/sbin/openrc-run
+description="Event-driven JACK connection manager"
+
+daemon="/usr/local/bin/jack-connection-manager"
+pidfile="/var/run/jack-connection-manager.pid"
+logfile="/var/log/jack-connection-manager.log"
+
+depend() {
+	need jackd-rt
+	after jack-bridge-ports
+}
+
+start() {
+	ebegin "Starting JACK connection manager"
+
+	if [ ! -x "$daemon" ]; then
+		eend 1 "$daemon not found"
+		return 1
+	fi
+
+	# Detect desktop user
+	local login_user=""
+	login_user=$(logname 2>/dev/null) || true
+	[ -z "$login_user" ] && login_user="$SUDO_USER"
+	[ -z "$login_user" ] && login_user=$(awk -F: '$3>=1000 && $3<65534 {print $1; exit}' /etc/passwd)
+	if [ -z "$login_user" ]; then
+		eend 1 "Cannot detect desktop user"
+		return 1
+	fi
+
+	# Wait for JACK to be ready (max 30s)
+	local i=0
+	while [ $i -lt 30 ]; do
+		su - "$login_user" -c "jack_lsp >/dev/null 2>&1" && break
+		sleep 1; i=$((i+1))
+	done
+
+	touch "$logfile" 2>/dev/null
+	chown "$login_user:$login_user" "$logfile" 2>/dev/null || true
+
+	su - "$login_user" -c "$daemon >> $logfile 2>&1 &"
+	sleep 1
+
+	local pid; pid=$(pgrep -u "$login_user" -f "jack-connection-manager" | head -1)
+	if [ -n "$pid" ]; then
+		echo "$pid" > "$pidfile"
+		eend 0
+	else
+		eend 1 "Failed to start jack-connection-manager; check $logfile"
+		return 1
+	fi
+}
+
+stop() {
+	ebegin "Stopping JACK connection manager"
+	start-stop-daemon --stop --pidfile "$pidfile" --retry "TERM/5/KILL/1" --quiet
+	eend $?
+}

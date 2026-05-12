@@ -1,0 +1,52 @@
+#!/sbin/openrc-run
+description="BlueALSA daemon (A2DP/HFP audio bridge)"
+
+# Defaults — override in /etc/conf.d/bluealsad
+: ${BLUEALSAD_USER:=bluealsa}
+: ${BLUEALSAD_ARGS:=--keep-alive=-1 -p a2dp-sink -p a2dp-source -p hfp-hf -p hsp-hs}
+: ${BLUEALSAD_LOG:=/var/log/bluealsad.log}
+
+daemon="/usr/local/bin/bluealsad"
+pidfile="/var/run/bluealsad.pid"
+
+depend() {
+	need localmount dbus bluetooth
+	after bluetooth jackd-rt
+}
+
+start() {
+	ebegin "Starting BlueALSA daemon"
+
+	if [ ! -x "$daemon" ]; then
+		eend 1 "Binary not found: $daemon"
+		return 1
+	fi
+
+	if ! id "$BLUEALSAD_USER" >/dev/null 2>&1; then
+		eend 1 "User '$BLUEALSAD_USER' does not exist"
+		return 1
+	fi
+
+	if [ ! -d /var/lib/bluealsa ]; then
+		mkdir -p /var/lib/bluealsa
+		chown "$BLUEALSAD_USER:$BLUEALSAD_USER" /var/lib/bluealsa
+		chmod 0700 /var/lib/bluealsa
+	fi
+
+	touch "$BLUEALSAD_LOG" 2>/dev/null
+	chown "$BLUEALSAD_USER:$BLUEALSAD_USER" "$BLUEALSAD_LOG" 2>/dev/null || true
+
+	{
+		su -l "$BLUEALSAD_USER" -s /bin/sh -c "exec $daemon $BLUEALSAD_ARGS"
+	} >> "$BLUEALSAD_LOG" 2>&1 &
+	echo $! > "$pidfile"
+
+	sleep 1
+	eend 0
+}
+
+stop() {
+	ebegin "Stopping BlueALSA daemon"
+	start-stop-daemon --stop --pidfile "$pidfile" --retry "TERM/10/KILL/2" --quiet
+	eend $?
+}

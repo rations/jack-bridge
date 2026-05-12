@@ -1,0 +1,77 @@
+#!/sbin/openrc-run
+description="JACK bridge port routing restore"
+
+# One-shot: runs once at boot to restore HDMI/USB routing preference, then exits.
+# Bluetooth ports are spawned on-demand by jack-route-select when selected in the GUI.
+type="oneshot"
+
+: ${DEVICES_CONF:=/etc/jack-bridge/devices.conf}
+: ${LOGFILE:=/var/log/jack-bridge-ports.log}
+
+depend() {
+	need jackd-rt
+	after bluealsad bluetooth
+}
+
+start() {
+	ebegin "Restoring JACK bridge port routing"
+
+	[ -r "$DEVICES_CONF" ] && . "$DEVICES_CONF"
+
+	# Detect desktop user (first UID>=1000 in audio group)
+	local username="" u uid
+	for u in $(cut -d: -f1 /etc/passwd); do
+		uid=$(id -u "$u" 2>/dev/null) || continue
+		if [ "$uid" -ge 1000 ] && id -nG "$u" 2>/dev/null | grep -qw audio; then
+			username="$u"; break
+		fi
+	done
+	[ -z "$username" ] && username=$(awk -F: '$3>=1000 && $3<65534 {print $1; exit}' /etc/passwd)
+	if [ -z "$username" ]; then
+		eend 1 "Cannot detect desktop user"
+		return 1
+	fi
+
+	touch "$LOGFILE" 2>/dev/null
+	chown "$username:$username" "$LOGFILE" 2>/dev/null || true
+	echo "=== jack-bridge-ports started $(date) ===" >> "$LOGFILE"
+
+	# Load per-user overrides (PREFERRED_OUTPUT etc.)
+	local user_home; user_home=$(getent passwd "$username" | cut -d: -f6)
+	if [ -n "$user_home" ] && [ -f "$user_home/.config/jack-bridge/devices.conf" ]; then
+		. "$user_home/.config/jack-bridge/devices.conf"
+	fi
+
+	local preferred="${PREFERRED_OUTPUT:-internal}"
+	local route_helper="/usr/local/lib/jack-bridge/jack-route-select"
+
+	if [ "$preferred" = "hdmi" ] && [ -x "$route_helper" ]; then
+		echo "Restoring HDMI routing" >> "$LOGFILE"
+		su - "$username" -c "$route_helper hdmi" >> "$LOGFILE" 2>&1 || \
+			echo "WARNING: jack-route-select hdmi failed" >> "$LOGFILE"
+	elif [ "$preferred" = "usb" ] && [ -x "$route_helper" ]; then
+		echo "Restoring USB routing" >> "$LOGFILE"
+		su - "$username" -c "$route_helper usb" >> "$LOGFILE" 2>&1 || \
+			echo "WARNING: jack-route-select usb failed" >> "$LOGFILE"
+	else
+		echo "PREFERRED_OUTPUT=$preferred (no extra ports needed)" >> "$LOGFILE"
+	fi
+
+	eend 0
+}
+
+stop() {
+	ebegin "Stopping JACK bridge ports"
+
+	for port in usb_out hdmi_out bluealsa system_in; do
+		pkill -TERM -f "alsa_out -j $port" 2>/dev/null || true
+		pkill -TERM -f "alsa_in -j $port"  2>/dev/null || true
+	done
+	sleep 1
+	for port in usb_out hdmi_out bluealsa system_in; do
+		pkill -KILL -f "alsa_out -j $port" 2>/dev/null || true
+		pkill -KILL -f "alsa_in -j $port"  2>/dev/null || true
+	done
+
+	eend 0
+}
