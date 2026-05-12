@@ -577,6 +577,40 @@ static void rebuild_mixer_for_card(int card_num) {
             g_mixer_data->num_channels, card_num);
 }
  
+static void show_mixer_placeholder(const char *msg) {
+    if (!g_mixer_data || !g_mixer_data->mixer_box) return;
+
+    if (g_mixer_data->mixer) {
+        snd_mixer_close(g_mixer_data->mixer);
+        g_mixer_data->mixer = NULL;
+    }
+    if (g_mixer_data->channels) {
+        for (int i = 0; i < g_mixer_data->num_channels; i++) {
+            if (g_mixer_data->channels[i].channel_name)
+                g_free((char*)g_mixer_data->channels[i].channel_name);
+        }
+        g_free(g_mixer_data->channels);
+        g_mixer_data->channels = NULL;
+    }
+    g_mixer_data->num_channels = 0;
+
+    GList *children = gtk_container_get_children(GTK_CONTAINER(g_mixer_data->mixer_box));
+    for (GList *iter = children; iter != NULL; iter = g_list_next(iter))
+        gtk_widget_destroy(GTK_WIDGET(iter->data));
+    g_list_free(children);
+
+    GtkWidget *placeholder_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_hexpand(placeholder_box, TRUE);
+    gtk_widget_set_halign(placeholder_box, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(placeholder_box, GTK_ALIGN_CENTER);
+    gtk_grid_attach(GTK_GRID(g_mixer_data->mixer_box), placeholder_box, 0, 0, 8, 1);
+
+    GtkWidget *label = gtk_label_new(msg);
+    gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
+    gtk_box_pack_start(GTK_BOX(placeholder_box), label, TRUE, TRUE, 24);
+    gtk_widget_show_all(g_mixer_data->mixer_box);
+}
+
 /* Recorder support: enhanced UX, safe child lifecycle, XDG Music path handling */
 
 typedef struct {
@@ -1698,13 +1732,9 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
         }
     } else if (g_strcmp0(label, "HDMI") == 0) {
         ok = route_to_target_async("hdmi");
-        /* HDMI uses internal card for capture, so show internal mixer */
-        int internal_card = get_internal_card_number();
-        rebuild_mixer_for_card(internal_card);
+        show_mixer_placeholder("Mixer controls are not available for HDMI output.\nUse your display or receiver to adjust the volume.");
     } else if (g_strcmp0(label, "Bluetooth") == 0) {
-        /* Bluetooth uses internal card for capture, so show internal mixer */
-        int internal_card = get_internal_card_number();
-        rebuild_mixer_for_card(internal_card);
+        show_mixer_placeholder("Mixer controls are not available for Bluetooth output.\nUse your Bluetooth device to adjust the volume.");
 
         /* If BT bridge is already active, nothing more to do — avoid re-routing and
          * the spurious "no device selected" dialog that fires if the tree is still empty
@@ -1980,16 +2010,21 @@ static void create_devices_panel(GtkWidget *main_box) {
      * didn't run (e.g. GUI opened without a full boot cycle).
      * BT cannot be spawned here — requires an active BlueZ connection. */
     const char *startup_route = NULL;
+    int init_dev_type = 0; /* 0=internal, 1=usb, 2=hdmi, 3=bt */
 
     if (bt_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
+        init_dev_type = 3;
     } else if (usb_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
+        init_dev_type = 1;
     } else if (hdmi_active || (g_strcmp0(pref, "hdmi") == 0 && have_hdmi)) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
         if (!hdmi_active) startup_route = "hdmi"; /* ports not yet running */
+        init_dev_type = 2;
     } else {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);
+        init_dev_type = 0;
     }
     g_free(pref);
 
@@ -2005,6 +2040,21 @@ static void create_devices_panel(GtkWidget *main_box) {
     if (startup_route) {
         route_to_target_async(startup_route);
     }
+
+    /* Sync mixer UI to the initially-selected device.
+     * main() always initializes the mixer with the internal card; if a different
+     * device is active on open we must update the mixer here, since signals were
+     * intentionally connected after gtk_toggle_button_set_active() so
+     * on_device_radio_toggled() is never fired during init. */
+    if (init_dev_type == 1) {
+        int usb_card = get_usb_card_number();
+        if (usb_card >= 0) rebuild_mixer_for_card(usb_card);
+    } else if (init_dev_type == 2) {
+        show_mixer_placeholder("Mixer controls are not available for HDMI output.\nUse your display or receiver to adjust the volume.");
+    } else if (init_dev_type == 3) {
+        show_mixer_placeholder("Mixer controls are not available for Bluetooth output.\nUse your Bluetooth device to adjust the volume.");
+    }
+    /* init_dev_type == 0 (internal): already loaded correctly in main() */
 }
 
 
