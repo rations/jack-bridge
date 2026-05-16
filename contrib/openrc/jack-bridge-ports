@@ -10,7 +10,7 @@ type="oneshot"
 
 depend() {
 	need jackd-rt
-	after bluealsad bluetooth
+	after bluealsad bluetoothd
 }
 
 start() {

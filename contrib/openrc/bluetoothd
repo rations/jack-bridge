@@ -1,0 +1,41 @@
+#!/sbin/openrc-run
+description="Bluetooth daemon (bluetoothd via BlueZ)"
+
+# Defaults — override in /etc/conf.d/bluetoothd
+: ${BLUETOOTHD_BIN:=$(command -v bluetoothd 2>/dev/null || echo "/usr/lib/bluetooth/bluetoothd")}
+: ${BLUETOOTHD_ARGS:=-n -E}
+: ${BLUETOOTHD_PIDFILE:=/var/run/bluetoothd.pid}
+: ${BLUETOOTHD_LOG:=/var/log/bluetoothd.log}
+
+pidfile="$BLUETOOTHD_PIDFILE"
+
+depend() {
+	need localmount dbus
+	after dbus
+}
+
+start() {
+	ebegin "Starting bluetoothd (BlueZ daemon)"
+
+	if [ ! -x "$BLUETOOTHD_BIN" ]; then
+		eend 1 "bluetoothd not found at $BLUETOOTHD_BIN"
+		return 1
+	fi
+
+	touch "$BLUETOOTHD_LOG" 2>/dev/null
+	chown root:root "$BLUETOOTHD_LOG" 2>/dev/null || true
+
+	{
+		"$BLUETOOTHD_BIN" $BLUETOOTHD_ARGS
+	} >> "$BLUETOOTHD_LOG" 2>&1 &
+	echo $! > "$pidfile"
+
+	sleep 1
+	eend 0
+}
+
+stop() {
+	ebegin "Stopping bluetoothd"
+	start-stop-daemon --stop --pidfile "$pidfile" --retry "TERM/10/KILL/2" --quiet
+	eend $?
+}

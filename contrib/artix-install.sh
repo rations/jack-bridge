@@ -420,26 +420,30 @@ echo "  Note: Users added to groups must log out and log back in (or reboot) for
 # Create dedicated bluealsa system user (nologin) if it does not exist
 echo "Configuring BlueALSA runtime..."
 if ! id -u bluealsa >/dev/null 2>&1; then
-    echo "  Creating system user 'bluealsa' (nologin)..."
-    if command -v adduser >/dev/null 2>&1; then
-        adduser --system --group --no-create-home --shell /usr/sbin/nologin bluealsa || true
-    else
-        useradd --system --group --no-create-home --shell /usr/sbin/nologin bluealsa || true
-    fi
+     echo "  Creating system user 'bluealsa' (nologin)..."
+     useradd --system --no-create-home --shell /usr/sbin/nologin --user-group bluealsa || true
 else
-    echo "  User 'bluealsa' already exists."
+     echo "  User 'bluealsa' already exists."
 fi
 
 # Create persistent state directory for bluealsa with strict permissions
 if [ ! -d /var/lib/bluealsa ]; then
-    echo "  Creating /var/lib/bluealsa (0700)..."
-    mkdir -p /var/lib/bluealsa
-    chown bluealsa:bluealsa /var/lib/bluealsa || true
-    chmod 0700 /var/lib/bluealsa || true
+     echo "  Creating /var/lib/bluealsa (0700)..."
+     mkdir -p /var/lib/bluealsa
+     chown bluealsa:bluealsa /var/lib/bluealsa || true
+     chmod 0700 /var/lib/bluealsa || true
 else
-    echo "  /var/lib/bluealsa already exists; ensuring ownership/perms..."
-    chown bluealsa:bluealsa /var/lib/bluealsa 2>/dev/null || true
-    chmod 0700 /var/lib/bluealsa 2>/dev/null || true
+     echo "  /var/lib/bluealsa already exists; ensuring ownership/perms..."
+     chown bluealsa:bluealsa /var/lib/bluealsa 2>/dev/null || true
+     chmod 0700 /var/lib/bluealsa 2>/dev/null || true
+fi
+
+# Run setup-bluetooth.sh for remaining BlueALSA runtime provisioning and GUI stubs
+if [ -f "contrib/setup-bluetooth.sh" ]; then
+     printf "Running contrib/setup-bluetooth.sh for BlueALSA provisioning...\n"
+     sh contrib/setup-bluetooth.sh || true
+else
+     printf "WARNING: contrib/setup-bluetooth.sh not found - skipping BlueALSA provisioning\n"
 fi
 
 # Install BlueALSA prebuilt binaries (required - project does not use distro bluez-alsa-utils)
@@ -539,10 +543,22 @@ else
     echo "  ! No contrib/openrc/bluealsad found; using distro bluez-alsa if available"
 fi
 
-# On Artix, bluez-openrc provides /etc/init.d/bluetooth — do NOT install our custom
-# bluetoothd on top. The distro's bluetooth service satisfies the Required-Start:bluetooth
-# dependency in bluealsad and jack-bridge-ports. Installing ours causes a double-start conflict.
-echo "  Artix: Using distro 'bluetooth' service from bluez-openrc; skipping custom bluetoothd"
+# Install bluetoothd OpenRC init script (starts BlueZ bluetoothd daemon)
+if [ -f "contrib/openrc/bluetoothd" ]; then
+    echo "Installing bluetoothd OpenRC init script..."
+    install -m 0755 contrib/openrc/bluetoothd "${INIT_DIR}/bluetoothd"
+    echo "  ✓ Installed ${INIT_DIR}/bluetoothd"
+
+    # Remove the distro's bluetooth service from the default runlevel if present,
+    # to avoid double-starting bluetoothd alongside our own service.
+    if command -v rc-update >/dev/null 2>&1; then
+        rc-update del bluetooth default 2>/dev/null || true
+    fi
+
+    register_init_script bluetoothd "" "" ""
+else
+    echo "  ! WARNING: contrib/openrc/bluetoothd not found"
+fi
 
 # Install JACK bridge ports OpenRC init script
 if [ -f "contrib/openrc/jack-bridge-ports" ]; then
@@ -675,33 +691,21 @@ else
     echo "  ! WARNING: jack-bridge-service-helper not found"
 fi
 
-# Create bluetooth-enable.sh helper script
+# Install bluetooth-enable helper from project's shared version
 echo "Configuring Bluetooth adapter..."
 BLUETOOTH_HELPER="${USR_LIB_DIR}/bluetooth-enable.sh"
 mkdir -p "${USR_LIB_DIR}"
 
-cat > "${BLUETOOTH_HELPER}" <<'BLUETOOTH_HELPER_EOF'
-#!/bin/sh
-# jack-bridge bluetooth-enable.sh
-# Best-effort: set hci0 Adapter to Discoverable=true, Pairable=true, DiscoverableTimeout=0
-set -e
-if ! command -v gdbus >/dev/null 2>&1; then
-    echo "gdbus not available; cannot set BlueZ adapter properties"
-    exit 0
+if [ -f "contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh" ]; then
+     install -m 755 contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh "${BLUETOOTH_HELPER}"
+     echo "  ✓ Installed bluetooth-enable helper to ${BLUETOOTH_HELPER}"
+
+     # Run helper now to enable adapter state at install time (best-effort)
+     echo "  Attempting to enable adapter settings now (best-effort)..."
+     "${BLUETOOTH_HELPER}" || true
+else
+     echo "  ! WARNING: contrib/usr/local/lib/jack-bridge/bluetooth-enable.sh not found"
 fi
-# Try to set properties on /org/bluez/hci0; do not fail the installer if these fail.
-gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set "org.bluez.Adapter1" "Discoverable" "<true>" >/dev/null 2>&1 || true
-gdbus call --system --dest org.bluez --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set "org.bluez.Adapter1" "Pairable" "<true>" >/dev/null 2>&1 || true
-gdbus call --system --object-path /org/bluez/hci0 --method org.freedesktop.DBus.Properties.Set "org.bluez.Adapter1" "DiscoverableTimeout" "<uint32 0>" >/dev/null 2>&1 || true
-exit 0
-BLUETOOTH_HELPER_EOF
-
-chmod 755 "${BLUETOOTH_HELPER}" || true
-echo "  ✓ Installed bluetooth-enable helper to ${BLUETOOTH_HELPER}"
-
-# Run helper now to enable adapter state at install time (best-effort)
-echo "  Attempting to enable adapter Discoverable/Pairable now (best-effort)..."
-"${BLUETOOTH_HELPER}" || true
 
 # Install jack-bridge-bluetooth-config OpenRC init script
 if [ -f "contrib/openrc/jack-bridge-bluetooth-config" ]; then

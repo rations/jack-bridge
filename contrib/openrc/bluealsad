@@ -10,8 +10,8 @@ daemon="/usr/local/bin/bluealsad"
 pidfile="/var/run/bluealsad.pid"
 
 depend() {
-	need localmount dbus bluetooth
-	after bluetooth jackd-rt
+	need localmount dbus bluetoothd
+	after bluetoothd jackd-rt
 }
 
 start() {

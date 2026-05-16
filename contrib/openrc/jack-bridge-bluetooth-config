@@ -1,18 +1,24 @@
 #!/sbin/openrc-run
-description="Configure BlueZ adapter for jack-bridge (discoverable/pairable)"
-
-type="oneshot"
+description="Bluetooth adapter configuration (Discoverable/Pairable)"
 
 depend() {
-	need bluetooth
-	after bluetooth bluealsad
-	keyword -stop
+	need bluetoothd
+	after bluetoothd
 }
 
 start() {
-	ebegin "Configuring Bluetooth adapter"
-	if [ -x /usr/local/lib/jack-bridge/bluetooth-enable.sh ]; then
-		/usr/local/lib/jack-bridge/bluetooth-enable.sh >/dev/null 2>&1 || true
+	ebegin "Configuring Bluetooth adapter for jack-bridge"
+
+	if [ ! -x /usr/local/lib/jack-bridge/bluetooth-enable.sh ]; then
+		eend 1 "bluetooth-enable.sh not found at /usr/local/lib/jack-bridge/bluetooth-enable.sh"
+		return 1
 	fi
+
+	/usr/local/lib/jack-bridge/bluetooth-enable.sh >/dev/null 2>&1
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping Bluetooth adapter configuration (no-op)"
 	eend 0
 }

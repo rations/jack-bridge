@@ -1,109 +1,256 @@
 #!/sbin/openrc-run
-description="JACK audio server with realtime settings"
 
-# Defaults — override in /etc/conf.d/jackd-rt
+name="jackd-rt"
+description="JACK audio daemon with realtime ALSA auto-detection"
+
+pidfile="/run/jackd-rt.pid"
+
+# Defaults (override in /etc/conf.d/jackd-rt)
+
 : ${JACKD_USER:=""}
 : ${JACKD_DEVICE:=""}
+
 : ${JACKD_SR:=48000}
 : ${JACKD_PERIOD:=256}
 : ${JACKD_NPERIODS:=3}
 : ${JACKD_PRIORITY:=70}
+
 : ${JACKD_MIDI:="seq"}
 : ${JACKD_ARGS:=""}
+
 : ${JACKD_DAEMON:=/usr/bin/jackd}
+
 : ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
 : ${DETECT_USER_SCRIPT:=/usr/local/lib/jack-bridge/detect-user.sh}
-: ${JACKD_LOG:=/var/log/jackd-rt.log}
-: ${MONITOR_PIDFILE:=/var/run/jack-connection-monitor.pid}
 
-pidfile="/var/run/jackd-rt.pid"
+: ${JACKD_LOG:=/var/log/jackd-rt.log}
+: ${MONITOR_PIDFILE:=/run/jack-connection-monitor.pid}
 
 depend() {
-	need localmount
-	use dbus
-	after dbus
+    need localmount
+    need dbus
+    use alsasound
+    after bootmisc
+}
+
+detect_user() {
+
+    USERNAME=""
+
+    if [ -n "$JACKD_USER" ]; then
+        USERNAME="$JACKD_USER"
+        return
+    fi
+
+    if [ -x "$DETECT_USER_SCRIPT" ]; then
+        USER_OUT="$(/bin/sh "$DETECT_USER_SCRIPT" 2>/dev/null || true)"
+
+        if [ -n "$USER_OUT" ]; then
+            USERNAME="$USER_OUT"
+            return
+        fi
+    fi
+
+    for user in $(cut -d: -f1 /etc/passwd); do
+
+        uid=$(id -u "$user" 2>/dev/null || true)
+
+        if [ -n "$uid" ] && [ "$uid" -ge 1000 ]; then
+
+            groups=$(id -nG "$user" 2>/dev/null || true)
+
+            if printf '%s\n' " $groups " | grep -q ' audio '; then
+                USERNAME="$user"
+                return
+            fi
+        fi
+    done
+
+    USERNAME="root"
+}
+
+detect_device() {
+
+    DEVICE=""
+
+    if [ -n "$JACKD_DEVICE" ]; then
+        DEVICE="$JACKD_DEVICE"
+        return
+    fi
+
+    if [ -x "$DETECT_SCRIPT" ]; then
+
+        DEVICE_OUT="$(/bin/sh "$DETECT_SCRIPT" 2>/dev/null || true)"
+
+        if [ -n "$DEVICE_OUT" ]; then
+            DEVICE="$DEVICE_OUT"
+            return
+        fi
+    fi
+
+    DEVICE="hw:0"
+}
+
+start_pre() {
+
+    checkpath --file "$JACKD_LOG"
+
+    # Remove stale pidfile
+
+    if [ -f "$pidfile" ]; then
+
+        pid=$(cat "$pidfile" 2>/dev/null || true)
+
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$pidfile"
+        fi
+    fi
+
+    # Wait for ALSA devices
+
+    WAIT_SECS=5
+    waited=0
+
+    while [ $waited -lt $WAIT_SECS ]; do
+
+        if [ -d /dev/snd ] &&
+           command -v aplay >/dev/null 2>&1 &&
+           aplay -l 2>/dev/null | grep -q '^card '; then
+            break
+        fi
+
+        sleep 1
+        waited=$((waited+1))
+    done
+
+    detect_user
+    detect_device
+
+    if ! id "$USERNAME" >/dev/null 2>&1; then
+        eerror "User $USERNAME does not exist"
+        return 1
+    fi
+
+    if [ ! -x "$JACKD_DAEMON" ]; then
+        eerror "jackd not found at $JACKD_DAEMON"
+        return 1
+    fi
+
+    touch "$JACKD_LOG" || return 1
+
+    chown "$USERNAME:$USERNAME" "$JACKD_LOG" 2>/dev/null || true
+
+    JACKD_CMD_ARGS="
+        -R
+        -P${JACKD_PRIORITY}
+        -d alsa
+        -P ${DEVICE}
+        -C ${DEVICE}
+        -r ${JACKD_SR}
+        -p ${JACKD_PERIOD}
+        -n ${JACKD_NPERIODS}
+    "
+
+    if [ -n "$JACKD_MIDI" ] &&
+       [ "$JACKD_MIDI" != "none" ]; then
+
+        JACKD_CMD_ARGS="$JACKD_CMD_ARGS -X ${JACKD_MIDI}"
+    fi
+
+    JACKD_CMD_ARGS="$JACKD_CMD_ARGS ${JACKD_ARGS}"
 }
 
 start() {
-	ebegin "Starting JACK audio server"
 
-	# Detect user to run jackd under
-	local username=""
-	if [ -n "$JACKD_USER" ]; then
-		username="$JACKD_USER"
-	elif [ -x "$DETECT_USER_SCRIPT" ]; then
-		username="$(/bin/sh "$DETECT_USER_SCRIPT" 2>/dev/null)"
-	fi
-	if [ -z "$username" ]; then
-		local u uid
-		for u in $(cut -d: -f1 /etc/passwd); do
-			uid=$(id -u "$u" 2>/dev/null) || continue
-			if [ "$uid" -ge 1000 ] && id -nG "$u" 2>/dev/null | grep -qw audio; then
-				username="$u"; break
-			fi
-		done
-	fi
-	if [ -z "$username" ]; then
-		local u uid
-		for u in $(cut -d: -f1 /etc/passwd); do
-			uid=$(id -u "$u" 2>/dev/null) || continue
-			[ "$uid" -ge 1000 ] && { username="$u"; break; }
-		done
-	fi
-	[ -z "$username" ] && username="root"
+    ebegin "Starting jackd"
 
-	# Detect ALSA playback/capture device
-	local device="hw:0"
-	if [ -n "$JACKD_DEVICE" ]; then
-		device="$JACKD_DEVICE"
-	elif [ -x "$DETECT_SCRIPT" ]; then
-		local dev_out; dev_out="$(/bin/sh "$DETECT_SCRIPT" 2>/dev/null)"
-		[ -n "$dev_out" ] && device="$dev_out"
-	fi
+    export JACK_NO_AUDIO_RESERVATION=1
 
-	# Build jackd command-line arguments
-	local args
-	if [ -n "$JACKD_MIDI" ] && [ "$JACKD_MIDI" != "none" ]; then
-		args="-R -P${JACKD_PRIORITY} -d alsa -P ${device} -C ${device} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} -X ${JACKD_MIDI} ${JACKD_ARGS}"
-	else
-		args="-R -P${JACKD_PRIORITY} -d alsa -P ${device} -C ${device} -r ${JACKD_SR} -p ${JACKD_PERIOD} -n ${JACKD_NPERIODS} ${JACKD_ARGS}"
-	fi
+    start-stop-daemon \
+        --start \
+        --background \
+        --make-pidfile \
+        --pidfile "$pidfile" \
+        --user "$USERNAME" \
+        --stdout "$JACKD_LOG" \
+        --stderr "$JACKD_LOG" \
+        --exec "$JACKD_DAEMON" -- \
+        $JACKD_CMD_ARGS
 
-	touch "$JACKD_LOG" 2>/dev/null
-	chown "$username:$username" "$JACKD_LOG" 2>/dev/null || true
+    rc=$?
 
-	{
-		su -l "$username" -s /bin/sh -c "export JACK_NO_AUDIO_RESERVATION=1; exec ${JACKD_DAEMON} ${args}"
-	} >> "$JACKD_LOG" 2>&1 &
-	echo $! > "$pidfile"
+    sleep 3
 
-	# Wait for JACK to become ready (up to 5s)
-	if command -v jack_wait >/dev/null 2>&1; then
-		if ! jack_wait -w -t 5 >/dev/null 2>&1; then
-			eend 1 "JACK did not become ready in 5s; check $JACKD_LOG"
-			return 1
-		fi
-	else
-		sleep 2
-	fi
+    if ! kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
 
-	eend 0
+        eerror "jackd exited early"
+
+        if [ -f "$JACKD_LOG" ]; then
+            tail -n 30 "$JACKD_LOG"
+        fi
+
+        return 1
+    fi
+
+    # Optional autoconnect helper
+
+    if [ -x /usr/local/lib/jack-bridge/jack-autoconnect ]; then
+        /usr/local/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
+    fi
+
+    eend $rc
 }
 
 stop() {
-	ebegin "Stopping JACK audio server"
 
-	# Stop the connection monitor first to prevent reconnect attempts during shutdown
-	if [ -f "$MONITOR_PIDFILE" ]; then
-		local mpid; mpid=$(cat "$MONITOR_PIDFILE" 2>/dev/null)
-		if [ -n "$mpid" ] && kill -0 "$mpid" 2>/dev/null; then
-			kill -TERM "$mpid" 2>/dev/null || true
-			sleep 1
-			kill -0 "$mpid" 2>/dev/null && kill -KILL "$mpid" 2>/dev/null || true
-		fi
-		rm -f "$MONITOR_PIDFILE"
-	fi
+    ebegin "Stopping jackd"
 
-	start-stop-daemon --stop --pidfile "$pidfile" --retry "TERM/10/KILL/2" --quiet
-	eend $?
+    # Stop monitor first
+
+    if [ -f "$MONITOR_PIDFILE" ]; then
+
+        monitor_pid=$(cat "$MONITOR_PIDFILE" 2>/dev/null || true)
+
+        if [ -n "$monitor_pid" ] &&
+           kill -0 "$monitor_pid" 2>/dev/null; then
+
+            kill -TERM "$monitor_pid" 2>/dev/null || true
+
+            sleep 1
+
+            kill -0 "$monitor_pid" 2>/dev/null &&
+                kill -KILL "$monitor_pid" 2>/dev/null || true
+        fi
+
+        rm -f "$MONITOR_PIDFILE"
+    fi
+
+    start-stop-daemon \
+        --stop \
+        --pidfile "$pidfile" \
+        --retry TERM/10/KILL/2
+
+    rc=$?
+
+    rm -f "$pidfile"
+
+    eend $rc
+}
+
+status() {
+
+    if [ -f "$pidfile" ]; then
+
+        pid=$(cat "$pidfile" 2>/dev/null || true)
+
+        if [ -n "$pid" ] &&
+           kill -0 "$pid" 2>/dev/null; then
+
+            einfo "jackd running (pid $pid)"
+            return 0
+        fi
+    fi
+
+    einfo "jackd not running"
+    return 1
 }
