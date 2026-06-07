@@ -2,8 +2,8 @@
 /.claude
 /CLAUDE.md
 
-# Locally-built GUI binary (rebuilt by `make mxeq`); not a shipped artifact
-/contrib/bin/mxeq
+# Locally-built and prebuilt binaries — not shipped via git
+/contrib/bin/
 # Common local artifacts
 *.o
 *.obj
