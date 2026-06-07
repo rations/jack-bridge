@@ -94,40 +94,11 @@ start() {
     # Give bluetoothd a moment if present
     sleep 1
 
-    # Pre-flight: the prebuilt bluealsad links against libbluetooth.so.3 (from the
-    # 'libbluetooth3' / bluez package). At early boot a stale ldconfig cache can hide
-    # a perfectly-installed library, and the daemon then dies instantly with
-    # "libbluetooth.so.3: cannot open shared object file" (see /var/log/bluealsad.log).
-    # Refresh the cache and fail loudly with an actionable message instead.
-    if command -v ldd >/dev/null 2>&1; then
-        if ldd "$DAEMON" 2>/dev/null | grep -q "not found"; then
-            log_warning_msg "Unresolved libraries for $DAEMON; running ldconfig"
-            ldconfig 2>/dev/null || true
-        fi
-        if ldd "$DAEMON" 2>/dev/null | grep -q "not found"; then
-            MISSING=$(ldd "$DAEMON" 2>/dev/null | awk '/not found/{print $1}' | tr '\n' ' ')
-            log_failure_msg "Cannot start bluealsad: missing libraries: ${MISSING}(install package 'libbluetooth3' / bluez)"
-            log_end_msg 1
-            return 1
-        fi
-    fi
-
-    # Build supervised command. Instead of a single exec, run a respawn loop so a
-    # transient early-boot failure (or a BT stack reset) does not kill Bluetooth for
-    # the whole session — nothing else restarts this daemon under SysV init. The
-    # TERM/INT trap forwards shutdown to the child and exits cleanly (rc 0) so stop()
-    # tears it down without the loop respawning it.
+    # Build final command
     DAEMON_ARGS="$BLUEALSAD_ARGS"
-    CMD="trap 'kill \$CHILD 2>/dev/null; exit 0' TERM INT; \
-while :; do \
-  \"$DAEMON\" $DAEMON_ARGS >>\"$BLUEALSAD_LOG\" 2>&1 & CHILD=\$!; \
-  wait \$CHILD; RC=\$?; \
-  [ \$RC -eq 0 ] && break; \
-  echo \"\$(date): bluealsad exited rc=\$RC; respawning in 2s\" >>\"$BLUEALSAD_LOG\"; \
-  sleep 2; \
-done"
+    CMD="exec \"$DAEMON\" $DAEMON_ARGS >>\"$BLUEALSAD_LOG\" 2>&1"
 
-    # Start as bluealsa user; create pidfile (records the supervising shell PID)
+    # Start as bluealsa user; create pidfile
     start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" \
         --chuid "$BLUEALSAD_USER" \
         --startas /bin/sh -- -c "$CMD" \

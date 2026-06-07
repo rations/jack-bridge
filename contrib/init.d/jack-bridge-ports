@@ -177,35 +177,14 @@ start() {
     # NOTE: system:capture ports are created automatically by jackd with -D flag (duplex mode)
     echo "system:capture ports created by jackd in duplex mode (-D flag)" >> "$LOGFILE" 2>&1
 
-    # NOTE: At a cold boot Bluetooth ports are NOT restored: 'jackbridge_bluealsa'
-    # PCM requires an ACTIVE A2DP connection, and at boot the device is usually not
-    # connected yet, so alsa_out would fail with "PCM not found".
-    # HOWEVER this service is also restarted at RUNTIME by jack-bridge-service-helper
-    # whenever the user changes the JACK buffer/rate in jack-graph Settings. In that
-    # case the Bluetooth device is typically still connected, and the bluealsa
-    # alsa_out bridge was killed with the old jackd. So we DO respawn Bluetooth here,
-    # but ONLY if a device is actually connected (see bt_device_connected below).
-    echo "Bluetooth restored only when a device is already connected (on-demand otherwise)" >> "$LOGFILE" 2>&1
+    # NOTE: Bluetooth ports are NOT restored at boot.
+    # 'jackbridge_bluealsa' PCM requires an ACTIVE Bluetooth connection; if the device
+    # is not connected, alsa_out fails with "PCM not found". Bluetooth is spawned
+    # ON-DEMAND when the user selects it in the GUI.
+    echo "Bluetooth ports spawned on-demand only (not at boot)" >> "$LOGFILE" 2>&1
 
-    # Best-effort check: is the saved Bluetooth device currently connected?
-    # Returns 0 (connected) / 1 (not). Non-fatal; if tooling is missing, treat as
-    # not connected so we fall back to on-demand spawning via the GUI.
-    bt_saved_mac() {
-        # BLUETOOTH_DEVICE may be a raw MAC or "jackbridge_bluealsa:DEV=AA:..,PROFILE=a2dp"
-        printf '%s\n' "${BLUETOOTH_DEVICE:-}" | grep -oE '[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}' | head -1
-    }
-    bt_device_connected() {
-        _mac="$(bt_saved_mac)"
-        [ -n "$_mac" ] || return 1
-        if command -v bluetoothctl >/dev/null 2>&1; then
-            su - "$USERNAME" -c "bluetoothctl info $_mac 2>/dev/null" | grep -qi 'Connected: yes'
-            return $?
-        fi
-        return 1
-    }
-
-    # Restore HDMI/USB/Bluetooth routing if the user had one selected at last shutdown.
-    # Internal always works (system:playback_* from jackd).
+    # Restore HDMI or USB routing if the user had one of those selected at last shutdown.
+    # Internal always works (system:playback_* from jackd). Bluetooth is excluded (see above).
     PREFERRED_OUTPUT="${PREFERRED_OUTPUT:-internal}"
     ROUTE_HELPER="/usr/local/lib/jack-bridge/jack-route-select"
     if [ "$PREFERRED_OUTPUT" = "hdmi" ] && [ -x "$ROUTE_HELPER" ]; then
@@ -216,15 +195,6 @@ start() {
         echo "jack-bridge-ports: Restoring USB output (PREFERRED_OUTPUT=usb)" >> "$LOGFILE" 2>&1
         su - "$USERNAME" -c "$ROUTE_HELPER usb" >> "$LOGFILE" 2>&1 || \
             echo "jack-bridge-ports: WARNING: jack-route-select usb failed" >> "$LOGFILE" 2>&1
-    elif [ "$PREFERRED_OUTPUT" = "bluetooth" ] && [ -x "$ROUTE_HELPER" ]; then
-        if bt_device_connected; then
-            _mac="$(bt_saved_mac)"
-            echo "jack-bridge-ports: Restoring Bluetooth output (device $_mac connected)" >> "$LOGFILE" 2>&1
-            su - "$USERNAME" -c "$ROUTE_HELPER bluetooth $_mac" >> "$LOGFILE" 2>&1 || \
-                echo "jack-bridge-ports: WARNING: jack-route-select bluetooth failed" >> "$LOGFILE" 2>&1
-        else
-            echo "jack-bridge-ports: PREFERRED_OUTPUT=bluetooth but no device connected; deferring to on-demand GUI spawn" >> "$LOGFILE" 2>&1
-        fi
     else
         echo "jack-bridge-ports: PREFERRED_OUTPUT=$PREFERRED_OUTPUT (no port spawn needed)" >> "$LOGFILE" 2>&1
     fi
