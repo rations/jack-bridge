@@ -1,6 +1,9 @@
 /.vscode
 /.claude
 /CLAUDE.md
+
+# Locally-built GUI binary (rebuilt by `make mxeq`); not a shipped artifact
+/contrib/bin/mxeq
 # Common local artifacts
 *.o
 *.obj
