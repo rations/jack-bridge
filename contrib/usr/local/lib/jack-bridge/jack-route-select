@@ -567,13 +567,6 @@ route() {
       ;;
   esac
 
-  # Update system-wide ALSA JACK plugin config (primary method)
-  # Falls back to per-user override if system update fails
-  if ! update_system_jack_conf "$newpref"; then
-    log "System config update failed; using per-user override"
-    write_user_jack_override "$newpref" || true
-  fi
-
   # Disconnect from all known sinks
   jack_disconnect_all_sinks
 
@@ -590,18 +583,21 @@ route() {
   fi
 
   # Reconnect all previous sources to new sink.
-  # Group by client and connect positionally: JACK registration order is
-  # always L before R for stereo apps, so port[N] -> sink[N] is correct
-  # without any port-name heuristics.
+  # Ports are sorted by trailing channel number (out1 < out2 < out3) so the
+  # positional mapping is correct regardless of JACK global registration order.
   clients=$(echo "$sources" | sed 's/:.*//' | sort -u)
   echo "$clients" | while IFS= read -r cname; do
     [ -z "$cname" ] && continue
-    # Collect all source ports for this client preserving JACK order
+    # Collect source ports for this client, sorted by channel number.
     client_srcs=$(echo "$sources" | while IFS= read -r s; do
       case "$s" in "${cname}:"*) echo "$s" ;; esac
-    done)
-    # Get target sink input ports in JACK order
-    sink_ports=$(jack_lsp 2>/dev/null | grep "^${newpref}")
+    done | sort -V 2>/dev/null || echo "$sources" | while IFS= read -r s; do
+      case "$s" in "${cname}:"*) echo "$s" ;; esac
+    done | sort)
+    # Get target sink input ports sorted by trailing channel number.
+    # jack_lsp returns ports in JACK global registration order which is
+    # not guaranteed to match channel numbers; sort -V gives 1,2,3,4 order.
+    sink_ports=$(jack_lsp 2>/dev/null | grep "^${newpref}" | sort -V)
     idx=1
     echo "$client_srcs" | while IFS= read -r src; do
       [ -z "$src" ] && continue

@@ -13,10 +13,13 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <ctype.h>
+#include <limits.h>
 #include <errno.h>
 #include <jack/jack.h>
 
 #define MAX_LINE 256
+#define MAX_SRC_PORTS 64
 #define USER_CONF_PATH ".config/jack-bridge/devices.conf"
 #define SYS_CONF_PATH "/etc/jack-bridge/devices.conf"
 
@@ -141,14 +144,31 @@ static void disconnect_from_other_sinks(const char *source_port, const char *kee
     jack_free(connections);
 }
 
-/* Connect all output ports of client_name to target sink positionally.
- * JACK guarantees ports are returned in registration order; stereo apps
- * always register L before R, so port[0]->sink[0], port[1]->sink[1]
- * is the correct JACK-standard mapping — no name heuristics needed.
- * all_ports is the full JackPortIsOutput list from process_connections. */
+/* Extract trailing channel number for port ordering.
+ * "REAPER:out3" -> 3. Returns INT_MAX if no trailing digit (sort last). */
+static int port_channel_num(const char *name) {
+    const char *p = name + strlen(name);
+    while (p > name && isdigit((unsigned char)*(p - 1))) p--;
+    if (*p != '\0')
+        return atoi(p);
+    return INT_MAX;
+}
+
+static int port_cmp(const void *a, const void *b) {
+    return port_channel_num(*(const char **)a) - port_channel_num(*(const char **)b);
+}
+
+/* Connect output ports of client_name to the target sink positionally.
+ * Ports are sorted by trailing channel number before mapping so that
+ * out1->sink1, out2->sink2 regardless of JACK's global registration order
+ * (native JACK apps such as Reaper may register ports non-sequentially).
+ * Source ports beyond the sink's channel count are disconnected from all
+ * known sinks so they don't accumulate stale connections. */
 static void connect_client_to_sink(const char *client_name, size_t name_len, const char **all_ports) {
     const char **sink_ports;
-    int i, sink_idx, ret;
+    const char *src[MAX_SRC_PORTS];
+    const char *sink[MAX_SRC_PORTS];
+    int i, src_count, sink_count, sink_idx, ret;
     char target1[128];
 
     snprintf(target1, sizeof(target1), "%s1", target_sink_prefix);
@@ -158,31 +178,44 @@ static void connect_client_to_sink(const char *client_name, size_t name_len, con
         return;
     }
 
-    sink_ports = jack_get_ports(client, target_sink_prefix, NULL, JackPortIsInput);
+    /* Audio sinks only — JACK_DEFAULT_AUDIO_TYPE excludes any MIDI ports. */
+    sink_ports = jack_get_ports(client, target_sink_prefix, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput);
     if (!sink_ports) {
         fprintf(stderr, "jack-connection-manager: ERROR: No input ports found for %s\n",
                 target_sink_prefix);
         return;
     }
 
-    sink_idx = 0;
-    for (i = 0; all_ports[i]; i++) {
-        /* Skip ports not belonging to this client */
+    /* Copy sink ports into a sortable array and sort by channel number. */
+    sink_count = 0;
+    for (i = 0; sink_ports[i] && sink_count < MAX_SRC_PORTS; i++)
+        sink[sink_count++] = sink_ports[i];
+    qsort(sink, (size_t)sink_count, sizeof(char *), port_cmp);
+
+    /* Collect source ports for this client and sort by channel number. */
+    src_count = 0;
+    for (i = 0; all_ports[i] && src_count < MAX_SRC_PORTS; i++) {
         if (strncmp(all_ports[i], client_name, name_len) != 0 || all_ports[i][name_len] != ':')
             continue;
-        /* Skip non-audio ports */
         if (is_sink_port(all_ports[i]) || is_capture_port(all_ports[i]) || is_midi_port(all_ports[i]))
             continue;
-        /* Stop if we have more source channels than sink channels */
-        if (!sink_ports[sink_idx])
+        src[src_count++] = all_ports[i];
+    }
+    qsort(src, (size_t)src_count, sizeof(char *), port_cmp);
+
+    sink_idx = 0;
+    for (i = 0; i < src_count; i++) {
+        if (sink_idx >= sink_count) {
+            /* Sink full — disconnect excess source ports from all known sinks. */
+            for (; i < src_count; i++)
+                disconnect_from_other_sinks(src[i], NULL);
             break;
-
-        disconnect_from_other_sinks(all_ports[i], target_sink_prefix);
-
-        ret = jack_connect(client, all_ports[i], sink_ports[sink_idx]);
+        }
+        disconnect_from_other_sinks(src[i], target_sink_prefix);
+        ret = jack_connect(client, src[i], sink[sink_idx]);
         if (ret != 0 && ret != EEXIST)
             fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
-                    all_ports[i], sink_ports[sink_idx], ret);
+                    src[i], sink[sink_idx], ret);
         sink_idx++;
     }
 
@@ -219,8 +252,13 @@ static void process_connections(void) {
     /* Reload config to catch GUI changes */
     load_config();
 
-    /* Get all output ports */
-    ports = jack_get_ports(client, NULL, NULL, JackPortIsOutput);
+    /* Get all AUDIO output ports. Passing JACK_DEFAULT_AUDIO_TYPE as the
+     * type filter excludes MIDI ports at the source — this is the reliable,
+     * JACK-ABI-correct way to tell audio from MIDI. Apps such as Reaper expose
+     * MIDI ports ("REAPER:MIDI Output 1") that string-name matching misses;
+     * if those leak into routing they steal sink slots and shift the audio
+     * channels (out1 -> playback_2, out2 -> playback_4). */
+    ports = jack_get_ports(client, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput);
     if (!ports) { is_processing = 0; return; }
 
     for (i = 0; ports[i]; i++) {
@@ -275,6 +313,29 @@ static void process_connections(void) {
             fprintf(stderr, "jack-connection-manager: Routing '%s' -> %s\n",
                     client_name, target_sink_prefix);
             connect_client_to_sink(client_name, name_len, ports);
+        } else {
+            /* Client already routed to target — still remove any stale
+             * connections to other sinks. This handles the race where the
+             * ALSA JACK plugin auto-connects a freshly opened client to
+             * system:playback after the manager already routed it to USB/HDMI,
+             * and similar reconnect behaviour in native JACK apps. */
+            for (k = 0; ports[k]; k++) {
+                if (strncmp(ports[k], client_name, name_len) != 0 || ports[k][name_len] != ':')
+                    continue;
+                if (is_sink_port(ports[k]) || is_capture_port(ports[k]) || is_midi_port(ports[k]))
+                    continue;
+                jack_port_t *sp = jack_port_by_name(client, ports[k]);
+                if (!sp) continue;
+                const char **sc = jack_port_get_all_connections(client, sp);
+                if (!sc) continue;
+                int on_target = 0, m;
+                for (m = 0; sc[m]; m++) {
+                    if (strstr(sc[m], target_sink_prefix)) { on_target = 1; break; }
+                }
+                jack_free(sc);
+                if (on_target)
+                    disconnect_from_other_sinks(ports[k], target_sink_prefix);
+            }
         }
     }
 
