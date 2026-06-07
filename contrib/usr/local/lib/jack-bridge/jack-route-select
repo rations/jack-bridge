@@ -16,8 +16,24 @@ mkdir -p "$(dirname "$USER_CONF")" 2>/dev/null || true
 # Defaults
 PREFERRED_OUTPUT="internal"
 BLUETOOTH_DEVICE=""
-BT_PERIOD="256"
-BT_NPERIODS="3"
+# Bluetooth alsa_out buffering. NOTE: this is the buffer on the *BlueALSA A2DP
+# side*, NOT JACK's buffer. alsa_out is a resampling bridge between two clock
+# domains, so these are deliberately decoupled from jackd's -p/-n. A2DP is a
+# bursty, high-latency transport; a small (jackd-sized) buffer underruns
+# constantly (err=-32 in /tmp/jack-route-select-bluealsa.log → crackle → alsa_out
+# dies → ports vanish). Large defaults absorb that jitter. A minimum is enforced
+# at spawn time (see ensure_bt_out) so a stale devices.conf that pins these to
+# jackd-sized values (e.g. 256x3) cannot reintroduce the underruns. Set LARGER
+# values in ~/.config/jack-bridge/devices.conf if you want more headroom.
+BT_PERIOD="1024"
+BT_NPERIODS="8"
+# Minimum BlueALSA-side buffer (frames = BT_PERIOD*BT_NPERIODS). Below this the
+# A2DP stream underruns; ensure_bt_out bumps to 1024x8 if a config goes lower.
+BT_MIN_BUFFER="4096"
+# Target delay (frames) the alsa_out DLL keeps buffered. Empty = auto-derive from
+# the actual buffer (buffer/4). alsa_out ABORTS if target_delay+max_diff exceeds
+# the buffer, so any value here is clamped to stay safely under it at spawn time.
+BT_TARGET_DELAY=""
 
 # Logging for diagnostics
 LOGFILE="/tmp/jack-route-select.log"
@@ -403,16 +419,43 @@ ensure_bt_out() {
   pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
   sleep 0.5  # Let process terminate
   
+  # Enforce A2DP minimum buffer. A stale devices.conf may pin BT_PERIOD/BT_NPERIODS
+  # to jackd-sized values (256x3=768) which underrun constantly; bump to 1024x8.
+  bt_buffer=$(( BT_PERIOD * BT_NPERIODS ))
+  if [ "$bt_buffer" -lt "${BT_MIN_BUFFER:-4096}" ]; then
+    log "BT buffer ${bt_buffer} (${BT_PERIOD}x${BT_NPERIODS}) below A2DP minimum ${BT_MIN_BUFFER:-4096}; using 1024x8"
+    BT_PERIOD=1024
+    BT_NPERIODS=8
+    bt_buffer=$(( BT_PERIOD * BT_NPERIODS ))
+  fi
+
+  # alsa_out ABORTS at startup if target_delay + max_diff > buffersize (default
+  # max_diff == target_delay, so we need 2*target < buffer). Derive target = buffer/4
+  # (=> total buffer/2) and clamp any explicit override. Pass -m explicitly so the
+  # relationship is guaranteed regardless of alsa_out's internal default.
+  if [ -n "${BT_TARGET_DELAY:-}" ]; then
+    bt_target="$BT_TARGET_DELAY"
+  else
+    bt_target=$(( bt_buffer / 4 ))
+  fi
+  bt_max=$(( bt_buffer / 2 - 1 ))
+  [ "$bt_target" -gt "$bt_max" ] && bt_target="$bt_max"
+  [ "$bt_target" -lt 1 ] && bt_target=1
+
   # Spawn alsa_out reading from jackbridge_bluealsa PCM (uses defaults we just wrote)
-  log "Spawning bluealsa alsa_out (period=$BT_PERIOD nperiods=$BT_NPERIODS)"
+  log "Spawning bluealsa alsa_out (period=$BT_PERIOD nperiods=$BT_NPERIODS buffer=$bt_buffer target_delay=$bt_target)"
   if have jack_samplerate; then
     rate=$(jack_rate)
   else
     rate=48000
   fi
-  
+
+  # -q 2 : good resample quality for the JACK<->A2DP clock bridge
+  # -t/-m: target delay + max drift, both kept safely under the buffer (above)
+  # Sample RATE must track JACK (-r); the buffer (-p/-n) is intentionally larger
+  # than JACK's and device-side only. See BT_* defaults above.
   # Spawn in background - alsa_out will create bluealsa:playback_1/2 ports
-  nohup alsa_out -j bluealsa -d jackbridge_bluealsa -r "$rate" -p "$BT_PERIOD" -n "$BT_NPERIODS" \
+  nohup alsa_out -j bluealsa -d jackbridge_bluealsa -r "$rate" -p "$BT_PERIOD" -n "$BT_NPERIODS" -q 2 -t "$bt_target" -m "$bt_target" \
     >>/tmp/jack-route-select-bluealsa.log 2>&1 &
   
   # Wait for ports to appear

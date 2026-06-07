@@ -91,6 +91,8 @@ static gboolean __gui_bt_update_device_idle(gpointer data);
 static gboolean __gui_bt_refresh_selection_idle(gpointer data);
 /* Forward decl so Start/Stop discovery can refresh Scan/Stop sensitivity immediately */
 static void refresh_adapter_state(void);
+/* Forward decl: re-enumerate cached BlueZ devices on each Scan (defined later) */
+void gui_bt_populate_existing_devices(void);
 
 /* Helper: convert MAC "AA:BB:CC:DD:EE:FF" to BlueZ object path using the default adapter */
 static gchar *mac_to_object_path(const char *mac) {
@@ -467,6 +469,38 @@ int gui_bt_start_discovery(const char *adapter_path) {
         fprintf(stderr, "gui_bt_start_discovery: SetDiscoveryFilter failed on %s (continuing)\n", adapter);
     }
 
+    /* Force a FRESH discovery session. If the adapter is already Discovering
+     * (left over from a previous run, or a previous no-op StartDiscovery), BlueZ
+     * will NOT re-emit InterfacesAdded for devices it has already cached — so the
+     * first Scan appears to "do nothing" until the user does Stop -> Scan. Detect
+     * that state and StopDiscovery first so the subsequent StartDiscovery re-emits
+     * results. Best-effort; errors are ignored. */
+    {
+        GError *gerr = NULL;
+        GVariant *gres = g_dbus_connection_call_sync(gui_system_bus, "org.bluez", adapter,
+            "org.freedesktop.DBus.Properties", "Get",
+            g_variant_new("(ss)", "org.bluez.Adapter1", "Discovering"),
+            G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &gerr);
+        gboolean already = FALSE;
+        if (gres) {
+            GVariant *gv = NULL;
+            g_variant_get(gres, "(v)", &gv);
+            if (gv && g_variant_is_of_type(gv, G_VARIANT_TYPE_BOOLEAN))
+                already = g_variant_get_boolean(gv);
+            if (gv) g_variant_unref(gv);
+            g_variant_unref(gres);
+        }
+        if (gerr) g_error_free(gerr);
+        if (already) {
+            GError *serr = NULL;
+            GVariant *sres = g_dbus_connection_call_sync(gui_system_bus, "org.bluez", adapter,
+                "org.bluez.Adapter1", "StopDiscovery", NULL, NULL,
+                G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &serr);
+            if (sres) g_variant_unref(sres);
+            if (serr) g_error_free(serr);
+        }
+    }
+
     /* Synchronous StartDiscovery so GUI can notify user on failure (polkit denial, etc.) */
     GVariant *res = g_dbus_connection_call_sync(gui_system_bus,
                            "org.bluez",
@@ -486,6 +520,12 @@ int gui_bt_start_discovery(const char *adapter_path) {
         return -1;
     }
     g_variant_unref(res);
+
+    /* Surface devices BlueZ already knows about immediately. BlueZ only emits
+     * InterfacesAdded for NEWLY discovered devices, so cached/known devices would
+     * otherwise never appear on a plain StartDiscovery. This is idempotent
+     * (updates existing rows, appends new ones). */
+    gui_bt_populate_existing_devices();
 
     /* Update scan/stop button sensitivity from current Adapter state */
     refresh_adapter_state();
