@@ -86,6 +86,34 @@ void GraphCanvas::fit_to_window() {
     queue_draw();
 }
 
+// Move each "<base>R" port to sit immediately after its "<base>" port within
+// the same column. Pure relocation — all other ports keep their order, so MIDI
+// stays on top and unrelated clients are unaffected. O(n^2) but n is tiny.
+static void pair_stereo_ports(std::vector<std::shared_ptr<Node>>& ports) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 0; i < ports.size(); ++i) {
+            const std::string& nm = ports[i]->name;          // full "client:port"
+            if (nm.empty() || nm.back() != 'R') continue;
+            std::string base = nm.substr(0, nm.size() - 1);  // drop trailing 'R'
+
+            size_t b = SIZE_MAX;
+            for (size_t j = 0; j < ports.size(); ++j)
+                if (ports[j]->name == base) { b = j; break; }
+            if (b == SIZE_MAX) continue;   // no matching base — leave it alone
+            if (i == b + 1) continue;      // already right after its base
+
+            auto node = ports[i];
+            ports.erase(ports.begin() + i);
+            if (b > i) --b;                // base shifted left by the erase
+            ports.insert(ports.begin() + b + 1, node);
+            changed = true;                // indices moved — rescan
+            break;
+        }
+    }
+}
+
 void GraphCanvas::build_client_boxes() {
     m_client_boxes.clear();
 
@@ -102,6 +130,8 @@ void GraphCanvas::build_client_boxes() {
     }
 
     for (auto& [name, box] : boxes) {
+        pair_stereo_ports(box->inputs);
+        pair_stereo_ports(box->outputs);
         m_client_boxes.push_back(std::move(*box));
     }
 }
