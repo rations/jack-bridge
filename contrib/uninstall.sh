@@ -40,7 +40,7 @@ echo ""
 
 # Unhold packages that were held during install
 log "Unholding packages that were held during install..."
-sudo apt-mark unhold qjackctl qt6-wayland qt6-translations-l10n qt6-svg-plugins qt6-qpa-plugins qt6-gtk-platformtheme 2>/dev/null || true
+sudo apt-mark unhold qjackctl 2>/dev/null || true
 
 # Paths and artifacts managed by this project
 INIT_JACK="/etc/init.d/jackd-rt"
@@ -261,10 +261,6 @@ done
 
 # Remove ALSA configuration files from multiple directories
 for dir in $ALSA_CONF_DIRS; do
-  if [ -f "$dir/50-jack.conf" ]; then
-    rm -f "$dir/50-jack.conf"
-    log "  Removed $dir/50-jack.conf"
-  fi
   if [ -f "$dir/20-jack-bridge-bluealsa.conf" ]; then
     rm -f "$dir/20-jack-bridge-bluealsa.conf"
     log "  Removed $dir/20-jack-bridge-bluealsa.conf"
@@ -282,17 +278,6 @@ rm -f /tmp/bluez-monitor.*.log 2>/dev/null || true
 if [ -f "$LIMITS_CONF" ] && grep -q "@audio - rtprio 95" "$LIMITS_CONF" 2>/dev/null; then
   rm -f "$LIMITS_CONF"
   log "  Removed $LIMITS_CONF"
-fi
-
-# Remove additional ALSA configuration files
-if [ -f "/etc/alsa/conf.d/50-jack.conf" ]; then
-  rm -f "/etc/alsa/conf.d/50-jack.conf"
-  log "  Removed /etc/alsa/conf.d/50-jack.conf"
-fi
-
-if [ -f "/usr/share/alsa/alsa.conf.d/50-jack.conf" ]; then
-  rm -f "/usr/share/alsa/alsa.conf.d/50-jack.conf"
-  log "  Removed /usr/share/alsa/alsa.conf.d/50-jack.conf"
 fi
 
 # Reload D-Bus to remove our policies
@@ -315,16 +300,9 @@ echo "========================================="
 echo ""
 echo "jack-bridge has been removed from your system."
 echo ""
-echo "To also remove installed packages, run:"
-echo "  sudo apt remove jackd2 bluez bluez-tools \\"
-echo "  apulse libasound2-plugin-equal"
-echo ""
-echo "  sudo apt autoremove"
-echo ""
 echo "User data preserved:"
 echo "  - Recordings in ~/Music/"
 echo "  - User configs in ~/.config/jack-bridge/"
-echo "  - EQ presets in ~/.local/share/mxeq/"
 echo ""
 
 exit 0
