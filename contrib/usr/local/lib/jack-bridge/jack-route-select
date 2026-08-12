@@ -68,7 +68,9 @@ EOF
   fi
 
   # Ensure ~/.asoundrc contains an include for this fragment inside managed markers.
-  # NOTE: jack_playback_override.conf is OBSOLETE - we now update 50-jack.conf directly
+  # NOTE: 50-jack.conf is installed once and is never modified at runtime — its
+  # playback_ports must stay pointed at system:playback_*, because pointing it at
+  # a device-specific port breaks ALSA whenever that device is absent.
   ASOUND="$HOME/.asoundrc"
   TMP="$(mktemp "${HOME}/.asoundrc.jb.XXXXXX" 2>/dev/null || mktemp /tmp/.asoundrc.jb.XXXXXX)"
   in_path="$out_dir/current_input.conf"
@@ -76,13 +78,22 @@ EOF
   # Strip existing block between markers if present, then append our managed block.
   if [ -f "$ASOUND" ]; then
     awk '
-      BEGIN { skip=0 }
+      BEGIN { skip=0; n=0 }
       /^# BEGIN jack-bridge/ { skip=1; next }
-      /^# END jack-bridge/ { skip=0; next }
-      { if (!skip) print }
+      /^# END jack-bridge/   { skip=0; next }
+      { if (!skip) lines[++n] = $0 }
+      END {
+        # Emit the users content up to its last non-blank line. Trimming the
+        # trailing blanks matters: this block runs on every device switch and
+        # re-adds a separator line each time, so without the trim ~/.asoundrc
+        # accumulates one extra blank line per switch, without bound.
+        last = 0
+        for (i = 1; i <= n; i++) if (lines[i] ~ /[^ \t]/) last = i
+        for (i = 1; i <= last; i++) print lines[i]
+      }
     ' "$ASOUND" > "$TMP".part || cp -f "$ASOUND" "$TMP".part
   else
-    echo "" > "$TMP".part
+    : > "$TMP".part
   fi
   {
     cat "$TMP".part
@@ -141,19 +152,60 @@ save_user_kv() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Detect internal card number (first non-USB card, returns 0 if none found)
+# Single source of truth for the sink ports this stack manages. Both awk passes
+# below read it, so adding an output device means editing one list.
+JB_SINKS="system:playback_1 system:playback_2
+usb_out:playback_1 usb_out:playback_2
+hdmi_out:playback_1 hdmi_out:playback_2
+bluealsa:playback_1 bluealsa:playback_2"
+
+# Locate the first ALSA device whose description matches a pattern.
+#   $1 = aplay (playback) or arecord (capture)
+#   $2 = pattern to match, e.g. USB or HDMI
+# Echoes "card device" (device defaults to 0), or nothing when there is no match.
+find_card_device() {
+  _tool="$1"; _pattern="$2"
+  have "$_tool" || return 0
+  _line="$("$_tool" -l 2>/dev/null | grep "$_pattern" | head -n 1)"
+  [ -n "$_line" ] || return 0
+  _card=$(echo "$_line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
+  _dev=$(echo "$_line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
+  [ -n "$_card" ] || return 0
+  echo "$_card ${_dev:-0}"
+}
+
+# Detect internal card number: the first card whose `aplay -l` section does not
+# mention USB. Falls back to 0.
+#
+# src/mxeq.c:get_internal_card_number() implements exactly this rule in C. The
+# two must agree — if they drift, the GUI shows one card's mixer while audio
+# routes to another. Change both together.
+#
+# Single pass over the output, which matches the C version. The previous version looped over a fixed
+# card range and delimited each section with `sed ... | head -n -1`; it returned
+# the wrong card in three cases, all verified against the C version:
+#   - a gap in card numbering (card 0 USB, card 2 internal -> answered 0)
+#   - the matching card being last in the output, because the range then ran to
+#     EOF and `head -n -1` ate the only line it had
+#   - two-digit card numbers, since the loop only covered 0..9
 get_internal_card_number() {
-    if have aplay; then
-        aplay_out=$(aplay -l 2>/dev/null)
-        for card in 0 1 2 3 4 5 6 7 8 9; do
-            section=$(echo "$aplay_out" | sed -n "/^card $card:/,/^card $((card+1)):/p" | head -n -1)
-            if [ -n "$section" ] && ! echo "$section" | grep -qi "usb"; then
-                echo "$card"
-                return
-            fi
-        done
-    fi
-    echo "0"
+    have aplay || { echo 0; return; }
+    aplay -l 2>/dev/null | awk '
+        /^card [0-9]+:/ {
+            # New card header: the previous candidate survived, so take it.
+            # `exit` still runs END, hence the done flag — without it the
+            # answer is printed twice.
+            if (cur != "" && !dirty) { print cur; done = 1; exit }
+            cur = substr($0, 6, index($0, ":") - 6)
+            dirty = 0
+        }
+        cur != "" && tolower($0) ~ /usb/ { dirty = 1 }
+        END {
+            if (!done) {
+                if (cur != "" && !dirty) print cur; else print 0
+            }
+        }
+    '
 }
 
 jack_rate() {
@@ -171,13 +223,8 @@ jack_rate() {
 # Parse jack_lsp -c and collect sources connected to any known sink ports
 collect_current_sources() {
   have jack_lsp || return
-  jack_lsp -c 2>/dev/null | awk '
-    BEGIN {
-      sink["system:playback_1"]=1; sink["system:playback_2"]=1;
-      sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
-      sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
-      sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
-    }
+  jack_lsp -c 2>/dev/null | awk -v sinks="$JB_SINKS" '
+    BEGIN { n=split(sinks, a, /[ \n]+/); for (i=1;i<=n;i++) sink[a[i]]=1 }
     /^[^ \t]/ { cur=$1; next }
     /^[ \t]/ {
       to=$1;
@@ -192,13 +239,8 @@ jack_disconnect_all_sinks() {
   have jack_lsp || return
   have jack_disconnect || return
   # Disconnect all connections to our known sinks
-  jack_lsp -c 2>/dev/null | awk '
-    BEGIN {
-      sink["system:playback_1"]=1; sink["system:playback_2"]=1;
-      sink["usb_out:playback_1"]=1; sink["usb_out:playback_2"]=1;
-      sink["hdmi_out:playback_1"]=1; sink["hdmi_out:playback_2"]=1;
-      sink["bluealsa:playback_1"]=1; sink["bluealsa:playback_2"]=1;
-    }
+  jack_lsp -c 2>/dev/null | awk -v sinks="$JB_SINKS" '
+    BEGIN { n=split(sinks, a, /[ \n]+/); for (i=1;i<=n;i++) sink[a[i]]=1 }
     /^[^ \t]/ { cur=$1; next }
     /^[ \t]/ {
       to=$1;
@@ -209,21 +251,6 @@ jack_disconnect_all_sinks() {
   ' | while read -r src dst; do
     jack_disconnect "$src" "$dst" 2>/dev/null || true
   done
-}
-
-jack_connect_pair() {
-  # $1=srcL $2=srcR $3=sink_prefix (e.g., system:playback_ or usb_out:playback_)
-  have jack_connect || return
-  srcL="$1"; srcR="$2"; pref="$3"
-  jack_connect "$srcL" "${pref}1" 2>/dev/null || true
-  jack_connect "$srcR" "${pref}2" 2>/dev/null || true
-}
-
-kill_bridge_clients() {
-  # NOTE: With persistent ports (jack-bridge-ports init script), we NO LONGER kill bridge clients
-  # They remain running and just get disconnected/reconnected as needed
-  # This function is kept for backward compatibility but does nothing
-  return 0
 }
 
 wait_for_port() {
@@ -246,15 +273,9 @@ ensure_usb_out() {
   sleep 0.3
   
   # Detect current USB audio device
-  usb_card=""
-  usb_dev=""
-  if have aplay; then
-    line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
-    if [ -n "$line" ]; then
-      usb_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-      usb_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-    fi
-  fi
+  found="$(find_card_device aplay USB)"
+  usb_card="${found%% *}"
+  usb_dev="${found#* }"
   
   # Fallback if no USB found (spawn with placeholder)
   if [ -z "$usb_card" ]; then
@@ -297,15 +318,9 @@ ensure_hdmi_out() {
   sleep 0.3
   
   # Detect current HDMI device
-  hdmi_card=""
-  hdmi_dev=""
-  if have aplay; then
-    line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
-    if [ -n "$line" ]; then
-      hdmi_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-      hdmi_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-    fi
-  fi
+  found="$(find_card_device aplay HDMI)"
+  hdmi_card="${found%% *}"
+  hdmi_dev="${found#* }"
   
   # Fallback if no HDMI found (spawn with placeholder)
   if [ -z "$hdmi_card" ]; then
@@ -350,15 +365,9 @@ ensure_usb_in() {
   sleep 0.3
 
   # Detect USB capture device
-  usb_card=""
-  usb_dev=""
-  if have arecord; then
-    line="$(arecord -l 2>/dev/null | grep "USB" | head -n 1)"
-    if [ -n "$line" ]; then
-      usb_card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-      usb_dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-    fi
-  fi
+  found="$(find_card_device arecord USB)"
+  usb_card="${found%% *}"
+  usb_dev="${found#* }"
   
   if [ -z "$usb_card" ]; then
     usb_card="1"
@@ -493,33 +502,17 @@ route() {
       ;;
     usb)
       # Detect USB card/device as in ensure_usb_out
-      if have aplay; then
-        line="$(aplay -l 2>/dev/null | grep "USB" | head -n 1)"
-        if [ -n "$line" ]; then
-          card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-          dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-          [ -z "$card" ] && card="1"
-          [ -z "$dev" ] && dev="0"
-          out_pcm="plughw:${card},${dev}"
-        else
-          out_pcm="${USB_DEVICE:-plughw:1,0}"
-        fi
+      found="$(find_card_device aplay USB)"
+      if [ -n "$found" ]; then
+        out_pcm="plughw:${found% *},${found#* }"
       else
         out_pcm="${USB_DEVICE:-plughw:1,0}"
       fi
       ;;
     hdmi)
-      if have aplay; then
-        line="$(aplay -l 2>/dev/null | grep "HDMI" | head -n 1)"
-        if [ -n "$line" ]; then
-          card=$(echo "$line" | sed -n 's/^card \([0-9]\+\):.*/\1/p')
-          dev=$(echo "$line" | sed -n 's/.*device \([0-9]\+\):.*/\1/p')
-          [ -z "$card" ] && card="0"
-          [ -z "$dev" ] && dev="3"
-          out_pcm="plughw:${card},${dev}"
-        else
-          out_pcm="${HDMI_DEVICE:-plughw:2,0}"
-        fi
+      found="$(find_card_device aplay HDMI)"
+      if [ -n "$found" ]; then
+        out_pcm="plughw:${found% *},${found#* }"
       else
         out_pcm="${HDMI_DEVICE:-plughw:2,0}"
       fi
@@ -613,15 +606,9 @@ route() {
   # Disconnect from all known sinks
   jack_disconnect_all_sinks
 
-  # If we have no sources, attempt a sensible default: connect system:capture*? Not applicable for playback.
-  # Use ports that commonly drive output: try "mxeq:out_1/2" then "system:playback_*" sources if present.
+  # Nothing was feeding a sink, so there is nothing to re-route. The new sink's
+  # ports are up and the connection manager will wire up clients as they appear.
   if [ -z "$sources" ]; then
-    # Try mxeq first
-    if jack_lsp 2>/dev/null | grep -q '^mxeq:out_1'; then
-      jack_connect_pair "mxeq:out_1" "mxeq:out_2" "$newpref"
-      exit 0
-    fi
-    # Else try "system:playback_*" sources are not sources; fallback no-op
     exit 0
   fi
 

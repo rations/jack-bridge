@@ -12,7 +12,7 @@
 
 ## Features
 
-### Alsa Sound Connect GUI - Original mixer and eq GUI by mrgreenjeans **AlsaTune GUI** ([SourceForge](https://sourceforge.net/projects/vuu-do/files/Miscellaneous/apps/AlsaTune/))
+### Alsa Sound Connect GUI - ALSA mixer, recorder, device selector and Bluetooth pairing. Based on the original mixer GUI by mrgreenjeans, **AlsaTune GUI** ([SourceForge](https://sourceforge.net/projects/vuu-do/files/Miscellaneous/apps/AlsaTune/)). The EQ section of the original has been removed.
 
 ### JACK Audio Connection Kit - Professional audio server ([JACK Audio Connection Kit](https://jackaudio.org/))
 
@@ -393,7 +393,8 @@ Audio Output
 - `/etc/init.d/jack-bridge-ports` - Bridge ports
 
 **Configuration:**
-- `/etc/asound.conf` - ALSA routing and EQ configuration
+- `/etc/asound.conf` - ALSA routing configuration
+- `50-jack.conf` (in `/etc/alsa/conf.d/` or `/usr/share/alsa/alsa.conf.d/`) - the ALSA→JACK `pcm.jack` bridge; not modified at runtime
 - `/etc/jack-bridge/devices.conf` - Device preferences (Internal/USB/HDMI/Bluetooth)
 - `/usr/share/dbus-1/system.d/org.bluealsa.conf` - BlueALSA D-Bus policy
 - `/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules` - Bluetooth permissions

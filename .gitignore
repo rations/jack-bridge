@@ -1,7 +1,7 @@
 /.vscode
 /.claude
 /CLAUDE.md
-
+CODE-REVIEW.md
 # Locally-built and prebuilt binaries — not shipped via git
 /contrib/bin/
 # Common local artifacts

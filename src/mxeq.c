@@ -18,28 +18,79 @@ static void create_steam_panel(GtkWidget *main_box);
 static int write_string_atomic(const char *path, const char *content);
 static gboolean bluealsa_ports_exist(void);
 
+/* How a mixer element should be presented. Derived from the element's own ALSA
+ * capabilities, never from its name, so it is correct on any codec. */
+typedef enum {
+    MIXER_CTL_SLIDER,  /* has a volume            -> vertical slider */
+    MIXER_CTL_SWITCH,  /* switch only, no volume  -> single checkbox (e.g. IEC958) */
+    MIXER_CTL_ENUM     /* enumerated              -> dropdown (e.g. Input Source) */
+} MixerCtlKind;
+
 typedef struct {
-    snd_mixer_t *mixer;
     snd_mixer_elem_t *elem;
     GtkWidget *scale;
-    GtkWidget *mute_check;
     const char *channel_name;
     gboolean is_capture;  /* TRUE if this is a capture control, FALSE for playback */
+    MixerCtlKind kind;
 } MixerChannel;
 
 typedef struct {
     snd_mixer_t *mixer;
     MixerChannel *channels;
     int num_channels;
-    int current_card;  /* Track which card we're showing (0=internal, 1=USB, etc.) */
-    GtkWidget *mixer_box;  /* Reference to container for dynamic rebuild */
+    GtkWidget *mixer_box;   /* GtkGrid: the volume sliders */
+    GtkWidget *switch_box;  /* GtkFlowBox: toggles and dropdowns */
+    GtkWidget *switch_sep;  /* divider, hidden when switch_box is empty */
+    /* Use the separate switch row beneath the grid? Internal card only. USB
+     * interfaces keep the original layout: every control in the grid, with a
+     * capture control's enable box under its own slider. */
+    gboolean use_switch_row;
 } MixerData;
+
+/* ---- Which controls the internal card shows ---------------------------------
+ * Matched as case-insensitive SUBSTRINGS, not exact names. HDA codecs label the
+ * same function differently between machines ("Master" / "Master Front",
+ * "Speaker" / "Front", "Mic" / "Front Mic" / "Internal Mic", "IEC958" /
+ * "S/PDIF"), so exact-name matching hides real controls on hardware other than
+ * the developer's. If this list matches nothing on a given card, the filter is
+ * abandoned and every control is shown — an unrecognised codec must never
+ * produce an empty mixer panel.
+ *
+ * Only the internal card is curated. USB interfaces keep showing everything,
+ * since their controls are the whole point of the device.
+ */
+static const char *const kInternalAllow[] = {
+    "master", "headphone", "speaker",
+    "front", "surround", "center", "lfe", "side",  /* multi-channel outputs */
+    "pcm", "mic", "line",
+    "capture", "iec958", "s/pdif",
+    "input source",
+    NULL
+};
+
+/* Hardware-only controls that just confuse users here, on any card. Auto-Mute
+ * drives jack-sense speaker muting and Loopback Mixing drives analog loopback;
+ * both remain available in alsamixer(1). */
+static const char *const kAlwaysHide[] = {
+    "auto-mute", "automute", "loopback", "beep",
+    NULL
+};
+
+static gboolean name_matches_any(const char *name, const char *const *patterns) {
+    gchar *lower = g_ascii_strdown(name, -1);
+    if (!lower) return FALSE;
+    gboolean hit = FALSE;
+    for (int i = 0; patterns[i]; i++) {
+        if (strstr(lower, patterns[i])) { hit = TRUE; break; }
+    }
+    g_free(lower);
+    return hit;
+}
 
 /* UI globals used to keep window/expander references for compacting behavior.
     These are used by the expander 'notify::expanded' handler to shrink the
     main window back to a compact size when all expanders are collapsed. */
 static GtkWidget *g_main_window = NULL;
-static GtkWidget *g_main_box = NULL;
 static GtkWidget *g_mixer_expander = NULL;
 static GtkWidget *g_rec_expander = NULL;
 static GtkWidget *g_bt_expander = NULL;
@@ -56,17 +107,16 @@ static GtkWidget *g_steam_expander = NULL;
 #define WINDOW_BASE_HEIGHT 40  /* borders, spacing */
 /* Expose Bluetooth device tree to Devices (Playback) panel for MAC selection */
 static GtkWidget *g_bt_tree = NULL;
-/* Phase 3: Global references to Devices panel radio buttons for state synchronization */
+/* Devices panel radio buttons the Bluetooth panel needs to drive: it selects
+   Bluetooth on success, and falls back to Internal when a BT route fails. */
 static GtkWidget *g_rb_internal = NULL;
-static GtkWidget *g_rb_usb = NULL;
-static GtkWidget *g_rb_hdmi = NULL;
 static GtkWidget *g_rb_bt = NULL;
 /* Global mixer data for dynamic card switching */
 static MixerData *g_mixer_data = NULL;
 /* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
 static char *mac_from_bluez_object(const char *s);
 /* Forward declaration for mixer rebuild */
-static void rebuild_mixer_for_card(int card_num);
+static void rebuild_mixer_for_card(int card_num, gboolean curate);
 
 /* When both expanders are collapsed we want the main window to shrink back to a
    compact height so there is no wasted blank space. This handler watches the
@@ -123,10 +173,8 @@ static GtkWindow *get_parent_window_from_widget(GtkWidget *w) {
 /* Forward declarations of GUI BT helpers (defined in src/gui_bt.c) */
 extern int gui_bt_start_discovery(const char *adapter_path);
 extern int gui_bt_stop_discovery(const char *adapter_path);
-extern int gui_bt_pair_device(const char *device_path_or_mac);
-extern int gui_bt_trust_device(const char *device_path_or_mac, int trusted);
-extern int gui_bt_connect_device(const char *device_path_or_mac);
-/* Async variants (provide callbacks to surface errors to GUI without blocking) */
+/* Pair/Trust/Connect are async: they report the outcome via the callback, which
+   gui_bt always invokes on the GTK main loop, so the UI never blocks on D-Bus. */
 extern int gui_bt_pair_device_async(const char *device_path_or_mac, void (*cb)(gboolean, const char *, gpointer), gpointer ud);
 extern int gui_bt_trust_device_async(const char *device_path_or_mac, gboolean trusted, void (*cb)(gboolean, const char *, gpointer), gpointer ud);
 extern int gui_bt_connect_device_async(const char *device_path_or_mac, void (*cb)(gboolean, const char *, gpointer), gpointer ud);
@@ -145,6 +193,9 @@ extern int gui_bt_set_adapter_discoverable(gboolean discoverable);
 extern gboolean gui_bt_get_adapter_discoverable(void);
 /* Forward declaration for Bluetooth "Set as output" action */
 static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data);
+/* Forward declaration: the shared Bluetooth routing helpers block this handler
+   while they update the Devices panel, so they must be able to name it. */
+static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data);
 
 /* Safe wrappers return 0 on success, -1 on failure and show a GTK dialog when appropriate */
 static int bt_wrapper_start_discovery(GtkWindow *parent) {
@@ -169,24 +220,15 @@ static int bt_wrapper_remove(GtkWindow *parent, const char *objpath) {
     return 0;
 }
 
-/* Async operation callbacks to surface errors in GTK */
-static void bt_pair_op_cb(gboolean success, const char *message, gpointer user_data) {
-    GtkWindow *parent = GTK_WINDOW(user_data);
-    if (!success && message) {
-        show_bt_error_dialog(parent, message);
-    }
-}
-static void bt_connect_op_cb(gboolean success, const char *message, gpointer user_data) {
-    GtkWindow *parent = GTK_WINDOW(user_data);
-    if (!success && message) {
-        show_bt_error_dialog(parent, message);
-    }
-}
-static void bt_trust_op_cb(gboolean success, const char *message, gpointer user_data) {
-    GtkWindow *parent = GTK_WINDOW(user_data);
-    if (!success && message) {
-        show_bt_error_dialog(parent, message);
-    }
+/* Shared completion callback for the async pair/trust/connect operations:
+ * report failures to the user, stay quiet on success. gui_bt always invokes
+ * this on the GTK main loop. user_data is unused — the dialog is parented on
+ * the main window rather than a captured pointer, which may have been
+ * destroyed while the D-Bus call was in flight. */
+static void bt_op_cb(gboolean success, const char *message, gpointer user_data) {
+    (void)user_data;
+    if (!success && message)
+        show_bt_error_dialog(g_main_window ? GTK_WINDOW(g_main_window) : NULL, message);
 }
 
 /* Bluetooth helper callbacks at file scope (valid C, referenced by GCallback in main UI) */
@@ -231,7 +273,7 @@ static void on_pair_clicked(GtkButton *b, gpointer user_data) {
     GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(b));
     if (!obj) { show_bt_error_dialog(parent, "No device selected"); return; }
     /* Async pair with error surfacing */
-    gui_bt_pair_device_async(obj, bt_pair_op_cb, parent);
+    gui_bt_pair_device_async(obj, bt_op_cb, parent);
     g_free(obj);
 }
 
@@ -258,7 +300,7 @@ static void on_trust_clicked(GtkButton *b, gpointer user_data) {
     }
 
     /* Async trust=true with error surfacing */
-    gui_bt_trust_device_async(obj, TRUE, bt_trust_op_cb, parent);
+    gui_bt_trust_device_async(obj, TRUE, bt_op_cb, parent);
     g_free(obj);
 }
 
@@ -280,7 +322,7 @@ static void on_connect_clicked(GtkButton *b, gpointer user_data) {
     }
 
     /* Async connect with error surfacing */
-    gui_bt_connect_device_async(obj, bt_connect_op_cb, parent);
+    gui_bt_connect_device_async(obj, bt_op_cb, parent);
     g_free(obj);
 }
 
@@ -321,6 +363,62 @@ static void slider_changed(GtkRange *range, MixerChannel *channel) {
     }
 }
 
+/* Plain on/off handler for switch-only controls and for the capture enable
+   boxes in the switch row: checked means ON, with no inversion. (The separate
+   on_mute_toggled() below is inverted, because a "Mute" box checked means off.) */
+static void on_switch_toggled(GtkToggleButton *btn, gpointer user_data) {
+    MixerChannel *ch = (MixerChannel *)user_data;
+    if (!ch || !ch->elem) return;
+    int on = gtk_toggle_button_get_active(btn) ? 1 : 0;
+    if (ch->is_capture)
+        snd_mixer_selem_set_capture_switch_all(ch->elem, on);
+    else
+        snd_mixer_selem_set_playback_switch_all(ch->elem, on);
+}
+
+/* Enumerated controls (e.g. "Input Source" choosing which mic is live). These
+   were previously rendered as sliders, where dragging did nothing useful. */
+static void on_enum_changed(GtkComboBox *combo, gpointer user_data) {
+    MixerChannel *ch = (MixerChannel *)user_data;
+    if (!ch || !ch->elem) return;
+    int active = gtk_combo_box_get_active(combo);
+    if (active < 0) return;
+    /* Apply to every channel the element exposes; unsupported ones just fail. */
+    for (int c = 0; c <= SND_MIXER_SCHN_LAST; c++)
+        snd_mixer_selem_set_enum_item(ch->elem, (snd_mixer_selem_channel_id_t)c,
+                                      (unsigned int)active);
+}
+
+/* Decide how an element should be drawn, from its ALSA capabilities alone.
+   Returns FALSE if the element offers nothing we can present. */
+static gboolean classify_mixer_elem(snd_mixer_elem_t *elem,
+                                    MixerCtlKind *kind, gboolean *is_capture) {
+    if (snd_mixer_selem_is_enumerated(elem)) {
+        *kind = MIXER_CTL_ENUM;
+        /* capture-side enum (e.g. Input Source) vs playback-side */
+        *is_capture = snd_mixer_selem_is_enum_capture(elem) ? TRUE : FALSE;
+        return TRUE;
+    }
+
+    if (snd_mixer_selem_has_playback_volume(elem) ||
+        snd_mixer_selem_has_capture_volume(elem)) {
+        *kind = MIXER_CTL_SLIDER;
+        *is_capture = (snd_mixer_selem_has_capture_volume(elem) &&
+                       !snd_mixer_selem_has_playback_volume(elem));
+        return TRUE;
+    }
+
+    if (snd_mixer_selem_has_playback_switch(elem) ||
+        snd_mixer_selem_has_capture_switch(elem)) {
+        *kind = MIXER_CTL_SWITCH;
+        *is_capture = (snd_mixer_selem_has_capture_switch(elem) &&
+                       !snd_mixer_selem_has_playback_switch(elem));
+        return TRUE;
+    }
+
+    return FALSE; /* nothing presentable */
+}
+
 /* Mute toggle handler — for playback: 1=unmuted, 0=muted; for capture: 1=enabled, 0=disabled.
    We expose a "Mute" checkbox (or "Enable" for capture); when checked, set appropriate state. */
 static void on_mute_toggled(GtkToggleButton *btn, gpointer user_data) {
@@ -336,27 +434,87 @@ static void on_mute_toggled(GtkToggleButton *btn, gpointer user_data) {
     }
 }
 
-static void init_alsa_mixer(MixerData *data, int card_num) {
-    /* Generic mixer initialization for specified card number.
-     * Enumerates ALL simple mixer elements (no hardcoded names).
-     * Works for any audio card: internal, USB, or external interfaces.
-     */
-    
-    /* Close existing mixer if reinitializing */
+/* Release the ALSA mixer handle and the channel array, including the per-channel
+ * names strdup'd in init_alsa_mixer(). Safe to call repeatedly and on a zeroed
+ * struct. This is the single teardown path — previously it was open-coded in
+ * three places and one copy forgot the names, leaking them on every card switch. */
+static void mixer_data_reset(MixerData *data) {
+    if (!data) return;
     if (data->mixer) {
         snd_mixer_close(data->mixer);
         data->mixer = NULL;
     }
     if (data->channels) {
+        for (int i = 0; i < data->num_channels; i++)
+            g_free((char *)data->channels[i].channel_name);
         g_free(data->channels);
         data->channels = NULL;
     }
     data->num_channels = 0;
-    data->current_card = card_num;
-    
+}
+
+/* Populate data->channels from the card's simple mixer elements.
+ * `curate` restricts the set to kInternalAllow (used for the internal card);
+ * when FALSE every presentable control is kept (used for USB interfaces).
+ * Returns the number of controls collected. */
+static int collect_mixer_channels(MixerData *data, snd_mixer_t *m,
+                                  int card_num, gboolean curate) {
+    int idx = 0;
+    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
+        if (snd_mixer_elem_get_type(elem) != SND_MIXER_ELEM_SIMPLE) continue;
+
+        const char *name = snd_mixer_selem_get_name(elem);
+        if (!name) continue;
+
+        if (name_matches_any(name, kAlwaysHide)) continue;
+        if (curate && !name_matches_any(name, kInternalAllow)) continue;
+
+        MixerCtlKind kind;
+        gboolean is_capture = FALSE;
+        if (!classify_mixer_elem(elem, &kind, &is_capture)) continue;
+
+        /* Auto-enable capture switches so a fresh install can record without
+         * the user first hunting through alsamixer. */
+        if (is_capture && snd_mixer_selem_has_capture_switch(elem)) {
+            int sw = 0;
+            snd_mixer_selem_get_capture_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+            if (!sw) {
+                snd_mixer_selem_set_capture_switch_all(elem, 1);
+                fprintf(stderr, "Auto-enabled capture for '%s' on card %d\n", name, card_num);
+            }
+        }
+
+        /* ALSA can expose several elements sharing a name, distinguished only by
+         * index — e.g. 'Headphone',0 and 'Headphone',1 for front and rear jacks,
+         * or one 'Capture'/'Input Source' pair per capture stream. They are
+         * genuinely separate controls, so keep them all, but label the extras so
+         * the panel does not show two identical-looking widgets. */
+        unsigned int eidx = snd_mixer_selem_get_index(elem);
+        data->channels[idx].elem = elem;
+        data->channels[idx].channel_name = (eidx > 0)
+            ? g_strdup_printf("%s #%u", name, eidx)
+            : g_strdup(name);
+        data->channels[idx].is_capture = is_capture;
+        data->channels[idx].kind = kind;
+        idx++;
+    }
+    return idx;
+}
+
+/* Open `card_num` and collect its mixer controls.
+ * curate == TRUE narrows the internal card to the controls users actually need
+ * (see kInternalAllow); USB interfaces pass FALSE and keep everything. */
+static void init_alsa_mixer(MixerData *data, int card_num, gboolean curate) {
+    /* Release any previous card's mixer and channel names before rebuilding */
+    mixer_data_reset(data);
+
+    /* The two-zone layout is part of the internal-card redesign; USB keeps the
+       single-grid layout it already had. */
+    data->use_switch_row = curate;
+
     /* Build card attach string */
     gchar *card_str = g_strdup_printf("hw:%d", card_num);
-    
+
     snd_mixer_t *m = NULL;
     if (snd_mixer_open(&m, 0) < 0) {
         fprintf(stderr, "init_alsa_mixer: failed to open mixer for card %d\n", card_num);
@@ -381,198 +539,270 @@ static void init_alsa_mixer(MixerData *data, int card_num) {
         g_free(card_str);
         return;
     }
-    
+
     fprintf(stderr, "init_alsa_mixer: successfully opened card %d (%s)\n", card_num, card_str);
     g_free(card_str);
-    
-    /* Count simple mixer elements */
+
+    /* Count simple mixer elements (upper bound for the array) */
     int count = 0;
     for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
-        if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE) {
+        if (snd_mixer_elem_get_type(elem) == SND_MIXER_ELEM_SIMPLE)
             count++;
-        }
     }
-    
+
     if (count == 0) {
         fprintf(stderr, "init_alsa_mixer: no simple mixer elements found on card %d\n", card_num);
         snd_mixer_close(m);
         return;
     }
-    
-    /* Allocate channel array */
+
     data->channels = g_new0(MixerChannel, count);
     data->mixer = m;
-    
-    /* Enumerate ALL simple mixer elements generically */
-    int idx = 0;
-    for (snd_mixer_elem_t *elem = snd_mixer_first_elem(m); elem; elem = snd_mixer_elem_next(elem)) {
-        if (snd_mixer_elem_get_type(elem) != SND_MIXER_ELEM_SIMPLE) continue;
-        
-        const char *name = snd_mixer_selem_get_name(elem);
-        if (!name) continue;
 
-        /* Hide hardware-only controls that confuse users in the GUI.
-         * In particular, HDA codecs often expose "Auto-Mute Mode" and
-         * "Loopback Mixing" mixer elements which control jack-sense
-         * speaker muting and analog loopback. These are still available
-         * in alsamixer(1), but showing them here is confusing because
-         * jack-bridge does not manage them.
-         *
-         * We therefore filter out mixer elements whose names contain
-         * "auto-mute"/"automute" or "loopback" (case-insensitive).
-         */
-        gchar *lower = g_ascii_strdown(name, -1);
-        if (lower) {
-            if (strstr(lower, "auto-mute") ||
-                strstr(lower, "automute")  ||
-                strstr(lower, "loopback")) {
-                g_free(lower);
-                continue; /* Skip this control in the GUI */
-            }
-            g_free(lower);
-        }
-        
-        /* Detect if this is a capture-only control */
-        gboolean is_capture = FALSE;
-        if (snd_mixer_selem_has_capture_volume(elem) && !snd_mixer_selem_has_playback_volume(elem)) {
-            is_capture = TRUE;
-        }
-        
-        /* Auto-enable ALL capture switches on startup (generic for any interface) */
-        if (is_capture && snd_mixer_selem_has_capture_switch(elem)) {
-            int sw = 0;
-            snd_mixer_selem_get_capture_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-            if (!sw) {
-                snd_mixer_selem_set_capture_switch_all(elem, 1);
-                fprintf(stderr, "Auto-enabled capture for '%s' on card %d\n", name, card_num);
-            }
-        }
-        
-        data->channels[idx].elem = elem;
-        data->channels[idx].channel_name = g_strdup(name);  /* Allocate copy since elem names are transient */
-        data->channels[idx].is_capture = is_capture;
-        idx++;
+    int idx = collect_mixer_channels(data, m, card_num, curate);
+
+    /* Safety net for unknown codecs: if curation matched nothing, the name list
+     * simply does not fit this hardware. Showing an empty mixer would be worse
+     * than showing too much, so fall back to the uncurated set. */
+    if (curate && idx == 0) {
+        fprintf(stderr, "init_alsa_mixer: no curated controls matched on card %d; "
+                        "showing all controls instead\n", card_num);
+        idx = collect_mixer_channels(data, m, card_num, FALSE);
     }
-    
+
     data->num_channels = idx;
-    fprintf(stderr, "init_alsa_mixer: found %d mixer controls on card %d\n", idx, card_num);
+    fprintf(stderr, "init_alsa_mixer: found %d mixer controls on card %d (curated=%s)\n",
+            idx, card_num, curate ? "yes" : "no");
 }
 
 static void cleanup_alsa(MixerData *mixer_data) {
-    if (mixer_data->mixer) {
-        snd_mixer_close(mixer_data->mixer);
-    }
-    if (mixer_data->channels) {
-        /* Free dynamically allocated channel names */
-        for (int i = 0; i < mixer_data->num_channels; i++) {
-            if (mixer_data->channels[i].channel_name) {
-                g_free((char*)mixer_data->channels[i].channel_name);
-            }
-        }
-        g_free(mixer_data->channels);
+    mixer_data_reset(mixer_data);
+}
+
+/* ---- Mixer UI construction -------------------------------------------------
+ * These three helpers are shared by the initial build in main() and by
+ * rebuild_mixer_for_card(), which previously carried a verbatim copy of the
+ * ~55-line per-channel loop. Any new control type only has to be handled once.
+ */
+
+/* Remove every widget from both mixer containers. */
+static void mixer_clear_box(MixerData *data) {
+    if (!data) return;
+    GtkWidget *containers[2];
+    containers[0] = data->mixer_box;
+    containers[1] = data->switch_box;
+    for (int c = 0; c < 2; c++) {
+        if (!containers[c]) continue;
+        GList *children = gtk_container_get_children(GTK_CONTAINER(containers[c]));
+        for (GList *iter = children; iter != NULL; iter = g_list_next(iter))
+            gtk_widget_destroy(GTK_WIDGET(iter->data));
+        g_list_free(children);
     }
 }
 
-/* Dynamic mixer rebuild: clear and repopulate mixer_box with controls from specified card */
-static void rebuild_mixer_for_card(int card_num) {
-    if (!g_mixer_data || !g_mixer_data->mixer_box) return;
-    
-    fprintf(stderr, "rebuild_mixer_for_card: switching to card %d\n", card_num);
-    
-    /* Clear existing mixer UI */
-    GList *children = gtk_container_get_children(GTK_CONTAINER(g_mixer_data->mixer_box));
-    for (GList *iter = children; iter != NULL; iter = g_list_next(iter)) {
-        gtk_widget_destroy(GTK_WIDGET(iter->data));
-    }
-    g_list_free(children);
-    
-    /* Reinitialize mixer for new card */
-    init_alsa_mixer(g_mixer_data, card_num);
-    
-    /* Rebuild UI with new controls */
-    if (g_mixer_data->num_channels == 0) {
-        GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-        gtk_widget_set_hexpand(no_mixer_box, TRUE);
-        gtk_widget_set_halign(no_mixer_box, GTK_ALIGN_CENTER);
-        gtk_grid_attach(GTK_GRID(g_mixer_data->mixer_box), no_mixer_box, 0, 0, 8, 1);
+/* Explain an empty mixer. card_num < 0 means "the default device". */
+static void mixer_build_no_controls_message(MixerData *data, int card_num) {
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_hexpand(box, TRUE);
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_grid_attach(GTK_GRID(data->mixer_box), box, 0, 0, 8, 1);
 
-        gchar *msg = g_strdup_printf(
+    gchar *msg;
+    if (card_num >= 0)
+        msg = g_strdup_printf(
             "No mixer controls detected on card %d.\n"
             "Audio may still work, but mixer sliders are unavailable.\n\n"
             "Try checking:\n"
             "• Card is properly detected: cat /proc/asound/cards\n"
             "• Mixer elements exist: alsamixer -c %d",
             card_num, card_num);
-        GtkWidget *no_mixer_label = gtk_label_new(msg);
-        g_free(msg);
-        gtk_label_set_justify(GTK_LABEL(no_mixer_label), GTK_JUSTIFY_CENTER);
-        gtk_box_pack_start(GTK_BOX(no_mixer_box), no_mixer_label, TRUE, TRUE, 8);
-        gtk_widget_show_all(no_mixer_box);
+    else
+        msg = g_strdup(
+            "No mixer controls were detected on the default ALSA device.\n"
+            "Audio may still play, but mixer sliders are unavailable.\n\n"
+            "Possible fixes:\n"
+            "• Ensure the default ALSA device has mixer elements (try 'alsamixer').\n"
+            "• Check that ALSA's default device maps to your hardware (see /proc/asound/cards).\n"
+            "• If using BlueALSA-only profiles, there may be no system mixer to control.");
+
+    GtkWidget *label = gtk_label_new(msg);
+    g_free(msg);
+    gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
+    gtk_box_pack_start(GTK_BOX(box), label, TRUE, TRUE, 8);
+}
+
+/* One vertical slider column for a control that exposes a volume. */
+static void mixer_add_slider(MixerData *data, MixerChannel *ch, int slot) {
+    GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_grid_attach(GTK_GRID(data->mixer_box), channel_box, slot % 8, slot / 8, 1, 1);
+
+    GtkWidget *label = gtk_label_new(ch->channel_name);
+    gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
+
+    ch->scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
+    gtk_range_set_inverted(GTK_RANGE(ch->scale), TRUE);
+    gtk_scale_set_draw_value(GTK_SCALE(ch->scale), TRUE);
+    gtk_scale_set_value_pos(GTK_SCALE(ch->scale), GTK_POS_BOTTOM);
+    gtk_widget_set_size_request(ch->scale, -1, 150);
+    gtk_box_pack_start(GTK_BOX(channel_box), ch->scale, TRUE, TRUE, 0);
+    g_signal_connect(ch->scale, "value-changed", G_CALLBACK(slider_changed), ch);
+
+    long min = 0, max = 0, value = 0;
+    if (ch->is_capture) {
+        snd_mixer_selem_get_capture_volume_range(ch->elem, &min, &max);
+        snd_mixer_selem_get_capture_volume(ch->elem, 0, &value);
+    } else {
+        snd_mixer_selem_get_playback_volume_range(ch->elem, &min, &max);
+        snd_mixer_selem_get_playback_volume(ch->elem, 0, &value);
+    }
+    if (max > min)
+        gtk_range_set_value(GTK_RANGE(ch->scale), (double)(value - min) / (max - min));
+
+    /* Playback controls always keep their Mute box under the slider. */
+    if (!ch->is_capture && snd_mixer_selem_has_playback_switch(ch->elem)) {
+        int sw = 1;
+        snd_mixer_selem_get_playback_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+        GtkWidget *mute = gtk_check_button_new_with_label("Mute");
+        gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
+        gtk_widget_set_margin_top(mute, 4);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
+        gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
+        g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), ch);
+    }
+
+    /* Capture enable: in the switch row on the internal card, or under its own
+       slider on USB, which keeps the layout users already had there. */
+    if (ch->is_capture && !data->use_switch_row &&
+        snd_mixer_selem_has_capture_switch(ch->elem)) {
+        int sw = 0;
+        snd_mixer_selem_get_capture_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+        GtkWidget *enable = gtk_check_button_new_with_label("Enable");
+        gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
+        gtk_widget_set_margin_top(enable, 4);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
+        gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
+        g_signal_connect(enable, "toggled", G_CALLBACK(on_switch_toggled), ch);
+    }
+}
+
+/* A labelled on/off box for a switch-only control. */
+static GtkWidget *mixer_make_switch(MixerChannel *ch) {
+    int sw = 1;
+    if (ch->is_capture)
+        snd_mixer_selem_get_capture_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+    else
+        snd_mixer_selem_get_playback_switch(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
+
+    GtkWidget *chk = gtk_check_button_new_with_label(ch->channel_name);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk), sw ? TRUE : FALSE);
+    g_signal_connect(chk, "toggled", G_CALLBACK(on_switch_toggled), ch);
+    return chk;
+}
+
+/* A labelled dropdown for an enumerated control. */
+static GtkWidget *mixer_make_enum(MixerChannel *ch) {
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *label = gtk_label_new(ch->channel_name);
+    gtk_box_pack_start(GTK_BOX(row), label, FALSE, FALSE, 0);
+
+    GtkWidget *combo = gtk_combo_box_text_new();
+    int n = snd_mixer_selem_get_enum_items(ch->elem);
+    for (int i = 0; i < n; i++) {
+        char item[64];
+        if (snd_mixer_selem_get_enum_item_name(ch->elem, (unsigned int)i,
+                                               sizeof(item), item) == 0)
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo), item);
+    }
+    unsigned int active = 0;
+    if (snd_mixer_selem_get_enum_item(ch->elem, SND_MIXER_SCHN_FRONT_LEFT, &active) == 0)
+        gtk_combo_box_set_active(GTK_COMBO_BOX(combo), (int)active);
+    g_signal_connect(combo, "changed", G_CALLBACK(on_enum_changed), ch);
+
+    gtk_box_pack_start(GTK_BOX(row), combo, FALSE, FALSE, 0);
+    return row;
+}
+
+/* Place a non-slider widget: in the switch row on the internal card, or in the
+ * next grid cell on USB, which has no switch row. */
+static void mixer_place_aux(MixerData *data, GtkWidget *w, int *slot, int *switches) {
+    if (data->use_switch_row) {
+        gtk_container_add(GTK_CONTAINER(data->switch_box), w);
+        (*switches)++;
         return;
     }
-    
-    /* Create slider for each control found (max 8 per row, auto-wrap) */
-    for (int i = 0; i < g_mixer_data->num_channels; i++) {
-        int col = i % 8;  // Max 8 columns per row
-        int row = i / 8;  // Automatic row wrapping
-        
-        GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-        gtk_grid_attach(GTK_GRID(g_mixer_data->mixer_box), channel_box, col, row, 1, 1);
+    GtkWidget *cell = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_valign(cell, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(cell), w, FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(data->mixer_box), cell, *slot % 8, *slot / 8, 1, 1);
+    (*slot)++;
+}
 
-        GtkWidget *label = gtk_label_new(g_mixer_data->channels[i].channel_name);
-        gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
+/* Build the whole mixer: sliders in the grid, toggles and dropdowns in the row
+ * beneath it. The divider and switch row stay hidden when nothing lands there. */
+static void mixer_build_channels(MixerData *data) {
+    int slot = 0;
+    int switches = 0;
 
-        g_mixer_data->channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
-        gtk_range_set_inverted(GTK_RANGE(g_mixer_data->channels[i].scale), TRUE);
-        gtk_scale_set_draw_value(GTK_SCALE(g_mixer_data->channels[i].scale), TRUE);
-        gtk_scale_set_value_pos(GTK_SCALE(g_mixer_data->channels[i].scale), GTK_POS_BOTTOM);
-        gtk_widget_set_size_request(g_mixer_data->channels[i].scale, -1, 150);
-        gtk_box_pack_start(GTK_BOX(channel_box), g_mixer_data->channels[i].scale, TRUE, TRUE, 0);
-        g_signal_connect(g_mixer_data->channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &g_mixer_data->channels[i]);
+    for (int i = 0; i < data->num_channels; i++) {
+        MixerChannel *ch = &data->channels[i];
 
-        long min, max, value;
-        if (g_mixer_data->channels[i].is_capture) {
-            snd_mixer_selem_get_capture_volume_range(g_mixer_data->channels[i].elem, &min, &max);
-            snd_mixer_selem_get_capture_volume(g_mixer_data->channels[i].elem, 0, &value);
-        } else {
-            snd_mixer_selem_get_playback_volume_range(g_mixer_data->channels[i].elem, &min, &max);
-            snd_mixer_selem_get_playback_volume(g_mixer_data->channels[i].elem, 0, &value);
-        }
-        gtk_range_set_value(GTK_RANGE(g_mixer_data->channels[i].scale), (double)(value - min) / (max - min));
-
-        /* Add Mute (playback) or Enable (capture) checkbox if control supports it */
-        g_mixer_data->channels[i].mute_check = NULL;
-        if (g_mixer_data->channels[i].is_capture) {
-            /* Capture controls: expose Enable checkbox (checked=capture enabled) */
-            if (snd_mixer_selem_has_capture_switch(g_mixer_data->channels[i].elem)) {
-                int sw = 0;
-                snd_mixer_selem_get_capture_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                GtkWidget *enable = gtk_check_button_new_with_label("Enable");
-                gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
-                gtk_widget_set_margin_top(enable, 4);
-                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
-                gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
-                g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), &g_mixer_data->channels[i]);
-                g_mixer_data->channels[i].mute_check = enable;
+        switch (ch->kind) {
+        case MIXER_CTL_SLIDER:
+            mixer_add_slider(data, ch, slot++);
+            /* On the internal card a capture control's enable box goes to the
+               switch row, alongside IEC958 and friends; on USB mixer_add_slider
+               has already placed it under the slider. */
+            if (data->use_switch_row && ch->is_capture &&
+                snd_mixer_selem_has_capture_switch(ch->elem)) {
+                gtk_container_add(GTK_CONTAINER(data->switch_box), mixer_make_switch(ch));
+                switches++;
             }
-        } else {
-            /* Playback controls: expose Mute checkbox (checked=muted) */
-            if (snd_mixer_selem_has_playback_switch(g_mixer_data->channels[i].elem)) {
-                int sw = 1;
-                snd_mixer_selem_get_playback_switch(g_mixer_data->channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                GtkWidget *mute = gtk_check_button_new_with_label("Mute");
-                gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
-                gtk_widget_set_margin_top(mute, 4);
-                gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
-                gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
-                g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &g_mixer_data->channels[i]);
-                g_mixer_data->channels[i].mute_check = mute;
-            }
+            break;
+        case MIXER_CTL_SWITCH:
+            mixer_place_aux(data, mixer_make_switch(ch), &slot, &switches);
+            break;
+        case MIXER_CTL_ENUM:
+            mixer_place_aux(data, mixer_make_enum(ch), &slot, &switches);
+            break;
         }
     }
+
+    (void)switches;
+}
+
+/* Show the divider and switch row only when something actually landed in them.
+ * Must be re-applied after any gtk_widget_show_all() that covers these widgets
+ * — including the toplevel one in main() — since show_all would otherwise
+ * reveal an empty row and a stray divider. */
+static void mixer_sync_switch_row(MixerData *data) {
+    if (!data || !data->switch_box || !data->switch_sep) return;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(data->switch_box));
+    gboolean any = (kids != NULL);
+    g_list_free(kids);
+    gtk_widget_set_visible(data->switch_sep, any);
+    gtk_widget_set_visible(data->switch_box, any);
+}
+
+/* Dynamic mixer rebuild: clear and repopulate mixer_box with controls from specified card */
+static void rebuild_mixer_for_card(int card_num, gboolean curate) {
+    if (!g_mixer_data || !g_mixer_data->mixer_box) return;
     
+    fprintf(stderr, "rebuild_mixer_for_card: switching to card %d\n", card_num);
+
+    mixer_clear_box(g_mixer_data);
+    init_alsa_mixer(g_mixer_data, card_num, curate);
+
+    if (g_mixer_data->num_channels == 0) {
+        mixer_build_no_controls_message(g_mixer_data, card_num);
+    } else {
+        mixer_build_channels(g_mixer_data);
+    }
+
     gtk_widget_show_all(g_mixer_data->mixer_box);
+    if (g_mixer_data->switch_box) gtk_widget_show_all(g_mixer_data->switch_box);
+    mixer_sync_switch_row(g_mixer_data);
+
     fprintf(stderr, "rebuild_mixer_for_card: rebuilt UI with %d controls for card %d\n",
             g_mixer_data->num_channels, card_num);
 }
@@ -580,24 +810,11 @@ static void rebuild_mixer_for_card(int card_num) {
 static void show_mixer_placeholder(const char *msg) {
     if (!g_mixer_data || !g_mixer_data->mixer_box) return;
 
-    if (g_mixer_data->mixer) {
-        snd_mixer_close(g_mixer_data->mixer);
-        g_mixer_data->mixer = NULL;
-    }
-    if (g_mixer_data->channels) {
-        for (int i = 0; i < g_mixer_data->num_channels; i++) {
-            if (g_mixer_data->channels[i].channel_name)
-                g_free((char*)g_mixer_data->channels[i].channel_name);
-        }
-        g_free(g_mixer_data->channels);
-        g_mixer_data->channels = NULL;
-    }
-    g_mixer_data->num_channels = 0;
-
-    GList *children = gtk_container_get_children(GTK_CONTAINER(g_mixer_data->mixer_box));
-    for (GList *iter = children; iter != NULL; iter = g_list_next(iter))
-        gtk_widget_destroy(GTK_WIDGET(iter->data));
-    g_list_free(children);
+    /* Destroy the widgets before releasing the channel array: each slider and
+       checkbox carries a &channels[i] as its signal user_data, so the array must
+       outlive them. The previous order freed the array first. */
+    mixer_clear_box(g_mixer_data);
+    mixer_data_reset(g_mixer_data);
 
     GtkWidget *placeholder_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_hexpand(placeholder_box, TRUE);
@@ -609,6 +826,8 @@ static void show_mixer_placeholder(const char *msg) {
     gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
     gtk_box_pack_start(GTK_BOX(placeholder_box), label, TRUE, TRUE, 24);
     gtk_widget_show_all(g_mixer_data->mixer_box);
+    /* HDMI/Bluetooth have no mixer at all, so the switch row is empty too */
+    mixer_sync_switch_row(g_mixer_data);
 }
 
 /* Recorder support: enhanced UX, safe child lifecycle, XDG Music path handling */
@@ -638,8 +857,7 @@ static char *ensure_wav_extension(const char *name) {
 /* Helper: sanitize a basename by removing any path separators.
    Returns newly allocated string. */
 static char *sanitize_basename(const char *name) {
-    gchar *basename = g_path_get_basename(name);
-    return g_strdup(basename);
+    return g_path_get_basename(name); /* already newly allocated */
 }
 
 /* Resolve user's Music directory via XDG; fallback to ~/Music.
@@ -678,14 +896,12 @@ static gboolean update_timer(gpointer user_data) {
     return TRUE;
 }
 
-/* Idle callback used to reset UI from non-main thread context */
-static gboolean reset_ui_idle(gpointer user_data) {
-    (void)user_data;
-    if (!rec_ui) return FALSE;
+/* Return the recorder controls to their idle state. */
+static void reset_recorder_ui(void) {
+    if (!rec_ui) return;
     gtk_widget_set_sensitive(rec_ui->record_btn, TRUE);
     gtk_widget_set_sensitive(rec_ui->stop_btn, FALSE);
     gtk_label_set_text(GTK_LABEL(rec_ui->status_label), "Idle");
-    return FALSE; /* remove source */
 }
 
 /* Child watch callback: called when arecord exits; status is child exit status */
@@ -702,8 +918,8 @@ static void on_record_child_exit(GPid pid, gint status, gpointer user_data) {
         record_timer_id = 0;
     }
 
-    /* Schedule UI reset on main loop */
-    g_idle_add(reset_ui_idle, NULL);
+    /* g_child_watch callbacks already run on the main loop, so update directly. */
+    reset_recorder_ui();
 }
 
 /* Start recording: builds path, spawns arecord asynchronously, adds child watch, updates UI */
@@ -753,11 +969,11 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         g_free((gchar*)rate_text);
     }
 
-    /* Use ALSA 'jack' device for recording - connects to JACK's system:capture ports.
-     * The 'jack' PCM is defined in /etc/asound.conf with capture_ports pointing to
-     * system:capture_1/2, which are created by jackd when opened with -C hw:0.
-     * This allows arecord to record from microphones/line-in through JACK.
-     * Cannot use 'plughw:0' (jackd has exclusive hw access) or 'default' (playback only). */
+    /* Record via the ALSA 'jack' PCM, defined in 50-jack.conf (installed to
+     * /etc/alsa/conf.d/ or /usr/share/alsa/alsa.conf.d/). Its capture_ports point
+     * at system:capture_1/2, which jackd creates from its -C device, so arecord
+     * captures mic/line-in through JACK. 'plughw:N' is unavailable (jackd holds
+     * the hardware exclusively) and 'default' is playback-only here. */
     const char *input_dev = "jack";
 
     /* Build argv for arecord */
@@ -776,17 +992,13 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
     };
 
     GError *err = NULL;
-    gchar *stderr_output = NULL;
-    gboolean ok = g_spawn_async_with_pipes(
+    gboolean ok = g_spawn_async(
         NULL,
         argv,
         NULL,
         G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
         NULL, NULL,
         &record_pid,
-        NULL,    /* stdin */
-        NULL,    /* stdout */
-        NULL,    /* stderr - we could capture this for debugging */
         &err
     );
 
@@ -810,7 +1022,6 @@ static void start_recording(GtkWidget *button, gpointer user_data) {
         gtk_widget_destroy(dialog);
         g_free(error_msg);
         if (err) g_error_free(err);
-        if (stderr_output) g_free(stderr_output);
         g_free(full_path);
         return;
     }
@@ -1056,14 +1267,23 @@ static void create_bt_panel(GtkWidget *main_box) {
 }
 
 
-/* Detect internal card number (first non-USB card, returns 0 if none found) */
+/* Detect internal card number: the first card whose `aplay -l` section does not
+ * mention USB. Returns 0 if none found.
+ *
+ * jack-route-select carries an awk implementation of exactly this rule (its own
+ * get_internal_card_number). The two must agree — if they drift, the GUI shows
+ * one card's mixer while audio routes to another. They were differential-tested
+ * against each other over gaps in card numbering, two-digit card numbers, a
+ * matching card appearing last, and USB named only on a subdevice line.
+ * Change both together. */
 static int get_internal_card_number(void) {
-    // Use system call to get aplay output, similar to detection script
     FILE *fp = popen("aplay -l 2>/dev/null", "r");
     if (!fp) return 0;
 
     char line[256];
-    int card_num;
+    /* Must be initialised: the "is this card USB?" test below reads card_num on
+     * every line, including any output preceding the first "card N:" header. */
+    int card_num = -1;
     int found_non_usb = -1;
 
     while (fgets(line, sizeof(line), fp)) {
@@ -1115,7 +1335,7 @@ int main(int argc, char *argv[]) {
     MixerData mixer_data = {0};
     int internal_card = get_internal_card_number();
     fprintf(stderr, "mxeq: Detected internal card %d for mixer initialization\n", internal_card);
-    init_alsa_mixer(&mixer_data, internal_card);  /* Start with detected internal card */
+    init_alsa_mixer(&mixer_data, internal_card, TRUE);  /* internal card: curated control set */
     /* Store global reference for dynamic mixer switching */
     g_mixer_data = &mixer_data;
     /* Ensure per-user ALSA override exists so Recorder works without root/system writes */
@@ -1154,7 +1374,6 @@ int main(int argc, char *argv[]) {
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4); // Tighter spacing
     gtk_container_set_border_width(GTK_CONTAINER(main_box), 5);
     gtk_container_add(GTK_CONTAINER(window), main_box);
-    g_main_box = main_box;
 
     // Mixer expander (expanded by default to show mixer controls)
     GtkWidget *mixer_expander = gtk_expander_new("Mixer Controls");
@@ -1175,97 +1394,42 @@ int main(int argc, char *argv[]) {
     gtk_widget_set_size_request(mixer_scroller, -1, 300);
     gtk_container_add(GTK_CONTAINER(mixer_frame), mixer_scroller);
 
+    /* Two zones inside the scroller: a grid of volume sliders, then a divider
+       and a wrapping row of toggles and dropdowns (Capture, IEC958, Input
+       Source). Switch-only and enumerated controls do not belong on a slider. */
+    GtkWidget *mixer_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_container_set_border_width(GTK_CONTAINER(mixer_vbox), 5);
+    gtk_container_add(GTK_CONTAINER(mixer_scroller), mixer_vbox);
+
     // Mixer grid (homogeneous columns, max 8 per row, auto-wrap to new rows)
     GtkWidget *mixer_box = gtk_grid_new();
     gtk_grid_set_column_homogeneous(GTK_GRID(mixer_box), TRUE);
     gtk_grid_set_row_homogeneous(GTK_GRID(mixer_box), FALSE);
     gtk_grid_set_column_spacing(GTK_GRID(mixer_box), 2);
     gtk_grid_set_row_spacing(GTK_GRID(mixer_box), 5);
-    gtk_container_set_border_width(GTK_CONTAINER(mixer_box), 5);
-    gtk_container_add(GTK_CONTAINER(mixer_scroller), mixer_box);
-    
-    /* Store mixer_box reference for dynamic rebuild */
-    mixer_data.mixer_box = mixer_box;
+    gtk_box_pack_start(GTK_BOX(mixer_vbox), mixer_box, TRUE, TRUE, 0);
 
-    // Add sliders for each mixer channel (if none found, show an informative message)
-    if (mixer_data.num_channels == 0) {
-        GtkWidget *no_mixer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-        gtk_widget_set_hexpand(no_mixer_box, TRUE);
-        gtk_widget_set_halign(no_mixer_box, GTK_ALIGN_CENTER);
-        gtk_grid_attach(GTK_GRID(mixer_box), no_mixer_box, 0, 0, 8, 1);
+    GtkWidget *switch_sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(mixer_vbox), switch_sep, FALSE, FALSE, 0);
 
-        GtkWidget *no_mixer_label = gtk_label_new(
-            "No mixer controls were detected on the default ALSA device.\n"
-            "Audio may still play, but mixer sliders are unavailable.\n\n"
-            "Possible fixes:\n"
-            "• Ensure the default ALSA device has mixer elements (try 'alsamixer').\n"
-            "• Check that ALSA's default device maps to your hardware (see /proc/asound/cards).\n"
-            "• If using BlueALSA-only profiles, there may be no system mixer to control."
-        );
-        gtk_label_set_justify(GTK_LABEL(no_mixer_label), GTK_JUSTIFY_CENTER);
-        gtk_box_pack_start(GTK_BOX(no_mixer_box), no_mixer_label, TRUE, TRUE, 8);
-    } else {
-        for (int i = 0; i < mixer_data.num_channels; i++) {
-            int col = i % 8;  // Max 8 columns per row
-            int row = i / 8;  // Automatic row wrapping
-            
-            GtkWidget *channel_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-            gtk_grid_attach(GTK_GRID(mixer_box), channel_box, col, row, 1, 1);
+    GtkWidget *switch_box = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(switch_box), GTK_SELECTION_NONE);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(switch_box), 6);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(switch_box), 12);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(switch_box), 4);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(switch_box), FALSE);
+    gtk_box_pack_start(GTK_BOX(mixer_vbox), switch_box, FALSE, FALSE, 0);
 
-            GtkWidget *label = gtk_label_new(mixer_data.channels[i].channel_name);
-            gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-            gtk_box_pack_start(GTK_BOX(channel_box), label, FALSE, FALSE, 5);
+    /* Store container references for dynamic rebuild */
+    mixer_data.mixer_box  = mixer_box;
+    mixer_data.switch_sep = switch_sep;
+    mixer_data.switch_box = switch_box;
 
-            mixer_data.channels[i].scale = gtk_scale_new_with_range(GTK_ORIENTATION_VERTICAL, 0, 1, 0.01);
-            gtk_range_set_inverted(GTK_RANGE(mixer_data.channels[i].scale), TRUE);
-            gtk_scale_set_draw_value(GTK_SCALE(mixer_data.channels[i].scale), TRUE);
-            gtk_scale_set_value_pos(GTK_SCALE(mixer_data.channels[i].scale), GTK_POS_BOTTOM);
-            gtk_widget_set_size_request(mixer_data.channels[i].scale, -1, 150);
-            gtk_box_pack_start(GTK_BOX(channel_box), mixer_data.channels[i].scale, TRUE, TRUE, 0);
-            g_signal_connect(mixer_data.channels[i].scale, "value-changed", G_CALLBACK(slider_changed), &mixer_data.channels[i]);
-
-            long min, max, value;
-            if (mixer_data.channels[i].is_capture) {
-                snd_mixer_selem_get_capture_volume_range(mixer_data.channels[i].elem, &min, &max);
-                snd_mixer_selem_get_capture_volume(mixer_data.channels[i].elem, 0, &value);
-            } else {
-                snd_mixer_selem_get_playback_volume_range(mixer_data.channels[i].elem, &min, &max);
-                snd_mixer_selem_get_playback_volume(mixer_data.channels[i].elem, 0, &value);
-            }
-            gtk_range_set_value(GTK_RANGE(mixer_data.channels[i].scale), (double)(value - min) / (max - min));
-
-            /* Optional per-channel Mute (playback) or Enable (capture) checkbox */
-            mixer_data.channels[i].mute_check = NULL;
-            if (mixer_data.channels[i].is_capture) {
-                /* Capture controls: expose Enable checkbox (checked=capture enabled) */
-                if (snd_mixer_selem_has_capture_switch(mixer_data.channels[i].elem)) {
-                    int sw = 0;
-                    snd_mixer_selem_get_capture_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                    GtkWidget *enable = gtk_check_button_new_with_label("Enable");
-                    gtk_widget_set_halign(enable, GTK_ALIGN_CENTER);
-                    gtk_widget_set_margin_top(enable, 4);
-                    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(enable), sw ? TRUE : FALSE);
-                    gtk_box_pack_start(GTK_BOX(channel_box), enable, FALSE, FALSE, 2);
-                    g_signal_connect(enable, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
-                    mixer_data.channels[i].mute_check = enable;
-                }
-            } else {
-                /* Playback controls: expose Mute checkbox (checked=muted) */
-                if (snd_mixer_selem_has_playback_switch(mixer_data.channels[i].elem)) {
-                    int sw = 1;
-                    snd_mixer_selem_get_playback_switch(mixer_data.channels[i].elem, SND_MIXER_SCHN_FRONT_LEFT, &sw);
-                    GtkWidget *mute = gtk_check_button_new_with_label("Mute");
-                    gtk_widget_set_halign(mute, GTK_ALIGN_CENTER);
-                    gtk_widget_set_margin_top(mute, 4);
-                    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(mute), sw ? FALSE : TRUE);
-                    gtk_box_pack_start(GTK_BOX(channel_box), mute, FALSE, FALSE, 2);
-                    g_signal_connect(mute, "toggled", G_CALLBACK(on_mute_toggled), &mixer_data.channels[i]);
-                    mixer_data.channels[i].mute_check = mute;
-                }
-            }
-            /* Removed padding label so the mute button sits directly under the slider */
-        }
-    }
+    /* Populate the mixer grid (shared with rebuild_mixer_for_card) */
+    if (mixer_data.num_channels == 0)
+        mixer_build_no_controls_message(&mixer_data, -1);
+    else
+        mixer_build_channels(&mixer_data);
 
     // Recording expander (collapsed by default to minimize vertical footprint)
     GtkWidget *rec_expander = gtk_expander_new("Recording");
@@ -1295,6 +1459,10 @@ int main(int argc, char *argv[]) {
     create_steam_panel(main_box);
 
     gtk_widget_show_all(window);
+    /* show_all reveals the switch row unconditionally; hide it again if this
+       card contributed no toggles or dropdowns. */
+    mixer_sync_switch_row(&mixer_data);
+
     gtk_main();
 
     /* Unregister GUI discovery listeners and shutdown GUI Bluetooth helpers before exiting.
@@ -1417,24 +1585,9 @@ static char *user_current_input_conf_path(void) {
 }
 
 /* Compose the content of ~/.config/jack-bridge/current_input.conf
- * Mirrors the format of /etc/asound.conf.d/current_input.conf and embeds
- * Bluetooth input definitions when bt_mac_opt is provided. */
-static char *compose_user_current_input_conf(const char *pcm_current, const char *bt_mac_opt) {
+ * Mirrors the format of /etc/asound.conf.d/current_input.conf. */
+static char *compose_user_current_input_conf(const char *pcm_current) {
     GString *s = g_string_new("");
-    if (bt_mac_opt && *bt_mac_opt) {
-        g_string_append_printf(s,
-            "pcm.input_bt_raw {\n"
-            "    type bluealsa\n"
-            "    device \"%s\"\n"
-            "    profile \"a2dp\"\n"
-            "}\n"
-            "\n"
-            "pcm.input_bt {\n"
-            "    type plug\n"
-            "    slave.pcm \"input_bt_raw\"\n"
-            "}\n"
-            "\n", bt_mac_opt);
-    }
     g_string_append_printf(s,
         "pcm.current_input {\n"
         "    type plug\n"
@@ -1444,14 +1597,14 @@ static char *compose_user_current_input_conf(const char *pcm_current, const char
 }
 
 /* Write ~/.config/jack-bridge/current_input.conf atomically */
-static int write_user_current_input_conf(const char *pcm_current, const char *bt_mac_opt) {
+static int write_user_current_input_conf(const char *pcm_current) {
     char *dir = user_config_dir();
     if (g_mkdir_with_parents(dir, 0755) != 0) {
         g_free(dir);
         return -1;
     }
     char *path = user_current_input_conf_path();
-    char *content = compose_user_current_input_conf(pcm_current, bt_mac_opt);
+    char *content = compose_user_current_input_conf(pcm_current);
     int rc = write_string_atomic(path, content);
     g_free(content);
     g_free(path);
@@ -1515,15 +1668,11 @@ static char *strip_managed_block(const char *src) {
     return g_string_free(out, FALSE);
 }
 
-/* Compose managed block for ~/.asoundrc (include-only pointing at per-user fragment) */
-static char *compose_managed_block(const char *pcm_current, const char *bt_mac_opt) {
-    /* Compose a unified managed block that includes both the per-user
-     * current_input and current_output fragments. This ensures ~/.asoundrc
-     * consistently points to both user-managed fragments so both recording
-     * and playback overrides take effect for non-JACK ALSA apps.
-     */
-    (void)pcm_current;
-    (void)bt_mac_opt;
+/* Compose the managed ~/.asoundrc block: includes for both the per-user
+ * current_input and current_output fragments, so recording and playback
+ * overrides both take effect for non-JACK ALSA apps. The fragment contents
+ * themselves are written elsewhere, so this block needs no parameters. */
+static char *compose_managed_block(void) {
     char *dir = user_config_dir();
     char *in_path = g_build_filename(dir, "current_input.conf", NULL);
     char *out_path = g_build_filename(dir, "current_output.conf", NULL);
@@ -1540,9 +1689,9 @@ static char *compose_managed_block(const char *pcm_current, const char *bt_mac_o
 }
 
 /* Write per-user current_input fragment and ensure ~/.asoundrc includes it; preserves user content outside the block */
-static int write_user_asoundrc_block(const char *pcm_current, const char *bt_mac_opt) {
+static int write_user_asoundrc_block(const char *pcm_current) {
     /* First write the per-user fragment that mirrors /etc/asound.conf.d/current_input.conf */
-    if (write_user_current_input_conf(pcm_current, bt_mac_opt) != 0) {
+    if (write_user_current_input_conf(pcm_current) != 0) {
         return -1;
     }
 
@@ -1550,7 +1699,7 @@ static int write_user_asoundrc_block(const char *pcm_current, const char *bt_mac
     char *path = user_asoundrc_path();
     char *orig = load_file_to_string(path);
     char *prefix = strip_managed_block(orig ? orig : "");
-    char *block = compose_managed_block(pcm_current, bt_mac_opt);
+    char *block = compose_managed_block();
     GString *final = g_string_new(prefix);
     if (final->len > 0 && final->str[final->len - 1] != '\n') g_string_append_c(final, '\n');
     g_string_append(final, "\n");
@@ -1598,7 +1747,7 @@ void ensure_user_asoundrc_bootstrap(void) {
     gchar *sys = read_current_input();
     const char *initial = sys ? sys : "input_card0";
     /* Write per-user fragment and include block */
-    write_user_asoundrc_block(initial, NULL);
+    write_user_asoundrc_block(initial);
     if (sys) g_free(sys);
 }
 
@@ -1708,112 +1857,206 @@ typedef struct {
     GtkWidget *rb_bt;
 } DevicesUI;
 
+/* ---- Shared Bluetooth "set as output" flow ---------------------------------
+ * Drives both the Devices panel's Bluetooth radio and the Bluetooth panel's
+ * "Set as Output" button, which previously carried near-identical copies of
+ * this logic that had already drifted apart (1s vs 2s waits, different wording).
+ *
+ * Everything runs off the GTK main loop rather than on it. The old code spawned
+ * the routing helper synchronously and then slept another 1-2s; since the helper
+ * itself waits up to 5s for its ports to appear, that froze the whole window for
+ * several seconds on every Bluetooth switch. Here the helper is spawned async and
+ * the ports are polled on a timeout, so the UI stays responsive throughout.
+ */
+typedef struct {
+    gchar *mac;
+    guint  poll_id;
+    int    polls_left;
+} BtRouteCtx;
+
+static gboolean bt_route_active = FALSE; /* serialise: one switch at a time */
+
+static void bt_route_ctx_free(BtRouteCtx *c) {
+    if (!c) return;
+    if (c->poll_id) g_source_remove(c->poll_id);
+    g_free(c->mac);
+    g_free(c);
+    bt_route_active = FALSE;
+}
+
+/* Put the Devices panel back on Internal after a failed Bluetooth switch.
+ * Selecting Internal deliberately fires its handler, which routes audio back to
+ * the internal card — leaving the radio on Bluetooth with no bluealsa ports
+ * would show a device that is not actually carrying audio. */
+static void bt_route_revert_to_internal(void) {
+    if (g_rb_bt) {
+        g_signal_handlers_block_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_bt), FALSE);
+        g_signal_handlers_unblock_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
+    }
+    if (g_rb_internal)
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
+}
+
+static void bt_route_fail(BtRouteCtx *c, const char *msg) {
+    show_bt_error_dialog(g_main_window ? GTK_WINDOW(g_main_window) : NULL, msg);
+    bt_route_revert_to_internal();
+    bt_route_ctx_free(c);
+}
+
+/* Poll for bluealsa:playback_* after the helper reports success. */
+static gboolean bt_route_poll_ports(gpointer data) {
+    BtRouteCtx *c = data;
+
+    if (bluealsa_ports_exist()) {
+        c->poll_id = 0;
+        /* Reflect the result in the Devices panel without re-entering routing */
+        if (g_rb_bt) {
+            g_signal_handlers_block_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_bt), TRUE);
+            g_signal_handlers_unblock_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
+        }
+        GtkWidget *d = gtk_message_dialog_new(
+            g_main_window ? GTK_WINDOW(g_main_window) : NULL,
+            GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
+            "Bluetooth output ready.\n\nDevice: %s\nPorts: bluealsa:playback_1/2",
+            c->mac ? c->mac : "(unknown)");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        bt_route_ctx_free(c);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (--c->polls_left <= 0) {
+        c->poll_id = 0;
+        bt_route_fail(c,
+            "Bluetooth ports failed to spawn.\n\nPossible causes:\n"
+            "• Device disconnected\n• BlueALSA daemon not running\n"
+            "• No active A2DP transport\n\nCheck /tmp/jack-route-select.log");
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void bt_route_child_exit(GPid pid, gint status, gpointer data) {
+    BtRouteCtx *c = data;
+    g_spawn_close_pid(pid);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        bt_route_fail(c,
+            "Failed to set Bluetooth output.\n\nThe routing helper reported an error.\n"
+            "Check that the device is connected and the BlueALSA daemon is running.");
+        return;
+    }
+
+    /* Helper exited cleanly; confirm the ports really came up (its own exit
+     * status does not distinguish a failed alsa_out spawn). Up to 5s. */
+    c->polls_left = 20;
+    c->poll_id = g_timeout_add(250, bt_route_poll_ports, c);
+}
+
+/* Begin switching playback to `mac`. Returns FALSE if it could not be started. */
+static gboolean bt_set_output_begin(const char *mac) {
+    if (bt_route_active) return TRUE; /* a switch is already in flight */
+    if (!mac || !*mac) return FALSE;
+
+    GtkWindow *parent = g_main_window ? GTK_WINDOW(g_main_window) : NULL;
+    if (!file_exists_readable(ROUTE_HELPER)) {
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+            GTK_BUTTONS_OK, "Routing helper missing: %s\nRun: sudo ./contrib/install.sh",
+            ROUTE_HELPER);
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        return FALSE;
+    }
+
+    /* argv form rather than a command line: no shell quoting to get wrong */
+    gchar *argv[] = { (gchar *)ROUTE_HELPER, (gchar *)"bluetooth", (gchar *)mac, NULL };
+    GPid pid = 0;
+    GError *err = NULL;
+    if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD,
+                       NULL, NULL, &pid, &err)) {
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+            GTK_BUTTONS_OK, "Failed to run the routing helper:\n%s",
+            err ? err->message : "unknown error");
+        gtk_dialog_run(GTK_DIALOG(d));
+        gtk_widget_destroy(d);
+        if (err) g_error_free(err);
+        return FALSE;
+    }
+
+    BtRouteCtx *c = g_new0(BtRouteCtx, 1);
+    c->mac = g_strdup(mac);
+    bt_route_active = TRUE;
+    g_child_watch_add(pid, bt_route_child_exit, c);
+    return TRUE;
+}
+
+/* Resolve the MAC to route to: the Bluetooth panel's selection if there is one,
+ * otherwise the device jack-route-select saved on the last successful session.
+ * Caller frees. */
+static gchar *bt_target_mac(void) {
+    gchar *mac = NULL;
+    if (g_bt_tree && GTK_IS_TREE_VIEW(g_bt_tree)) {
+        gchar *obj = tree_get_selected_obj(GTK_TREE_VIEW(g_bt_tree));
+        if (obj) {
+            mac = mac_from_bluez_object(obj);
+            g_free(obj);
+        }
+    }
+    if (!mac) mac = load_bluetooth_device_mac();
+    return mac;
+}
+
 static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     (void)user_data;
     if (!gtk_toggle_button_get_active(tb)) return;
-    const char *label = gtk_button_get_label(GTK_BUTTON(tb));
+
+    /* Dispatch on the target attached to the widget, not on its visible label:
+       renaming a button in the UI (or translating it) must not silently break
+       routing. create_devices_panel() sets this via g_object_set_data(). */
+    const char *label = g_object_get_data(G_OBJECT(tb), "route_target");
     if (!label) return;
 
     GtkWindow *parent = get_parent_window_from_widget(GTK_WIDGET(tb));
     gboolean ok = TRUE;
     gchar *mac = NULL;
 
-    if (g_strcmp0(label, "Internal") == 0) {
+    if (g_strcmp0(label, "internal") == 0) {
         ok = route_to_target_async("internal");
         /* Switch mixer to show detected internal card controls */
         int internal_card = get_internal_card_number();
-        rebuild_mixer_for_card(internal_card);
-    } else if (g_strcmp0(label, "USB") == 0) {
+        rebuild_mixer_for_card(internal_card, TRUE);
+    } else if (g_strcmp0(label, "usb") == 0) {
         ok = route_to_target_async("usb");
         /* Switch mixer to show USB card controls */
         int usb_card = get_usb_card_number();
         if (usb_card >= 0) {
-            rebuild_mixer_for_card(usb_card);
+            rebuild_mixer_for_card(usb_card, FALSE);
         }
-    } else if (g_strcmp0(label, "HDMI") == 0) {
+    } else if (g_strcmp0(label, "hdmi") == 0) {
         ok = route_to_target_async("hdmi");
         show_mixer_placeholder("Mixer controls are not available for HDMI output.\nUse your display or receiver to adjust the volume.");
-    } else if (g_strcmp0(label, "Bluetooth") == 0) {
+    } else if (g_strcmp0(label, "bluetooth") == 0) {
         show_mixer_placeholder("Mixer controls are not available for Bluetooth output.\nUse your Bluetooth device to adjust the volume.");
 
-        /* If BT bridge is already active, nothing more to do — avoid re-routing and
-         * the spurious "no device selected" dialog that fires if the tree is still empty
-         * (e.g. on GUI open when alsa_out was already running from a previous session). */
+        /* If the BT bridge is already up, nothing to do — re-routing here would
+         * also raise a spurious "no device selected" dialog when the tree has no
+         * selection yet (e.g. GUI opened while alsa_out was already running). */
         if (bluealsa_ports_exist()) return;
 
-        /* Get MAC from BT panel selection */
-        char *obj = NULL;
-        if (g_bt_tree && GTK_IS_TREE_VIEW(g_bt_tree)) {
-            obj = (char*)tree_get_selected_obj(GTK_TREE_VIEW(g_bt_tree));
-            if (obj) mac = mac_from_bluez_object(obj);
-            if (obj) g_free(obj);
-        }
-        
-        if (!mac) {
-            /* Fall back to the MAC saved by jack-route-select on the last successful BT session */
-            mac = load_bluetooth_device_mac();
-        }
-
+        mac = bt_target_mac();
         if (!mac) {
             GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
                                                   "No Bluetooth device selected.\n\nPlease:\n1. Expand 'BLUETOOTH' panel\n2. Connect a device\n3. Try again");
             gtk_dialog_run(GTK_DIALOG(d));
             gtk_widget_destroy(d);
-            /* Revert radio to previous selection (don't leave Bluetooth selected if it failed) */
-            g_signal_handlers_block_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
-            gtk_toggle_button_set_active(tb, FALSE);
-            if (g_rb_internal) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
-            g_signal_handlers_unblock_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
+            bt_route_revert_to_internal();
             return;
         }
-        
-        /* Call helper SYNCHRONOUSLY so we can verify result */
-        gchar *cmd = g_strdup_printf("%s bluetooth %s", ROUTE_HELPER, mac);
-        gint status = 0;
-        GError *err = NULL;
-        ok = g_spawn_command_line_sync(cmd, NULL, NULL, &status, &err);
-        g_free(cmd);
-        
-        if (!ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                                  "Failed to set Bluetooth output.\n\nError: %s\n\nCheck that device is connected and BlueALSA daemon is running.",
-                                                  err ? err->message : "routing helper failed");
-            gtk_dialog_run(GTK_DIALOG(d));
-            gtk_widget_destroy(d);
-            if (err) g_error_free(err);
-            /* Revert radio to Internal */
-            g_signal_handlers_block_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
-            gtk_toggle_button_set_active(tb, FALSE);
-            if (g_rb_internal) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
-            g_signal_handlers_unblock_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
-            g_free(mac);
-            return;
-        }
-        
-        /* Give ports time to spawn */
-        g_usleep(1000000); /* 1 second */
-        
-        /* Verify ports exist */
-        if (!bluealsa_ports_exist()) {
-            GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                                  "Bluetooth ports failed to spawn.\n\nPossible causes:\n• Device disconnected\n• BlueALSA daemon not running\n• No A2DP transport available\n\nCheck /tmp/jack-route-select.log");
-            gtk_dialog_run(GTK_DIALOG(d));
-            gtk_widget_destroy(d);
-            /* Revert radio to Internal */
-            g_signal_handlers_block_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
-            gtk_toggle_button_set_active(tb, FALSE);
-            if (g_rb_internal) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_internal), TRUE);
-            g_signal_handlers_unblock_by_func(tb, G_CALLBACK(on_device_radio_toggled), NULL);
-            g_free(mac);
-            return;
-        }
-        
-        /* Success! Show confirmation */
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
-                                              GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                                              "Bluetooth output ready!\n\nDevice: %s\nPorts: bluealsa:playback_1/2\n\nAudio will play through Bluetooth.", mac);
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
+
+        if (!bt_set_output_begin(mac))
+            bt_route_revert_to_internal();
         g_free(mac);
         return;
     } else {
@@ -1834,39 +2077,38 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
  * ====================================================================== */
 
 static GPid      bridge_pid          = 0;
-static guint     bridge_timer_id     = 0;
 static GtkWidget *bridge_status_lbl  = NULL;
 static GtkWidget *bridge_toggle_btn  = NULL;
 
-static gboolean bridge_poll_timer(gpointer user_data) {
-    (void)user_data;
-    if (bridge_pid == 0) return FALSE;
+static void bridge_set_inactive_ui(void) {
+    if (bridge_status_lbl)
+        gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: inactive");
+    if (bridge_toggle_btn)
+        gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Enable Steam Mode");
+}
 
-    int wstatus;
-    pid_t r = waitpid((pid_t)bridge_pid, &wstatus, WNOHANG);
-    if (r == (pid_t)bridge_pid || r == -1) {
-        g_spawn_close_pid(bridge_pid);
-        bridge_pid      = 0;
-        bridge_timer_id = 0;
-        if (bridge_status_lbl)
-            gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: inactive");
-        if (bridge_toggle_btn)
-            gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Enable Steam Mode");
-        return FALSE;
+/* Called on the main loop when pulse-jack-bridge exits, however it exited.
+ * This replaces a 1Hz waitpid(WNOHANG) timeout that polled for the whole time
+ * the bridge was up — needless wakeups in a stack whose routing daemon is
+ * explicitly event-driven and idle at zero CPU. */
+static void on_bridge_child_exit(GPid pid, gint status, gpointer user_data) {
+    (void)status;
+    (void)user_data;
+    g_spawn_close_pid(pid);
+    if (pid == bridge_pid) {
+        bridge_pid = 0;
+        bridge_set_inactive_ui();
     }
-    return TRUE;
 }
 
 static void on_bridge_toggle_clicked(GtkButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (bridge_pid != 0) {
+        /* Ask it to exit; the child watch reaps it and resets the UI. Do not
+           g_spawn_close_pid() here — that would drop the watch's handle. */
         kill((pid_t)bridge_pid, SIGTERM);
-        g_spawn_close_pid(bridge_pid);
-        bridge_pid = 0;
-        if (bridge_timer_id) { g_source_remove(bridge_timer_id); bridge_timer_id = 0; }
-        gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: inactive");
-        gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Enable Steam Mode");
+        bridge_set_inactive_ui();
         return;
     }
 
@@ -1905,7 +2147,7 @@ static void on_bridge_toggle_clicked(GtkButton *btn, gpointer user_data) {
 
     gtk_label_set_text(GTK_LABEL(bridge_status_lbl), "Bridge: active (JACK connected)");
     gtk_button_set_label(GTK_BUTTON(bridge_toggle_btn), "Disable Steam Mode");
-    bridge_timer_id = g_timeout_add(1000, bridge_poll_timer, NULL);
+    g_child_watch_add(bridge_pid, on_bridge_child_exit, NULL);
 }
 
 static void create_steam_panel(GtkWidget *main_box) {
@@ -1963,10 +2205,17 @@ static void create_devices_panel(GtkWidget *main_box) {
     ui->rb_bt = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(ui->rb_internal), "Bluetooth");
     gtk_box_pack_start(GTK_BOX(row), ui->rb_bt, FALSE, FALSE, 0);
 
-    /* Phase 3: Store global references for state synchronization from Bluetooth panel */
+    /* Tag each radio with the jack-route-select target it selects. The handler
+       dispatches on this rather than the button label, so the visible text can
+       change freely without affecting routing. */
+    g_object_set_data(G_OBJECT(ui->rb_internal), "route_target", (gpointer)"internal");
+    g_object_set_data(G_OBJECT(ui->rb_usb),      "route_target", (gpointer)"usb");
+    g_object_set_data(G_OBJECT(ui->rb_hdmi),     "route_target", (gpointer)"hdmi");
+    g_object_set_data(G_OBJECT(ui->rb_bt),       "route_target", (gpointer)"bluetooth");
+
+    /* Expose the two the Bluetooth panel drives (select BT on success, fall
+       back to Internal on failure) */
     g_rb_internal = ui->rb_internal;
-    g_rb_usb = ui->rb_usb;
-    g_rb_hdmi = ui->rb_hdmi;
     g_rb_bt = ui->rb_bt;
 
     /* Presence-based sensitivity (no hardcoding) */
@@ -2048,7 +2297,7 @@ static void create_devices_panel(GtkWidget *main_box) {
      * on_device_radio_toggled() is never fired during init. */
     if (init_dev_type == 1) {
         int usb_card = get_usb_card_number();
-        if (usb_card >= 0) rebuild_mixer_for_card(usb_card);
+        if (usb_card >= 0) rebuild_mixer_for_card(usb_card, FALSE);
     } else if (init_dev_type == 2) {
         show_mixer_placeholder("Mixer controls are not available for HDMI output.\nUse your display or receiver to adjust the volume.");
     } else if (init_dev_type == 3) {
@@ -2091,132 +2340,54 @@ static char *mac_from_bluez_object(const char *s) {
 }
 
 
-/* Phase 3: Idle callback to sync Devices panel state after Bluetooth routing completes */
-static gboolean sync_devices_panel_to_bluetooth_idle(gpointer user_data) {
-    (void)user_data;
-    /* Block the signal temporarily to prevent recursive routing calls */
-    if (g_rb_bt && GTK_IS_TOGGLE_BUTTON(g_rb_bt)) {
-        g_signal_handlers_block_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_rb_bt), TRUE);
-        g_signal_handlers_unblock_by_func(g_rb_bt, G_CALLBACK(on_device_radio_toggled), NULL);
-    }
-    return G_SOURCE_REMOVE;
-}
-
 /* Helper: check if bluealsa JACK ports exist (returns TRUE if found) */
 static gboolean bluealsa_ports_exist(void) {
     gchar *out = NULL;
     gint status = 0;
-    
-    if (!g_spawn_command_line_sync("jack_lsp", &out, NULL, &status, NULL)) {
+
+    if (!g_spawn_command_line_sync("jack_lsp", &out, NULL, &status, NULL))
         return FALSE;
-    }
-    
+
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        if (out) g_free(out);
+        g_free(out);
         return FALSE;
     }
-    
-    gboolean found = (out && (strstr(out, "bluealsa:playback_1") != NULL));
-    if (out) g_free(out);
+
+    gboolean found = (out && strstr(out, "bluealsa:playback_1") != NULL);
+    g_free(out);
     return found;
 }
 
-/* Button handler: set selected Bluetooth device as current OUTPUT (routes playback) */
+/* Button handler: set the selected Bluetooth device as the current OUTPUT.
+ * Shares bt_set_output_begin() with the Devices panel's Bluetooth radio, which
+ * handles the spawn, the port polling, the result dialogs and the panel sync. */
 static void on_bt_set_output_clicked(GtkButton *b, gpointer user_data) {
     (void)user_data;
     GtkWidget *btnw = GTK_WIDGET(b);
+    GtkWindow *parent = get_parent_window_from_widget(btnw);
     GtkTreeView *tv = GTK_TREE_VIEW(g_object_get_data(G_OBJECT(btnw), "device_tree"));
     if (!tv) return;
 
-    /* Get selected object path */
-    GtkTreeSelection *sel = gtk_tree_view_get_selection(tv);
-    GtkTreeIter iter;
-    GtkTreeModel *model;
-    if (!gtk_tree_selection_get_selected(sel, &model, &iter)) {
-        GtkWindow *parent = get_parent_window_from_widget(btnw);
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "No device selected");
+    gchar *obj = tree_get_selected_obj(tv);
+    if (!obj) {
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                                              GTK_BUTTONS_OK, "No device selected");
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
         return;
     }
 
-    gchar *obj = NULL;
-    gtk_tree_model_get(model, &iter, 1, &obj, -1);
-    if (!obj) return;
-
-    /* Derive MAC */
-    char *mac = mac_from_bluez_object(obj);
+    gchar *mac = mac_from_bluez_object(obj);
     g_free(obj);
-
     if (!mac) {
-        GtkWindow *parent = get_parent_window_from_widget(btnw);
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR,
+                                              GTK_BUTTONS_OK,
                                               "Failed to derive Bluetooth MAC from selection.");
         gtk_dialog_run(GTK_DIALOG(d));
         gtk_widget_destroy(d);
         return;
     }
 
-    GtkWindow *parent = get_parent_window_from_widget(btnw);
-    
-    /* Call routing helper SYNCHRONOUSLY so we can verify result */
-    if (!file_exists_readable(ROUTE_HELPER)) {
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Routing helper missing: %s\nRun: sudo ./contrib/install.sh", ROUTE_HELPER);
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
-        g_free(mac);
-        return;
-    }
-    
-    gchar *cmd = g_strdup_printf("%s bluetooth %s", ROUTE_HELPER, mac);
-    gchar *stdout_data = NULL;
-    gchar *stderr_data = NULL;
-    gint exit_status = 0;
-    GError *err = NULL;
-    
-    gboolean spawn_ok = g_spawn_command_line_sync(cmd, &stdout_data, &stderr_data, &exit_status, &err);
-    g_free(cmd);
-    
-    if (!spawn_ok || !WIFEXITED(exit_status) || WEXITSTATUS(exit_status) != 0) {
-        /* Helper failed to run or exited with error */
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Failed to set Bluetooth output.\n\nHelper error: %s\n\nCheck that:\n• Device is connected\n• BlueALSA daemon is running\n• You are in 'audio' and 'bluetooth' groups",
-                                              err ? err->message : (stderr_data ? stderr_data : "unknown"));
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
-        if (err) g_error_free(err);
-        if (stdout_data) g_free(stdout_data);
-        if (stderr_data) g_free(stderr_data);
-        g_free(mac);
-        return;
-    }
-    
-    if (stdout_data) g_free(stdout_data);
-    if (stderr_data) g_free(stderr_data);
-    
-    /* Give ports a moment to appear (helper spawns alsa_out in background) */
-    g_usleep(2000000); /* 2 seconds */
-    
-    /* Verify bluealsa ports actually appeared */
-    if (!bluealsa_ports_exist()) {
-        GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                                              "Bluetooth ports failed to spawn.\n\nPossible causes:\n• Device disconnected during setup\n• BlueALSA daemon not running\n• No active A2DP transport\n\nCheck /tmp/jack-route-select.log for details");
-        gtk_dialog_run(GTK_DIALOG(d));
-        gtk_widget_destroy(d);
-        g_free(mac);
-        return;
-    }
-    
-    /* Success! Update Devices panel and show confirmation */
-    g_idle_add(sync_devices_panel_to_bluetooth_idle, NULL);
-    
-    GtkWidget *d = gtk_message_dialog_new(parent, GTK_DIALOG_DESTROY_WITH_PARENT,
-                                          GTK_MESSAGE_INFO, GTK_BUTTONS_OK,
-                                          "Bluetooth output set to %s\n\nPorts: bluealsa:playback_1/2\nAudio will play through Bluetooth device.", mac);
-    gtk_dialog_run(GTK_DIALOG(d));
-    gtk_widget_destroy(d);
+    bt_set_output_begin(mac);
     g_free(mac);
 }
