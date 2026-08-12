@@ -11,9 +11,11 @@
  * Notes:
  *  - device_path_or_mac accepts either a BlueZ object path (e.g. /org/bluez/hci0/dev_XX_XX_...)
  *    or a colon-separated MAC string (AA:BB:CC:DD:EE:FF). When a MAC is provided we
- *    convert it to the object path assuming hci0 adapter.
- *  - These helpers are synchronous and return 0 on success, -1 on failure.
- *  - Integrate with your GUI main loop and present user-visible dialogs on errors.
+ *    convert it to the object path via the default adapter.
+ *  - Pair/Connect/Trust are asynchronous: they return 0 once the D-Bus call has
+ *    been dispatched, and report the real outcome through their GuiBtOpCb, which
+ *    is always invoked on the GTK main loop. Everything else here is synchronous
+ *    and returns 0 on success, -1 on failure.
  */
 
 #include <stdio.h>
@@ -124,7 +126,7 @@ static gchar *get_default_adapter_path(void) {
         if (err) { g_error_free(err); }
         return NULL;
     }
-    g_message("DBG: get_default_adapter_path: calling GetManagedObjects with type '(a{oa{sa{sv}}})'");
+    g_debug("get_default_adapter_path: calling GetManagedObjects with type '(a{oa{sa{sv}}})'");
     GVariant *managed = g_dbus_connection_call_sync(
         gui_system_bus,
         "org.bluez",
@@ -193,7 +195,7 @@ static int ensure_adapter_powered(const char *adapter_path) {
     GError *err = NULL;
 
     /* Get current Powered state */
-    g_message("DBG: ensure_adapter_powered Get Powered on %s", adapter_path);
+    g_debug("ensure_adapter_powered Get Powered on %s", adapter_path);
     GVariant *res = g_dbus_connection_call_sync(
         gui_system_bus,
         "org.bluez",
@@ -228,7 +230,7 @@ static int ensure_adapter_powered(const char *adapter_path) {
      * Use a plain boolean variant for the 'v' slot to avoid double-boxing on
      * some GLib/BlueZ combinations that can cause "invalid signature". */
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", g_variant_new_boolean(TRUE));
-    g_message("DBG: ensure_adapter_powered Set Powered=true on %s (params type=%s)", adapter_path, g_variant_get_type_string(params));
+    g_debug("ensure_adapter_powered Set Powered=true on %s (params type=%s)", adapter_path, g_variant_get_type_string(params));
     res = g_dbus_connection_call_sync(
         gui_system_bus,
         "org.bluez",
@@ -274,7 +276,7 @@ int gui_bt_set_adapter_discoverable(gboolean discoverable) {
     /* Set Discoverable property */
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Adapter1", "Discoverable",
                                      g_variant_new_boolean(discoverable ? TRUE : FALSE));
-    g_message("DBG: gui_bt_set_adapter_discoverable: Setting Discoverable=%d on %s",
+    g_debug("gui_bt_set_adapter_discoverable: Setting Discoverable=%d on %s",
               discoverable ? 1 : 0, adapter);
     
     GVariant *res = g_dbus_connection_call_sync(
@@ -305,7 +307,7 @@ int gui_bt_set_adapter_discoverable(gboolean discoverable) {
      * This prevents devices from pairing even if they know the MAC address */
     params = g_variant_new("(ssv)", "org.bluez.Adapter1", "Pairable",
                           g_variant_new_boolean(discoverable ? TRUE : FALSE));
-    g_message("DBG: gui_bt_set_adapter_discoverable: Setting Pairable=%d on %s",
+    g_debug("gui_bt_set_adapter_discoverable: Setting Pairable=%d on %s",
               discoverable ? 1 : 0, adapter);
     
     res = g_dbus_connection_call_sync(
@@ -349,7 +351,7 @@ gboolean gui_bt_get_adapter_discoverable(void) {
     }
     
     /* Get current Discoverable state */
-    g_message("DBG: gui_bt_get_adapter_discoverable: Get Discoverable on %s", adapter);
+    g_debug("gui_bt_get_adapter_discoverable: Get Discoverable on %s", adapter);
     GVariant *res = g_dbus_connection_call_sync(
         gui_system_bus,
         "org.bluez",
@@ -383,18 +385,6 @@ gboolean gui_bt_get_adapter_discoverable(void) {
     g_free(adapter);
     
     return discoverable;
-}
-
-/* Apply a discovery filter focused on classic audio devices (BR/EDR)
- *
- * Disabled: constructing and passing container variants here has caused
- * GVariant type/refcount corruption on some GLib versions (see g_variant_
- * assertions and aborts). StartDiscovery works without an explicit filter,
- * so skip SetDiscoveryFilter to avoid runtime crashes.
- */
-static int set_discovery_filter_bredr(const char *adapter_path) {
-    (void)adapter_path;
-    return 0;
 }
 
 /* Initialize GUI bluetooth panel. Call from main GUI init.
@@ -464,10 +454,9 @@ int gui_bt_start_discovery(const char *adapter_path) {
         return -1;
     }
 
-    /* Prefer BR/EDR for classic audio devices; best-effort */
-    if (set_discovery_filter_bredr(adapter) != 0) {
-        fprintf(stderr, "gui_bt_start_discovery: SetDiscoveryFilter failed on %s (continuing)\n", adapter);
-    }
+    /* No SetDiscoveryFilter call: building the container variant it needs has
+     * triggered GVariant refcount assertions on some GLib versions, and plain
+     * StartDiscovery finds classic audio devices fine without it. */
 
     /* Force a FRESH discovery session. If the adapter is already Discovering
      * (left over from a previous run, or a previous no-op StartDiscovery), BlueZ
@@ -571,133 +560,6 @@ int gui_bt_stop_discovery(const char *adapter_path) {
     refresh_adapter_state();
 
     g_free(adapter);
-    return 0;
-}
-
-/* Pair with device. device_path_or_mac can be object path or MAC. */
-int gui_bt_pair_device(const char *device_path_or_mac) {
-    GError *err = NULL;
-    if (!ensure_system_bus(&err)) {
-        fprintf(stderr, "gui_bt_pair_device: no system bus: %s\n", err ? err->message : "(unknown)");
-        if (err) g_error_free(err);
-        return -1;
-    }
-    gchar *device_path = NULL;
-    if (device_path_or_mac && strchr(device_path_or_mac, '/')) {
-        device_path = g_strdup(device_path_or_mac);
-    } else {
-        device_path = mac_to_object_path(device_path_or_mac);
-    }
-    if (!device_path) return -1;
-
-    GVariant *res = g_dbus_connection_call_sync(gui_system_bus,
-                                               "org.bluez",
-                                               device_path,
-                                               "org.bluez.Device1",
-                                               "Pair",
-                                               NULL,
-                                               NULL,
-                                               G_DBUS_CALL_FLAGS_NONE,
-                                               20000,
-                                               NULL,
-                                               &err);
-    if (!res) {
-        fprintf(stderr, "gui_bt_pair_device: Pair failed for %s: %s\n", device_path, err ? err->message : "(unknown)");
-        if (err) g_error_free(err);
-        g_free(device_path);
-        return -1;
-    }
-    g_variant_unref(res);
-    g_free(device_path);
-    return 0;
-}
-
-/* Connect device (Device1.Connect). */
-int gui_bt_connect_device(const char *device_path_or_mac) {
-    GError *err = NULL;
-    if (!ensure_system_bus(&err)) {
-        fprintf(stderr, "gui_bt_connect_device: no system bus: %s\n", err ? err->message : "(unknown)");
-        if (err) g_error_free(err);
-        return -1;
-    }
-    gchar *device_path = NULL;
-    if (device_path_or_mac && strchr(device_path_or_mac, '/')) {
-        device_path = g_strdup(device_path_or_mac);
-    } else {
-        device_path = mac_to_object_path(device_path_or_mac);
-    }
-    if (!device_path) return -1;
-
-    GVariant *res = g_dbus_connection_call_sync(gui_system_bus,
-                                               "org.bluez",
-                                               device_path,
-                                               "org.bluez.Device1",
-                                               "Connect",
-                                               NULL,
-                                               NULL,
-                                               G_DBUS_CALL_FLAGS_NONE,
-                                               15000,
-                                               NULL,
-                                               &err);
-    if (!res) {
-        fprintf(stderr, "gui_bt_connect_device: Connect failed for %s: %s\n", device_path, err ? err->message : "(unknown)");
-        if (err) g_error_free(err);
-        g_free(device_path);
-        return -1;
-    }
-    g_variant_unref(res);
-    g_free(device_path);
-    return 0;
-}
-
-/* Set device Trusted property via org.freedesktop.DBus.Properties.Set on org.bluez.Device1 */
-int gui_bt_trust_device(const char *device_path_or_mac, int trusted) {
-    GError *err = NULL;
-    if (!ensure_system_bus(&err)) {
-        fprintf(stderr, "gui_bt_trust_device: no system bus: %s\n", err ? err->message : "(unknown)");
-        if (err) g_error_free(err);
-        return -1;
-    }
-    gchar *device_path = NULL;
-    if (device_path_or_mac && strchr(device_path_or_mac, '/')) {
-        device_path = g_strdup(device_path_or_mac);
-    } else {
-        device_path = mac_to_object_path(device_path_or_mac);
-    }
-    if (!device_path) return -1;
-
-    /* Build params: pass boolean directly (GLib will box where required) to avoid
-     * invalid-signature on some systems. */
-    GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", g_variant_new_boolean(trusted ? TRUE : FALSE));
-    /* Debug: print param type & contents for diagnosis */
-    {
-        gchar *dump = g_variant_print(params, TRUE);
-        g_message("DBG: gui_bt_trust_device: params type=%s value=%s", g_variant_get_type_string(params), dump);
-        g_free(dump);
-    }
- 
-    /* Properties.Set must be invoked on the owner of the object (org.bluez).
-       Call the org.freedesktop.DBus.Properties Set method on the device object
-       with destination "org.bluez". */
-    GVariant *res = g_dbus_connection_call_sync(gui_system_bus,
-                                               "org.bluez",
-                                               device_path,
-                                               "org.freedesktop.DBus.Properties",
-                                               "Set",
-                                               params,
-                                               NULL,
-                                               G_DBUS_CALL_FLAGS_NONE,
-                                               15000,
-                                               NULL,
-                                               &err);
-    if (!res) {
-        fprintf(stderr, "gui_bt_trust_device: Properties.Set failed for %s: %s\n", device_path, err ? err->message : "(unknown)");
-        if (err) g_error_free(err);
-        g_free(device_path);
-        return -1;
-    }
-    g_variant_unref(res);
-    g_free(device_path);
     return 0;
 }
 
@@ -1003,7 +865,7 @@ int gui_bt_trust_device_async(const char *device_path_or_mac, gboolean trusted, 
     GVariant *params = g_variant_new("(ssv)", "org.bluez.Device1", "Trusted", g_variant_new_boolean(trusted ? TRUE : FALSE));
     {
         gchar *dump = g_variant_print(params, TRUE);
-        g_message("DBG: gui_bt_trust_device_async: params type=%s value=%s", g_variant_get_type_string(params), dump);
+        g_debug("gui_bt_trust_device_async: params type=%s value=%s", g_variant_get_type_string(params), dump);
         g_free(dump);
     }
  
@@ -1121,31 +983,10 @@ int bluez_remove_device(const char *device_path_or_mac) {
     return 0;
 }
 
-/* Toggle routing for a device (A2DP sink/source or SCO).
-   Note: autobridge has been removed. Routing is handled via JACK by
-   /usr/local/lib/jack-bridge/jack-route-select and preferences persist in
-   /etc/jack-bridge/devices.conf (e.g., PREFERRED_OUTPUT, BLUETOOTH_DEVICE).
-   'route' tokens are presently unused here; kept as a placeholder.
-*/
-int gui_bt_set_route(const char *mac, const char *route, int enabled) {
-    if (!mac || !route) return -1;
-    fprintf(stderr, "gui_bt_set_route: mac=%s route=%s enabled=%d (placeholder - implement persistence or IPC)\n",
-            mac, route, enabled);
-    return 0;
-}
-/* GUI-side helpers to let the GUI expose a GtkTreeView's store for gui_bt to update.
-   These functions are minimal and intended for use by the GUI (mxeq.c). They
-   will be called from the main thread. */
-
-int gui_bt_attach_device_store_widget(GtkWidget *treeview) {
-    if (!GTK_IS_TREE_VIEW(treeview)) return -1;
-    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(treeview));
-    if (!model) return -1;
-    g_object_set_data(G_OBJECT(treeview), "gui_bt_attached", GINT_TO_POINTER(1));
-    return 0;
-}
-
-/* New explicit binder used by GUI to set the device list store. Keeps strong refs. */
+/* Bind the GUI's device list store so gui_bt can update it from the main thread.
+ * Routing itself is not handled here: it goes through JACK via
+ * /usr/local/lib/jack-bridge/jack-route-select, with preferences persisted in
+ * devices.conf (PREFERRED_OUTPUT, BLUETOOTH_DEVICE). Keeps strong refs. */
 int gui_bt_set_device_store_widget(GtkWidget *treeview, GtkListStore *store) {
     if (!GTK_IS_TREE_VIEW(treeview) || !GTK_IS_LIST_STORE(store)) return -1;
 
@@ -1225,7 +1066,6 @@ static guint bluez_adapter_props_changed_sub = 0;
 static GtkWidget *s_scan_btn = NULL;
 static GtkWidget *s_stop_btn = NULL;
 static gboolean s_adapter_discovering = FALSE;
-static gboolean s_adapter_powered = FALSE;
 
 /* Handler invoked on the GLib main loop to add a device */
 static gboolean __gui_bt_add_device_idle(gpointer data) {
@@ -1294,17 +1134,13 @@ static gboolean __gui_bt_refresh_selection_idle(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-/* refresh_selection_buttons removed — no longer used. The GUI now triggers
-   selection-driven updates via the idle callback __gui_bt_refresh_selection_idle
-   directly where needed. */
-
 /* Query Adapter1 state (Powered, Discovering) and update globals */
 static void refresh_adapter_state(void) {
     GError *err = NULL;
     gchar *adapter = get_default_adapter_path();
     if (!adapter) return;
 
-    g_message("DBG: refresh_adapter_state GetAll on %s", adapter);
+    g_debug("refresh_adapter_state GetAll on %s", adapter);
     GVariant *res = g_dbus_connection_call_sync(
         gui_system_bus,
         "org.bluez",
@@ -1341,14 +1177,10 @@ static void refresh_adapter_state(void) {
     g_variant_unref(res);
     g_free(adapter);
  
-    g_message("DBG: refresh_adapter_state Powered=%d Discovering=%d", powered ? 1 : 0, discovering ? 1 : 0);
-    s_adapter_powered = powered;
+    g_debug("refresh_adapter_state Powered=%d Discovering=%d", powered ? 1 : 0, discovering ? 1 : 0);
     s_adapter_discovering = discovering;
     g_idle_add(__gui_bt_update_scan_buttons_idle, NULL);
 }
-
-/* Duplicate Device1 PropertiesChanged handler removed (handled by the primary
-   bluez_device_properties_changed_cb defined earlier). */
 
 /* Adapter1 PropertiesChanged handler: refresh scan/stop buttons */
 static void bluez_adapter_properties_changed_cb(GDBusConnection *c, const gchar *sender, const gchar *object_path,
@@ -1533,14 +1365,16 @@ static void bluez_interfaces_added_for_gui(GDBusConnection *connection,
 {
     (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)user_data; (void)signal_name;
 
-    /* Expect (o a{sa{sv}}); borrow the path pointer from parameters */
+    /* Expect (o a{sa{sv}}). Note the '&' on the object path: plain "o" would
+     * hand back a newly allocated copy we would have to free, whereas "&o"
+     * borrows the string from 'parameters', which outlives this callback. */
     const gchar *path = NULL;
     GVariantIter *interfaces = NULL;
 
     if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(oa{sa{sv}})")))
         return;
 
-    g_variant_get(parameters, "(oa{sa{sv}})", &path, &interfaces);
+    g_variant_get(parameters, "(&oa{sa{sv}})", &path, &interfaces);
     if (interfaces) g_variant_iter_free(interfaces);
     if (!path) return;
 
@@ -1550,9 +1384,8 @@ static void bluez_interfaces_added_for_gui(GDBusConnection *connection,
 
     char **pair = g_new0(char*, 3);
     pair[0] = display;
-    pair[1] = g_strdup(path);
+    pair[1] = g_strdup(path); /* idle handler outlives 'parameters', so copy */
     g_idle_add(__gui_bt_add_device_idle, pair);
-    /* Do NOT free 'path'; it is borrowed from parameters */
 }
 
 /* D-Bus InterfacesRemoved callback for BlueZ (ObjectManager) */
@@ -1567,12 +1400,12 @@ static void bluez_interfaces_removed_for_gui(GDBusConnection *connection,
     (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)user_data; (void)signal_name;
 
     /* Prefer (oas) signature */
-    const gchar *path = NULL;     /* borrowed if coming from "(oas)" */
+    const gchar *path = NULL;     /* borrowed from 'parameters' via "&o" */
     char *owned_path = NULL;      /* duplicated string we can pass to idle handler */
     GVariantIter *ifaces = NULL;
 
     if (g_variant_is_of_type(parameters, G_VARIANT_TYPE("(oas)"))) {
-        g_variant_get(parameters, "(oas)", &path, &ifaces);
+        g_variant_get(parameters, "(&oas)", &path, &ifaces);
         if (path) owned_path = g_strdup(path);
         if (ifaces) g_variant_iter_free(ifaces);
     } else if (g_variant_n_children(parameters) > 0) {
@@ -1733,6 +1566,18 @@ int gui_bt_register_discovery_listeners(void) {
 
 /* Unregister listeners */
 int gui_bt_unregister_discovery_listeners(void) {
+    /* gui_bt_shutdown() calls this before dropping the bus, and main() calls it
+     * again afterwards. Guard the connection so the second call cannot pass NULL
+     * to g_dbus_connection_signal_unsubscribe(). */
+    if (!gui_system_bus) {
+        bluez_interfaces_added_sub = 0;
+        bluez_interfaces_removed_sub = 0;
+        bluez_device_props_changed_sub = 0;
+        bluez_adapter_props_changed_sub = 0;
+        s_listeners_registered = FALSE;
+        return 0;
+    }
+
     if (bluez_interfaces_added_sub) {
         g_dbus_connection_signal_unsubscribe(gui_system_bus, bluez_interfaces_added_sub);
         bluez_interfaces_added_sub = 0;

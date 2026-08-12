@@ -37,6 +37,10 @@
 #define PA_PROTOCOL_VERSION  35u         /* server max; client negotiates down */
 #define PA_CONTROL_CHANNEL   0xFFFFFFFFu /* control vs audio data channel */
 #define PA_COOKIE_LEN        256
+/* Largest packet we will accept from a client. Matches PulseAudio's own
+ * FRAME_SIZE_MAX_ALLOW (pulsecore/pstream.c), so no legitimate client can
+ * exceed it — real PA would have rejected the packet first. */
+#define PA_MAX_PACKET_LEN    (16u * 1024u * 1024u)
 
 /* Command numbers from PA 14.2 enum (counted from 0) */
 #define PA_CMD_ERROR                    0u
@@ -1037,6 +1041,18 @@ static int read_client(Client *cl) {
             cl->payload_len = ntohl(h[0]);
             cl->channel     = ntohl(h[1]);
             cl->payload_pos = 0;
+
+            /* payload_len is fully client-controlled, so bound it before it
+             * reaches malloc(). Without this a malformed header can request a
+             * multi-gigabyte allocation, and payload_len == UINT32_MAX would
+             * wrap "payload_len + 1" below to 0 — producing a zero-sized
+             * buffer that the payload read then overflows. */
+            if (cl->payload_len > PA_MAX_PACKET_LEN) {
+                fprintf(stderr, "pulse-jack-bridge: rejecting oversized packet "
+                                "(%u bytes, max %u); dropping client\n",
+                        cl->payload_len, PA_MAX_PACKET_LEN);
+                return -1;
+            }
 
             /* Grow payload buffer if needed */
             if (cl->payload_len > cl->payload_cap) {
