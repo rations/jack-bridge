@@ -72,13 +72,13 @@
 
 ### Quick Install - During installation when prompted, select YES to Enable realtime priorities
 
-Download `jack-bridge-20260620.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260812.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260620
+tar -xf jack-bridge-20260812
 ```
 ```bash
-cd jack-bridge-20260620
+cd jack-bridge-20260812
 ```
 ```bash
 sudo sh contrib/install.sh
@@ -183,7 +183,6 @@ steam &               # launch Steam
 ### Architecture
 
 jack-bridge integrates BlueZ (Bluetooth stack) and BlueALSA (audio bridge) into the ALSA+JACK pipeline:
-
 Bluetooth Device ←→ bluetoothd ←→ bluealsad ←→ ALSA bluealsa plugin ←→ alsa_out ←→ JACK. Connections visible using jack-graph.
 
 ### Requirements
