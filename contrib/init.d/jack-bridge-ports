@@ -5,9 +5,11 @@
 # Required-Stop:     jackd-rt
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
-# Short-Description: Spawn persistent JACK bridge ports (system:capture)
-# Description:       Creates permanent alsa_in bridge client for system:capture at boot.
-#                    USB/HDMI/Bluetooth ports are spawned on-demand by jack-route-select when selected.
+# Short-Description: Restore the saved JACK output device at boot
+# Description:       Re-runs jack-route-select for the PREFERRED_OUTPUT saved at
+#                    last shutdown, so a USB or HDMI selection survives a reboot
+#                    without the user opening the GUI. system:capture comes from
+#                    jackd in duplex mode; Bluetooth is spawned on demand only.
 ### END INIT INFO
 
 . /lib/lsb/init-functions
@@ -84,7 +86,7 @@ detect_card_device() {
 }
 
 start() {
-    log_daemon_msg "Starting jack-bridge persistent ports" "jack-bridge-ports"
+    log_daemon_msg "Restoring saved JACK output device" "jack-bridge-ports"
     
     # Check if already running
     if pgrep -f "alsa_out -j usb_out" >/dev/null 2>&1; then
@@ -106,15 +108,23 @@ start() {
     # [ -lt ] cannot compare decimals, and the previous 0.5-step counter made
     # every boot print "[: Illegal number: 0.5" and leave the loop after a
     # single pass instead of the four it was meant to make.
+    #
+    # The probe MUST run as $USERNAME. jackd-rt starts the server under
+    # `su -l $USERNAME`, so its socket lives in that user's runtime directory
+    # and a probe run as root always answers "Cannot connect to server socket"
+    # however healthy the server is. jack-connection-manager su's for its own
+    # jack_lsp probe for exactly this reason.
     WAIT_TENTHS=20      # 2.0s budget
     STEP_TENTHS=5       # 0.5s per poll
     waited=0
+    jack_ready=0
 
     echo "jack-bridge-ports: Waiting for JACK to be ready (max 2s)..." >> "$LOGFILE" 2>&1
 
     while [ "$waited" -lt "$WAIT_TENTHS" ]; do
         if command -v jack_wait >/dev/null 2>&1; then
-            if jack_wait -w -t 1 >/dev/null 2>&1; then
+            if su - "$USERNAME" -c "jack_wait -w -t 1" >/dev/null 2>&1; then
+                jack_ready=1
                 echo "jack-bridge-ports: JACK ready via jack_wait (after $((waited / 10)).$((waited % 10))s)" >> "$LOGFILE" 2>&1
                 break
             else
@@ -123,6 +133,7 @@ start() {
         else
             # Fallback: check if jackd process is running
             if pidof jackd >/dev/null 2>&1; then
+                jack_ready=1
                 echo "jack-bridge-ports: jackd process detected, proceeding (after $((waited / 10)).$((waited % 10))s)" >> "$LOGFILE" 2>&1
                 sleep 1  # Give it just a moment more to initialize
                 break
@@ -134,20 +145,30 @@ start() {
         waited=$((waited + STEP_TENTHS))
     done
 
-    if [ "$waited" -ge "$WAIT_TENTHS" ]; then
-        log_failure_msg "JACK not ready after 2s; cannot spawn ports (check jackd-rt service)"
-        echo "jack-bridge-ports: JACK readiness timeout - diagnostic info:" >> "$LOGFILE" 2>&1
+    if [ "$jack_ready" -ne 1 ]; then
+        echo "jack-bridge-ports: JACK readiness probe timed out - diagnostic info:" >> "$LOGFILE" 2>&1
         echo "  - jackd process check: $(pidof jackd 2>/dev/null || echo 'NOT RUNNING')" >> "$LOGFILE" 2>&1
         echo "  - JACKD_RT_PIDFILE: $(cat /var/run/jackd-rt.pid 2>/dev/null || echo 'MISSING')" >> "$LOGFILE" 2>&1
         if command -v jack_wait >/dev/null 2>&1; then
-            echo "  - jack_wait test: $(jack_wait -w -t 1 2>&1 || echo 'FAILED')" >> "$LOGFILE" 2>&1
+            echo "  - jack_wait test (as $USERNAME): $(su - "$USERNAME" -c 'jack_wait -w -t 1' 2>&1 || echo 'FAILED')" >> "$LOGFILE" 2>&1
         else
             echo "  - jack_wait: NOT AVAILABLE" >> "$LOGFILE" 2>&1
         fi
-        log_end_msg 1
-        return 1
+
+        # A failed probe is only fatal when there is no server at all. With
+        # jackd alive the restore below is still worth attempting: giving up
+        # here leaves the user on internal output after every reboot until
+        # they open the GUI, which is the whole thing this service prevents.
+        if pidof jackd >/dev/null 2>&1; then
+            log_warning_msg "JACK probe timed out but jackd is running; continuing"
+            echo "jack-bridge-ports: continuing anyway (jackd is running)" >> "$LOGFILE" 2>&1
+        else
+            log_failure_msg "JACK not ready after 2s; cannot spawn ports (check jackd-rt service)"
+            log_end_msg 1
+            return 1
+        fi
     fi
-    
+
     # Prepare log file
     touch "$LOGFILE" 2>/dev/null || true
     chown "$USERNAME":"$USERNAME" "$LOGFILE" 2>/dev/null || true
@@ -208,7 +229,7 @@ start() {
 }
 
 stop() {
-    log_daemon_msg "Stopping jack-bridge persistent ports" "jack-bridge-ports"
+    log_daemon_msg "Stopping jack-bridge output bridges" "jack-bridge-ports"
 
     # Check if JACK is still running (don't fail if already stopped)
     if ! pgrep -x jackd >/dev/null 2>&1; then

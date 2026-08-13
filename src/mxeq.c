@@ -2261,15 +2261,28 @@ static void create_devices_panel(GtkWidget *main_box) {
     const char *startup_route = NULL;
     int init_dev_type = 0; /* 0=internal, 1=usb, 2=hdmi, 3=bt */
 
+    /* A device whose ports are actually up wins over a saved preference; only
+     * when nothing is running do we fall back to PREFERRED_OUTPUT and spawn it.
+     * USB needs that fallback as much as HDMI does: when the boot restore fails
+     * to spawn usb_out (the interface can refuse to open for the first seconds
+     * after boot), usb_active is FALSE, and without the preference check the GUI
+     * silently selected Internal and left the user's saved choice unapplied. */
     if (bt_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
         init_dev_type = 3;
     } else if (usb_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
         init_dev_type = 1;
-    } else if (hdmi_active || (g_strcmp0(pref, "hdmi") == 0 && have_hdmi)) {
+    } else if (hdmi_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
-        if (!hdmi_active) startup_route = "hdmi"; /* ports not yet running */
+        init_dev_type = 2;
+    } else if (g_strcmp0(pref, "usb") == 0 && have_usb) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_usb), TRUE);
+        startup_route = "usb"; /* ports not yet running */
+        init_dev_type = 1;
+    } else if (g_strcmp0(pref, "hdmi") == 0 && have_hdmi) {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_hdmi), TRUE);
+        startup_route = "hdmi"; /* ports not yet running */
         init_dev_type = 2;
     } else {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_internal), TRUE);

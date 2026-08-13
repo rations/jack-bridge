@@ -35,6 +35,14 @@ BT_MIN_BUFFER="4096"
 # the buffer, so any value here is clamped to stay safely under it at spawn time.
 BT_TARGET_DELAY=""
 
+# How many times spawn_bridge tries to start an alsa_out/alsa_in before giving
+# up, and it doubles the pause between attempts starting at 1s — so 5 tries span
+# about 15s of device warm-up. This exists because a USB interface listed in
+# `aplay -l` can still refuse to open for the first several seconds after boot;
+# see spawn_bridge. Raise it in ~/.config/jack-bridge/devices.conf if an
+# interface takes longer than that to become ready.
+BRIDGE_SPAWN_TRIES="5"
+
 # Logging for diagnostics
 LOGFILE="/tmp/jack-route-select.log"
 log() {
@@ -266,6 +274,67 @@ wait_for_port() {
   return 1
 }
 
+# Like wait_for_port, but gives up the moment the bridge process is gone.
+# alsa_out/alsa_in exit within a fraction of a second when the ALSA open fails,
+# so polling a corpse for the full 5s only delays the retry below.
+wait_for_port_or_exit() {
+  _wpid="$1"; _wport="$2"
+  for _i in $(seq 1 50); do
+    if jack_lsp 2>/dev/null | grep -q "^$_wport"; then
+      return 0
+    fi
+    if ! kill -0 "$_wpid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.1
+  done
+  log "Timeout waiting for port $_wport"
+  return 1
+}
+
+# Spawn an alsa_out/alsa_in bridge and wait for its JACK port, retrying with
+# backoff until it appears.
+#
+# Being listed in `aplay -l` does not mean a device can be opened yet. On a cold
+# boot the USB interface is listed by the time the boot restore runs (~19s in)
+# but still answers snd_pcm_hw_params with ENXIO, so alsa_out logs
+#   WARNING: channel count does not match (requested 2 got 4)
+#   Unable to set hw params for playback: No such device or address
+# and exits — while the identical command succeeds a minute later. With a single
+# attempt that left USB silent after every reboot until the user opened the GUI,
+# whereas HDMI, an always-ready HDA device, came back fine.
+#
+# Retrying is free when the device is ready: the first attempt returns as soon as
+# the port registers. Only a device that is not ready pays the backoff.
+#
+#   $1 alsa_out|alsa_in   $2 JACK client name   $3 ALSA device (hw:2 / hw:2,0)
+#   $4 sample rate        $5 port to wait for   $6 log file for the bridge stderr
+spawn_bridge() {
+  _tool="$1"; _name="$2"; _hw="$3"; _rate="$4"; _port="$5"; _blog="$6"
+  _try=1
+  _delay=1
+  while [ "$_try" -le "$BRIDGE_SPAWN_TRIES" ]; do
+    log "Spawning $_name for $_hw (attempt $_try/$BRIDGE_SPAWN_TRIES)"
+    nohup "$_tool" -j "$_name" -d "$_hw" -r "$_rate" -p 256 -n 3 >>"$_blog" 2>&1 &
+    _bpid=$!
+    if wait_for_port_or_exit "$_bpid" "$_port"; then
+      log "$_name ports spawned successfully"
+      return 0
+    fi
+    # Clear a survivor that never registered its port, so the next attempt
+    # cannot collide with a half-started client holding the device.
+    pkill -f "$_tool -j $_name" 2>/dev/null || true
+    log "$_name attempt $_try failed: $(tail -n 1 "$_blog" 2>/dev/null || true)"
+    _try=$((_try + 1))
+    if [ "$_try" -le "$BRIDGE_SPAWN_TRIES" ]; then
+      sleep "$_delay"
+      _delay=$((_delay * 2))
+    fi
+  done
+  log "ERROR: $_name ports failed to spawn after $BRIDGE_SPAWN_TRIES attempts (check $_blog)"
+  return 1
+}
+
 ensure_usb_out() {
   # RESPAWN usb_out with current USB device (handles hot-plug after boot)
   # Kill existing usb_out process (may be pointing to placeholder hw:99)
@@ -297,18 +366,8 @@ ensure_usb_out() {
     rate=48000
   fi
   
-  log "Spawning usb_out for $hw_dev"
-  nohup alsa_out -j usb_out -d "$hw_dev" -r "$rate" -p 256 -n 3 \
-    >>/tmp/jack-route-select-usb-out.log 2>&1 &
-  
-  # Wait for ports
-  if wait_for_port "usb_out:playback_1"; then
-    log "usb_out ports spawned successfully"
-    return 0
-  else
-    log "ERROR: usb_out ports failed to spawn (check /tmp/jack-route-select-usb-out.log)"
-    return 1
-  fi
+  spawn_bridge alsa_out usb_out "$hw_dev" "$rate" \
+    "usb_out:playback_1" /tmp/jack-route-select-usb-out.log
 }
 
 ensure_hdmi_out() {
@@ -342,18 +401,8 @@ ensure_hdmi_out() {
     rate=48000
   fi
   
-  log "Spawning hdmi_out for $hw_dev"
-  nohup alsa_out -j hdmi_out -d "$hw_dev" -r "$rate" -p 256 -n 3 \
-    >>/tmp/jack-route-select-hdmi-out.log 2>&1 &
-  
-  # Wait for ports
-  if wait_for_port "hdmi_out:playback_1"; then
-    log "hdmi_out ports spawned successfully"
-    return 0
-  else
-    log "ERROR: hdmi_out ports failed to spawn (check /tmp/jack-route-select-hdmi-out.log)"
-    return 1
-  fi
+  spawn_bridge alsa_out hdmi_out "$hw_dev" "$rate" \
+    "hdmi_out:playback_1" /tmp/jack-route-select-hdmi-out.log
 }
 
 ensure_usb_in() {
@@ -379,26 +428,15 @@ ensure_usb_in() {
     hw_dev="hw:${usb_card},${usb_dev}"
   fi
   
-  log "Spawning USB capture client: alsa_in from $hw_dev"
-  
   if have jack_samplerate; then
     rate=$(jack_rate)
   else
     rate=48000
   fi
-  
+
   # Spawn alsa_in for USB capture (creates usb_in:capture_1/2 ports)
-  nohup alsa_in -j usb_in -d "$hw_dev" -r "$rate" -p 256 -n 3 \
-    >>/tmp/jack-route-select-usb-in.log 2>&1 &
-  
-  # Wait for ports
-  if wait_for_port "usb_in:capture_1"; then
-    log "usb_in capture ports spawned successfully"
-    return 0
-  else
-    log "ERROR: usb_in capture ports failed to spawn (check /tmp/jack-route-select-usb-in.log)"
-    return 1
-  fi
+  spawn_bridge alsa_in usb_in "$hw_dev" "$rate" \
+    "usb_in:capture_1" /tmp/jack-route-select-usb-in.log
 }
 
 ensure_bt_out() {

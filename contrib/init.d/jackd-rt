@@ -32,6 +32,31 @@ fi
 : ${DETECT_SCRIPT:=/usr/local/lib/jack-bridge/detect-alsa-device.sh}
 : ${JACKD_LOG:=/var/log/jackd-rt.log}
 
+# Run a command as $USERNAME, from a context that must not depend on dbus.
+#
+# This script starts at S02 — before dbus (S04) and elogind (S05). `su` runs
+# /etc/pam.d/su, which @includes common-session, which loads pam_elogind.so;
+# with no system bus yet that module blocks, and dbus cannot start until this
+# script returns, so boot stalls for ~2 minutes until PAM gives up. That is a
+# dependency cycle, not slowness.
+#
+# /etc/pam.d/runuser is the minimal stack (rootok, keyinit, limits, unix) with
+# no elogind module, so runuser switches user without ever touching the bus.
+# It ships in util-linux; the su fallback exists only for exotic systems and is
+# bounded so it can never stall boot the way the bare su did.
+#
+# Later services in this stack (jack-bridge-ports at S07) run after dbus and
+# elogind are up, where plain `su -` is safe.
+as_user() {
+    if [ -x /usr/sbin/runuser ]; then
+        /usr/sbin/runuser -l "$USERNAME" -c "$*"
+    elif command -v timeout >/dev/null 2>&1; then
+        timeout 15 su - "$USERNAME" -c "$*"
+    else
+        su - "$USERNAME" -c "$*"
+    fi
+}
+
 start() {
     log_daemon_msg "Starting JACK (jackd) with realtime settings" "jackd-rt"
     
@@ -53,7 +78,13 @@ start() {
 
     while [ $waited -lt $WAIT_SECS ]; do
         if [ -d /dev/snd ] && command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -v -E 'Loopback|Loop Back' | sed -n '/card /p' >/dev/null 2>&1; then
-            echo "jackd-rt: ALSA devices ready after ${waited}s"
+            # log_daemon_msg above leaves the console line open for log_end_msg
+            # to close, so a bare echo to stdout lands mid-line and renders as
+            # "...settings: jackd-rtjackd-rt: ALSA devices ready after 0s".
+            # log_progress_msg appends to the open line, which is the LSB-shaped
+            # way to report this. It does not go to $JACKD_LOG either: that log
+            # is jackd's own stdout, and the failure path below tails it.
+            log_progress_msg "alsa ready (${waited}s)"
             break
         fi
         sleep 1
@@ -131,9 +162,27 @@ start() {
     touch "$JACKD_LOG" 2>/dev/null || true
     chown "$USERNAME":"$USERNAME" "$JACKD_LOG" 2>/dev/null || true
 
-    # Build command: start a login shell for $USERNAME via su so PAM limits apply, then exec jackd with logging
+    # Build command: switch to $USERNAME through a login shell so PAM limits
+    # apply, then exec jackd with logging.
+    #
+    # runuser, not `su -l`, for the reason described at as_user() above: su's PAM
+    # stack loads pam_elogind.so, which blocks until dbus (S04) exists, and dbus
+    # cannot start until this script (S02) returns. --background hides the stall
+    # from the console, but jackd itself does not start until dbus comes up, so
+    # the server arrived a minute or two into boot and every health check here
+    # timed out on a server that was not running yet.
+    #
+    # Realtime privileges survive the swap: /etc/pam.d/runuser carries
+    # `session required pam_limits.so`, so the @audio rtprio/memlock grants in
+    # /etc/security/limits.d/audio.conf still apply.
+    #
     # Export JACK_NO_AUDIO_RESERVATION so jackd skips session bus reservation when run as a system service
-    CMD="exec su -l \"$USERNAME\" -s /bin/sh -c 'export JACK_NO_AUDIO_RESERVATION=1; exec ${JACKD_DAEMON} ${ARGS} >>\"$JACKD_LOG\" 2>&1'"
+    if [ -x /usr/sbin/runuser ]; then
+        SWITCH_USER="/usr/sbin/runuser -l \"$USERNAME\" -s /bin/sh"
+    else
+        SWITCH_USER="su -l \"$USERNAME\" -s /bin/sh"
+    fi
+    CMD="exec $SWITCH_USER -c 'export JACK_NO_AUDIO_RESERVATION=1; exec ${JACKD_DAEMON} ${ARGS} >>\"$JACKD_LOG\" 2>&1'"
 
     # Start jackd as login user via start-stop-daemon (no --chuid; PID tracks exec chain)
     start-stop-daemon --start --background --make-pidfile --pidfile /var/run/jackd-rt.pid \
@@ -143,19 +192,32 @@ start() {
     # Health check: prefer jack_wait, fallback to pid check
     JACK_WAIT_TIMEOUT=3  # sufficient for cold boot on modern systems
 
+    # Both the probe and the autoconnect helper must run as $USERNAME: jackd was
+    # just started under `su -l "$USERNAME"`, so its socket lives in that user's
+    # runtime directory. Run as root they can never reach the server — the probe
+    # answered "Cannot connect to server socket" on every boot and took the
+    # failure branch below, and jack-autoconnect was a silent no-op. as_user()
+    # does the switch without the dbus-dependent PAM stack; see its comment.
     if command -v jack_wait >/dev/null 2>&1; then
-        if ! jack_wait -w -t $JACK_WAIT_TIMEOUT >/dev/null 2>&1; then
+        if as_user "jack_wait -w -t $JACK_WAIT_TIMEOUT" >/dev/null 2>&1; then
+            # Autoconnect (if present) runs once at startup
+            if [ -x /usr/local/lib/jack-bridge/jack-autoconnect ]; then
+                as_user "/usr/local/lib/jack-bridge/jack-autoconnect" >/dev/null 2>&1 || true
+            fi
+        elif [ -s /var/run/jackd-rt.pid ] && kill -0 "$(cat /var/run/jackd-rt.pid 2>/dev/null)" >/dev/null 2>&1; then
+            # The server process is alive, it just has not answered a client yet.
+            # Every downstream service waits for JACK on its own (jack-bridge-ports
+            # polls at S07, jack-connection-manager for up to 30s at S08), so a
+            # slow start is not a boot failure. Warn and let them do the waiting
+            # rather than reporting failure over a server that is coming up.
+            log_warning_msg "jackd not ready within ${JACK_WAIT_TIMEOUT}s but the process is alive; continuing"
+        else
             log_warning_msg "jackd did not become ready in ${JACK_WAIT_TIMEOUT}s; last 30 lines of $JACKD_LOG:"
             tail -n 30 "$JACKD_LOG" 2>/dev/null || true
             log_end_msg 1
             return 1
         fi
 
-        # Autoconnect (if present) runs once at startup
-        if [ -x /usr/local/lib/jack-bridge/jack-autoconnect ]; then
-            /usr/local/lib/jack-bridge/jack-autoconnect >/dev/null 2>&1 || true
-        fi
-        
         # NOTE: jack-connection-manager is now started by separate init script
         # (contrib/init.d/jack-connection-manager) for cleaner service management
     else
