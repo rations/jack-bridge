@@ -16,6 +16,7 @@ SettingsDialog::SettingsDialog(Gtk::Window& parent, JackServerControl& server, C
       m_interface_label("Interface:"),
       m_sample_rate_label("Sample Rate:"),
       m_frames_label("Frames/Period:"),
+      m_frames_apply_btn("Apply Live"),
       m_periods_label("Periods/Buffer:"),
       m_midi_frame("MIDI"),
       m_midi_label("MIDI Driver:") {
@@ -48,12 +49,23 @@ void SettingsDialog::build_ui() {
     m_audio_grid.attach(m_sample_rate_combo, 1, 1, 1, 1);
     m_audio_grid.attach(m_frames_label, 0, 2, 1, 1);
     m_audio_grid.attach(m_frames_combo, 1, 2, 1, 1);
+    /* Beside the frames combo, not with Start/Stop: frames/period is the only
+     * field this button touches, and putting it here says so without a
+     * paragraph of explanation. */
+    m_audio_grid.attach(m_frames_apply_btn, 2, 2, 1, 1);
+    m_frames_apply_btn.set_tooltip_text(
+        "Change frames/period on the running server, without stopping it.\n"
+        "Sample rate, periods/buffer, interface and MIDI need Stop then Start.");
     m_audio_grid.attach(m_periods_label, 0, 3, 1, 1);
     m_audio_grid.attach(m_periods_combo, 1, 3, 1, 1);
     m_audio_grid.set_column_spacing(10);
     m_audio_grid.set_row_spacing(8);
     m_audio_frame.add(m_audio_grid);
     m_content_box.pack_start(m_audio_frame, false, false, 0);
+
+    m_live_status_label.set_halign(Gtk::ALIGN_START);
+    m_live_status_label.set_line_wrap(true);
+    m_content_box.pack_start(m_live_status_label, false, false, 0);
 
     m_midi_grid.attach(m_midi_label, 0, 0, 1, 1);
     m_midi_grid.attach(m_midi_combo, 1, 0, 1, 1);
@@ -88,6 +100,7 @@ void SettingsDialog::build_ui() {
 
     m_start_btn.signal_clicked().connect(sigc::mem_fun(*this, &SettingsDialog::on_start));
     m_stop_btn.signal_clicked().connect(sigc::mem_fun(*this, &SettingsDialog::on_stop));
+    m_frames_apply_btn.signal_clicked().connect(sigc::mem_fun(*this, &SettingsDialog::on_apply));
 }
 
 void SettingsDialog::populate_devices() {
@@ -107,6 +120,9 @@ void SettingsDialog::update_server_status(bool running) {
     m_server_status_label.set_text(running ? "Status: Running" : "Status: Stopped");
     m_start_btn.set_sensitive(!running);
     m_stop_btn.set_sensitive(running);
+    /* Nothing to apply to a server that is not running; Start carries the
+     * settings in that case. */
+    m_frames_apply_btn.set_sensitive(running);
 }
 
 void SettingsDialog::load_current_settings() {
@@ -166,6 +182,88 @@ void SettingsDialog::load_current_settings() {
         std::string midi = m_config.get_midi_driver();
         if (!midi.empty()) m_midi_combo.set_active_id(midi);
     }
+}
+
+/* The user's saved output device, read the same way jack-route-select and
+ * jack-bridge-ports read it. Empty when unset. */
+std::string SettingsDialog::preferred_output() const {
+    const char* home = std::getenv("HOME");
+    if (!home) return "";
+
+    std::ifstream ifs(std::string(home) + "/.config/jack-bridge/devices.conf");
+    if (!ifs.is_open()) return "";
+
+    std::string line, pref;
+    while (std::getline(ifs, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        if (line.substr(0, eq) != "PREFERRED_OUTPUT") continue;
+
+        pref = line.substr(eq + 1);
+        if (pref.size() >= 2 && (pref.front() == '"' || pref.front() == '\'') &&
+            pref.back() == pref.front()) {
+            pref = pref.substr(1, pref.size() - 2);
+        }
+    }
+    return pref;
+}
+
+/* Record a live frames/period change in /etc/default/jackd-rt so the next boot
+ * starts the server the user is actually listening to. Only that one line is
+ * rewritten: everything else in the file describes the running server, and
+ * frames/period is the only value a live change can alter. */
+bool SettingsDialog::persist_period(int frames) {
+    std::string cmd = "pkexec /usr/local/lib/jack-bridge/jack-bridge-service-helper set-period "
+                      + std::to_string(frames) + " >/dev/null 2>&1";
+    return system(cmd.c_str()) == 0;
+}
+
+/* Restart the USB/HDMI bridge so its ALSA period matches the server's new one.
+ * alsa_out takes its period from a command line fixed at spawn time, so after a
+ * live change the bridge would still be running the old size -- exactly the
+ * mismatch that makes the HDMI device underrun and crackle. Internal needs
+ * nothing (jackd owns the device directly) and Bluetooth is left alone: its
+ * buffer is deliberately decoupled from JACK, and respawning it means tearing
+ * down a live A2DP connection. */
+void SettingsDialog::respawn_bridges() {
+    std::string pref = preferred_output();
+    if (pref != "usb" && pref != "hdmi") return;
+
+    std::string cmd = "/usr/local/lib/jack-bridge/jack-route-select " + pref + " >/dev/null 2>&1";
+    if (system(cmd.c_str()) != 0) {
+        std::cerr << "jack-graph: jack-route-select " << pref
+                  << " failed after a live buffer change; the bridge may still be "
+                     "running the previous period\n";
+    }
+}
+
+/* Live frames/period change, the one setting JACK can alter without a restart. */
+void SettingsDialog::on_apply() {
+    if (!m_buffer_size_cb) return;
+
+    std::string fpp_str = m_frames_combo.get_active_id();
+    if (fpp_str.empty()) return;
+    int fpp = std::stoi(fpp_str);
+
+    if (!m_buffer_size_cb(static_cast<unsigned int>(fpp))) {
+        m_live_status_label.set_text(
+            "Could not change frames/period on the running server.");
+        return;
+    }
+
+    m_config.set_frames_per_period(fpp);
+    m_config.save();
+
+    bool persisted = persist_period(fpp);
+    respawn_bridges();
+
+    m_live_status_label.set_text(
+        persisted
+            ? "Frames/period is now " + fpp_str +
+                  ". Other settings still need Stop then Start."
+            : "Frames/period is now " + fpp_str +
+                  ", but saving it for next boot failed; it will revert on reboot.");
 }
 
 void SettingsDialog::on_start() {

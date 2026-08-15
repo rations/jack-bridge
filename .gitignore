@@ -7,7 +7,14 @@ CODE-REVIEW.md
 # Common local artifacts
 *.o
 *.obj
-*.d
 *.swp
+# Compiler dependency files (gcc -MMD). Scoped to the source directories on
+# purpose: a bare *.d also matched the contrib/etc/logrotate.d directory, which
+# silently kept the logrotate config out of git while it still shipped in the
+# release tarball -- so anyone installing from a clone got no log rotation.
+/src/*.d
+/jack-graph/src/*.d
+# Locally built jack-graph binary; the shipped copy lives in contrib/bin/
+/jack-graph/jack-graph
 *.log
 *.tar.gz

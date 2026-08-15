@@ -76,6 +76,42 @@ static const char *const kAlwaysHide[] = {
     NULL
 };
 
+/* DSP pipeline widgets exposed as mixer controls by SOF firmware topologies.
+ *
+ * On sof-hda-dsp the topology publishes a gain control for every pipeline in the
+ * DSP graph: "PGA1.0 1 Master Playback Volume" (analog playback), "PGA2.0 2
+ * Master Capture Volume", "PGA7/8/9.0 Master" (the three HDMI pipelines),
+ * "PGA30.0 30" (deep buffer), plus EQ coefficient blobs like
+ * "EQIIR10.0 eqiir_coef_10". PGA is a Programmable Gain Amplifier and the number
+ * is a topology widget id, not anything a user recognises. They sit behind the
+ * codec's own Master/Speaker/Headphone controls and are normally pinned at 0 dB,
+ * so a user who "turns down the volume" with one has changed DSP-side gain and
+ * left the real control untouched.
+ *
+ * Matched by shape rather than by name: an uppercase widget type, a widget
+ * number, a dot, an instance number. Listing names one at a time was worse than
+ * wrong, it was inconsistent -- kInternalAllow admits "master" as a substring,
+ * so PGA1/2/7/8/9 appeared (they carry the word Master) while PGA30/31 did not,
+ * splitting identical hardware objects across the filter. The shape rule also
+ * covers widget types on other SOF machines that neither the author nor this
+ * card has: DRC, MIXIN, SRC, TDFB.
+ *
+ * The '.' is what makes this safe: HDA codec controls never contain one in that
+ * position. "IEC958 Playback Switch" gets as far as IEC/958 and stops at the
+ * space, so the HDMI digital switches users need are untouched.
+ */
+static gboolean is_dsp_topology_control(const char *name) {
+    const char *p = name;
+
+    if (!g_ascii_isupper((guchar)*p)) return FALSE;
+    while (g_ascii_isupper((guchar)*p)) p++;          /* PGA, EQIIR, DRC... */
+    if (!g_ascii_isdigit((guchar)*p)) return FALSE;   /* widget number */
+    while (g_ascii_isdigit((guchar)*p)) p++;
+    if (*p != '.') return FALSE;                      /* the discriminator */
+    p++;
+    return g_ascii_isdigit((guchar)*p);               /* instance number */
+}
+
 static gboolean name_matches_any(const char *name, const char *const *patterns) {
     gchar *lower = g_ascii_strdown(name, -1);
     if (!lower) return FALSE;
@@ -467,6 +503,9 @@ static int collect_mixer_channels(MixerData *data, snd_mixer_t *m,
         if (!name) continue;
 
         if (name_matches_any(name, kAlwaysHide)) continue;
+        /* Before the allow list, and on every card: these are firmware
+         * internals, not a property of how curated this card's panel is. */
+        if (is_dsp_topology_control(name)) continue;
         if (curate && !name_matches_any(name, kInternalAllow)) continue;
 
         MixerCtlKind kind;

@@ -275,6 +275,14 @@ void JackGraph::on_menu_settings() {
         update_status_bar();
     });
     
+    // Callback for a live frames/period change (no server restart)
+    dialog.set_buffer_size_callback([this](unsigned int nframes) -> bool {
+        if (!m_jack.is_connected()) return false;
+        if (!m_jack.set_buffer_size(nframes)) return false;
+        update_status_bar();
+        return true;
+    });
+
     // Callback for Stop (just disconnect, don't reconnect)
     dialog.set_disconnect_callback([this]() {
         if (m_jack.is_connected()) {

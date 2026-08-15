@@ -3,6 +3,7 @@
 # Helper script to manage jackd-rt service with proper settings
 # Called by jack-graph via pkexec
 # Usage: jack-bridge-service-helper {start|stop} [device] [sample_rate] [frames_per_period] [periods_per_buffer] [midi_driver]
+#        jack-bridge-service-helper set-period <frames>
 
 set -e
 
@@ -44,6 +45,34 @@ EOF
         service jack-connection-manager restart || \
             echo "WARNING: jack-connection-manager failed to restart; apps will not follow the selected output"
         ;;
+    set-period)
+        # Record a frames/period that jack-graph already applied live with
+        # jack_set_buffer_size, so the next boot starts the server the user is
+        # actually listening to. Nothing is started or restarted here.
+        #
+        # Only the JACKD_PERIOD line is touched. The rest of the file describes
+        # the running server, and frames/period is the only setting JACK can
+        # change without a restart -- rewriting the whole file from GUI state
+        # would let it claim a sample rate or period count that is not running.
+        FRAMES="$2"
+        case "$FRAMES" in
+            ''|*[!0-9]*)
+                echo "set-period: not a frame count: '$FRAMES'" >&2
+                exit 1
+                ;;
+        esac
+        if [ -f "$DEFAULTS_FILE" ]; then
+            TMP="$(mktemp "${DEFAULTS_FILE}.XXXXXX")"
+            { grep -v '^[[:space:]]*JACKD_PERIOD=' "$DEFAULTS_FILE" || true
+              echo "JACKD_PERIOD=$FRAMES"
+            } > "$TMP"
+            mv "$TMP" "$DEFAULTS_FILE"
+        else
+            # jackd-rt defaults every unset value, so a one-line file is valid.
+            echo "JACKD_PERIOD=$FRAMES" > "$DEFAULTS_FILE"
+        fi
+        chmod 644 "$DEFAULTS_FILE"
+        ;;
     stop)
         # Stop the manager first, so it shuts down on its own terms and clears its
         # pidfile instead of dying when the server disappears underneath it.
@@ -54,6 +83,7 @@ EOF
         ;;
     *)
         echo "Usage: $0 {start|stop} [device] [sample_rate] [frames_per_period] [periods_per_buffer] [midi_driver]"
+        echo "       $0 set-period <frames>"
         exit 1
         ;;
 esac

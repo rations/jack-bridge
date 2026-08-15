@@ -1,0 +1,40 @@
+# /etc/logrotate.d/jack-bridge
+# Caps the log files the jack-bridge services write.
+#
+# Every writer in this project appends with >> and nothing ever truncates, so
+# without this each file grows for the life of the install. Measured on a
+# development machine: ~2.6MB across three logs over 406 boots in 8.5 months,
+# or roughly 3.3KB per server start. That average is not the problem -- the
+# spikes are. jackd-rt.log takes a line per xrun, and
+# jack-connection-manager.log a line per routing decision, so a client stuck
+# reconnecting can add megabytes in a day. Hence maxsize alongside weekly.
+
+/var/log/jackd-rt.log
+/var/log/jack-connection-manager.log
+/var/log/jack-bridge-ports.log
+/var/log/jack-bridge-detect.log
+/var/log/jack-bridge-bluetooth-config.log
+/var/log/bluealsad.log
+/var/log/bluetoothd.log
+{
+    weekly
+    # Rotate early if a log runs away before its weekly turn comes round.
+    maxsize 5M
+    rotate 4
+    compress
+    missingok
+    notifempty
+
+    # Required, not a preference. jackd, jack-connection-manager and bluealsad
+    # are all started by the init scripts with their stderr redirected (>>) into
+    # these files, and none of them ever reopens that descriptor. Renaming the
+    # file would leave each process writing to the now-unlinked inode: the live
+    # log would appear frozen until the next restart, and the disk space would
+    # never come back. copytruncate copies the contents and truncates the
+    # original in place, so the open descriptor keeps working.
+    copytruncate
+
+    # No `create` line on purpose: copytruncate keeps the original file, and
+    # some of these are chowned to the desktop user by the init scripts. Forcing
+    # an owner here would fight that.
+}

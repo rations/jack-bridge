@@ -72,13 +72,13 @@
 
 ### Quick Install - During installation when prompted, select YES to Enable realtime priorities
 
-Download `jack-bridge-20260813.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260815.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260813
+tar -xf jack-bridge-20260815
 ```
 ```bash
-cd jack-bridge-20260813
+cd jack-bridge-20260815
 ```
 ```bash
 sudo sh contrib/install.sh
@@ -337,7 +337,7 @@ The uninstaller removes:
 To also remove packages:
 bash
 sudo apt remove jackd2 bluez bluez-tools libasound2-plugins \
-  alsa-utils apulse swh-plugins
+  alsa-utils apulse
 sudo apt autoremove
 
 ## Architecture

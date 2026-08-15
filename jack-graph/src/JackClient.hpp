@@ -40,6 +40,7 @@ public:
     bool disconnect_ports(const std::string& source, const std::string& dest);
 
     jack_nframes_t get_buffer_size() const;
+    bool set_buffer_size(jack_nframes_t nframes);
     jack_nframes_t get_sample_rate() const;
     uint64_t get_xrun_count() const { return m_xrun_count; }
 

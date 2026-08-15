@@ -11,8 +11,11 @@ public:
     ~SettingsDialog() override;
 
     using ApplyCallback = std::function<void()>;
+    /* Returns false if the running server refused the new frames/period. */
+    using BufferSizeCallback = std::function<bool(unsigned int)>;
     void set_apply_callback(ApplyCallback cb) { m_apply_cb = std::move(cb); }
     void set_disconnect_callback(ApplyCallback cb) { m_disconnect_cb = std::move(cb); }
+    void set_buffer_size_callback(BufferSizeCallback cb) { m_buffer_size_cb = std::move(cb); }
 
 private:
     void build_ui();
@@ -22,6 +25,9 @@ private:
     void on_apply();
     void on_start();
     void on_stop();
+    bool persist_period(int frames);
+    void respawn_bridges();
+    std::string preferred_output() const;
 
     JackServerControl& m_server;
     Config& m_config;
@@ -42,8 +48,10 @@ private:
     Gtk::ComboBoxText m_sample_rate_combo;
     Gtk::Label m_frames_label;
     Gtk::ComboBoxText m_frames_combo;
+    Gtk::Button m_frames_apply_btn;
     Gtk::Label m_periods_label;
     Gtk::ComboBoxText m_periods_combo;
+    Gtk::Label m_live_status_label;
 
     Gtk::Frame m_midi_frame;
     Gtk::Grid m_midi_grid;
@@ -52,4 +60,5 @@ private:
 
     ApplyCallback m_apply_cb;
     ApplyCallback m_disconnect_cb;
+    BufferSizeCallback m_buffer_size_cb;
 };

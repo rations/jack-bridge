@@ -1,9 +1,10 @@
 # Makefile - build binaries for jack-bridge project
 # Usage:
-#   make        # builds mxeq (GUI), jack-connection-manager, and pulse-jack-bridge
+#   make        # builds mxeq (GUI), jack-connection-manager, pulse-jack-bridge, jack-graph
 #   make mxeq   # build GUI binary only
 #   make manager # build connection manager only
 #   make bridge # build pulse-jack-bridge only
+#   make graph  # build jack-graph and stage it in contrib/bin
 #   make clean
 CC = gcc
 PKG_CONFIG = pkg-config
@@ -40,9 +41,16 @@ BRIDGE_CFLAGS = -O2 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -std=c11 \
                 $(shell $(PKG_CONFIG) --cflags jack)
 BRIDGE_LIBS   = $(shell $(PKG_CONFIG) --libs jack)
 
+# Build jack-graph (GTKmm port connection GUI). It has its own Makefile and
+# leaves its binary in its own directory, so this target delegates and then
+# stages the result in contrib/bin, which is where install.sh installs from and
+# create-release-tarball.sh copies from.
+GRAPH_DIR = jack-graph
+GRAPH_TARGET = $(BIN_DIR)/jack-graph
+
 CFLAGS_COMMON = -Wall -Wextra -std=c11
 
-all: mxeq manager bridge
+all: mxeq manager bridge graph
 
 $(BIN_DIR):
 	$(MKDIR_P) $(BIN_DIR)
@@ -62,7 +70,20 @@ bridge: $(BIN_DIR) $(BRIDGE_TARGET)
 $(BRIDGE_TARGET): $(BRIDGE_SRCS) | $(BIN_DIR)
 	$(CC) $(BRIDGE_CFLAGS) -o $@ $(BRIDGE_SRCS) $(BRIDGE_LIBS)
 
+# Phony, and named `graph` rather than `jack-graph`: a target named after the
+# jack-graph/ directory would be considered up to date the moment that directory
+# exists, and the copy would silently never run. Phony also means the staging
+# step cannot be skipped just because contrib/bin/jack-graph is present -- a
+# stale binary sitting there is exactly how a release once shipped a build that
+# would not run on the oldest supported distro.
+graph: | $(BIN_DIR)
+	$(MAKE) -C $(GRAPH_DIR)
+	install -m 0755 $(GRAPH_DIR)/jack-graph $(GRAPH_TARGET)
+	@echo "Staged $(GRAPH_TARGET)"
+
 clean:
 	rm -f $(BIN_DIR)/mxeq $(BIN_DIR)/jack-connection-manager $(BIN_DIR)/pulse-jack-bridge
+	rm -f $(GRAPH_TARGET)
+	$(MAKE) -C $(GRAPH_DIR) clean
 
-.PHONY: all clean mxeq manager bridge
+.PHONY: all clean mxeq manager bridge graph

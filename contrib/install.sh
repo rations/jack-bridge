@@ -32,10 +32,10 @@ fi
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
 if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
     # Devuan 6 uses polkitd and t64 package names
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
 else
     # Devuan 5 and other Debian-like systems
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse swh-plugins libgtk-3-0 libgtkmm-3.0-1v5 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libgtk-3-0 libgtkmm-3.0-1v5 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
 fi
 
 echo "Installing jack-bridge contrib files"
@@ -60,7 +60,9 @@ else
 fi
 
 # Cleanup obsolete artifacts from previous versions (authoritative removal)
-for f in /etc/init.d/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autobridge /etc/jack-bridge/bluetooth.conf; do
+# /tmp/jack-bridge-detect.log moved to /var/log so logrotate can cap it, and so a
+# root-run script stops appending to a predictable path in a world-writable dir.
+for f in /etc/init.d/jack-bluealsa-autobridge /usr/local/bin/jack-bluealsa-autobridge /etc/jack-bridge/bluetooth.conf /tmp/jack-bridge-detect.log; do
     if [ -e "$f" ]; then
         rm -f "$f"
         echo "Removed obsolete $f"
@@ -122,6 +124,17 @@ fi
 echo "ALSA->JACK bridge uses distro's 50-jack.conf (system:playback)"
 echo "Device switching handled by jack-connection-manager (JACK graph routing)"
 
+# Install logrotate config so the service logs stay bounded. Without it every
+# log in /var/log grows for the life of the install: nothing in this project
+# truncates, every writer appends.
+if [ -f "contrib/etc/logrotate.d/jack-bridge" ]; then
+    mkdir -p "${ETC_DIR}/logrotate.d"
+    install -m 0644 contrib/etc/logrotate.d/jack-bridge "${ETC_DIR}/logrotate.d/jack-bridge"
+    echo "Installed logrotate config to ${ETC_DIR}/logrotate.d/jack-bridge"
+else
+    echo "WARNING: contrib/etc/logrotate.d/jack-bridge not found; service logs will grow unbounded"
+fi
+
 # Install init script
 mkdir -p "$INIT_DIR"
 install -m 0755 contrib/init.d/jackd-rt "${INIT_DIR}/jackd-rt"
@@ -181,13 +194,12 @@ if [ -f "contrib/usr/lib/jack-bridge/jack-autoconnect" ]; then
 fi
 
 # Install jack-graph binary (JACK/ALSA port connection manager)
-# Use version-specific binary for compatibility
-if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
-    JACK_GRAPH_SRC="contrib/bin/jack-graph"
-else
-    # Devuan 5 or older - use the Devuan 5 compiled binary
-    JACK_GRAPH_SRC="contrib/bin/jack-graph-devuan-five-version"
-fi
+# One binary for every supported release, built on the oldest distro in use
+# (Devuan 5 / glibc 2.36). glibc is backward compatible, so that build also runs
+# on Devuan 6; the reverse is not true, which is what the separate
+# jack-graph-devuan-five-version used to work around. Build it with
+# `cd jack-graph && make` on a Devuan 5 machine and copy it here.
+JACK_GRAPH_SRC="contrib/bin/jack-graph"
 
 if [ -f "$JACK_GRAPH_SRC" ]; then
     echo "Installing jack-graph (JACK/ALSA port connection manager)..."

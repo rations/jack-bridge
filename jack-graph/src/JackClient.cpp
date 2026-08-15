@@ -99,6 +99,19 @@ jack_nframes_t JackClient::get_buffer_size() const {
     return jack_get_buffer_size(m_client);
 }
 
+/* Change frames/period on the running server. This is the one JACK setting that
+ * can be altered without a restart: the server reconfigures the graph and every
+ * client is told the new size through its buffer size callback. Sample rate,
+ * periods/buffer and the interface are ALSA driver parameters fixed when the
+ * driver opens the device, so those still need a stop and start. */
+bool JackClient::set_buffer_size(jack_nframes_t nframes) {
+    if (!m_client) return false;
+    /* JACK requires a power of two and rejects anything else, which would
+     * otherwise look like a silent no-op to the caller. */
+    if (nframes == 0 || (nframes & (nframes - 1)) != 0) return false;
+    return jack_set_buffer_size(m_client, nframes) == 0;
+}
+
 jack_nframes_t JackClient::get_sample_rate() const {
     if (!m_client) return 0;
     return jack_get_sample_rate(m_client);

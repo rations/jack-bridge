@@ -71,6 +71,7 @@ POLKIT_RULE_BLUETOOTH="/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules"
 DBUS_BLUEALSA="/usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_BLUEALSA_CONF="/etc/asound.conf.d/20-jack-bridge-bluealsa.conf"
 LIMITS_CONF="/etc/security/limits.d/audio.conf"
+LOGROTATE_CONF="/etc/logrotate.d/jack-bridge"
 PULSE_AUTOSPAWN_CONF="/etc/pulse/client.conf.d/01-no-autospawn.conf"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 ICON_FILE="$ICON_DIR/alsasoundconnectlogo.png"
@@ -275,6 +276,11 @@ done
 rm -f /tmp/bluez-monitor.*.log 2>/dev/null || true
 
 # Leave system realtime limits as-is unless it matches our known template
+if [ -f "$LOGROTATE_CONF" ]; then
+  rm -f "$LOGROTATE_CONF"
+  log "  Removed $LOGROTATE_CONF"
+fi
+
 if [ -f "$LIMITS_CONF" ] && grep -q "@audio - rtprio 95" "$LIMITS_CONF" 2>/dev/null; then
   rm -f "$LIMITS_CONF"
   log "  Removed $LIMITS_CONF"

@@ -10,8 +10,20 @@
 set -eu
 
 # Logging function
+#
+# Logs to /var/log with the other jack-bridge service logs, where the shipped
+# logrotate config caps it. It used to append to a fixed path in /tmp: this
+# script runs as root from jackd-rt, and a root process appending to a
+# predictable path in a world-writable directory can be pointed at any file on
+# the system by a local user who creates that path as a symlink first.
+#
+# The redirect is guarded because the script is also runnable by hand as a
+# normal user, who cannot write /var/log -- and `set -eu` above would otherwise
+# abort device detection over a failed log write.
+DETECT_LOG="${DETECT_LOG:-/var/log/jack-bridge-detect.log}"
 log() {
-    printf "%s [detect-alsa-device] %s\n" "$(date --iso-8601=seconds)" "$*" >> /tmp/jack-bridge-detect.log
+    printf "%s [detect-alsa-device] %s\n" "$(date --iso-8601=seconds)" "$*" \
+        >> "$DETECT_LOG" 2>/dev/null || true
 }
 
 log "Starting ALSA device detection"
