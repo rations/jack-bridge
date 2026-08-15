@@ -33,9 +33,22 @@ EOF
         service jackd-rt start
         # Restore preferred output (HDMI/USB) the same way boot does
         service jack-bridge-ports start
+        # And bring the connection manager back. It attaches to one server and
+        # exits when that server goes away (jack_on_shutdown), so a stop/start
+        # from the GUI left it dead: the bridge ports returned but nothing routed
+        # clients to them, so every app landed on system:playback and played out
+        # the internal speakers while the GUI still showed HDMI/USB selected.
+        # Last in the sequence, so jackd and the bridge ports are already up.
+        # Non-fatal: jackd itself is running by this point, and reporting failure
+        # here would make the GUI claim the server failed to start.
+        service jack-connection-manager restart || \
+            echo "WARNING: jack-connection-manager failed to restart; apps will not follow the selected output"
         ;;
     stop)
-        # Stop bridge ports first so alsa_in/alsa_out disconnect cleanly
+        # Stop the manager first, so it shuts down on its own terms and clears its
+        # pidfile instead of dying when the server disappears underneath it.
+        service jack-connection-manager stop || true
+        # Stop bridge ports next so alsa_in/alsa_out disconnect cleanly
         service jack-bridge-ports stop || true
         service jackd-rt stop
         ;;

@@ -43,6 +43,17 @@ BT_TARGET_DELAY=""
 # interface takes longer than that to become ready.
 BRIDGE_SPAWN_TRIES="5"
 
+# Where jack-graph's JACK settings dialog persists the server settings, via
+# pkexec jack-bridge-service-helper. Read for the periods count, which no JACK
+# client API exposes.
+JACKD_DEFAULTS="/etc/default/jackd-rt"
+
+# Fallbacks used only when neither the running server nor $JACKD_DEFAULTS can be
+# read (jackd down, or a hand-rolled server). Not a policy setting: whenever the
+# user's values are discoverable they win outright.
+BRIDGE_PERIOD_FALLBACK="256"
+BRIDGE_NPERIODS_FALLBACK="3"
+
 # Logging for diagnostics
 LOGFILE="/tmp/jack-route-select.log"
 log() {
@@ -216,6 +227,41 @@ get_internal_card_number() {
     '
 }
 
+# Frames per period the USB/HDMI bridges run at: whatever the user set as
+# frames/period in jack-graph's JACK settings, nothing else. The running server
+# is asked first so a value changed at runtime (jack_bufsize) is honoured too;
+# $JACKD_DEFAULTS is the fallback for when jackd is not up yet, which is the
+# case during the boot restore.
+jack_period() {
+  _p=""
+  if have jack_bufsize; then
+    _p=$(jack_bufsize 2>/dev/null | tr -dc '0-9')
+  fi
+  if [ -z "$_p" ] && [ -r "$JACKD_DEFAULTS" ]; then
+    _p=$(sed -n 's/^[[:space:]]*JACKD_PERIOD=["'"'"']\{0,1\}\([0-9]\{1,\}\).*/\1/p' "$JACKD_DEFAULTS" | tail -n 1)
+  fi
+  [ -n "$_p" ] || _p="$BRIDGE_PERIOD_FALLBACK"
+  echo "$_p"
+}
+
+# Periods per buffer for the USB/HDMI bridges, same rule. JACK exposes no client
+# API for the ALSA driver's period count, so this comes from the running jackd's
+# own command line first and from $JACKD_DEFAULTS second. Reading the process
+# matters when a user edits the file without restarting the server: the bridge
+# has to match the server that is actually running, not the one that will run
+# next boot.
+jack_nperiods() {
+  _n=""
+  if have ps; then
+    _n=$(ps -o args= -C jackd 2>/dev/null | sed -n 's/.*[[:space:]]-n[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p' | tail -n 1)
+  fi
+  if [ -z "$_n" ] && [ -r "$JACKD_DEFAULTS" ]; then
+    _n=$(sed -n 's/^[[:space:]]*JACKD_NPERIODS=["'"'"']\{0,1\}\([0-9]\{1,\}\).*/\1/p' "$JACKD_DEFAULTS" | tail -n 1)
+  fi
+  [ -n "$_n" ] || _n="$BRIDGE_NPERIODS_FALLBACK"
+  echo "$_n"
+}
+
 jack_rate() {
   if have jack_samplerate; then
     r=$(jack_samplerate 2>/dev/null | awk '/sample rate/ {print $3; exit}')
@@ -307,15 +353,38 @@ wait_for_port_or_exit() {
 # Retrying is free when the device is ready: the first attempt returns as soon as
 # the port registers. Only a device that is not ready pays the backoff.
 #
+# Buffering: the bridge runs at the frames/period and periods/buffer the user
+# chose in jack-graph, exactly as entered, for USB and HDMI alike — the same
+# values jackd itself is running. These were previously hardcoded to 256x3, which
+# only matched jackd while its shipped default period was also 256; after the
+# user raised frames/period the bridge kept a buffer smaller than a single JACK
+# cycle's worth of headroom and the HDMI device underran audibly (a crackle
+# invisible to jackd's xrun counter, since jackd does not own that PCM).
+# Bluetooth is deliberately exempt and keeps its own larger BT_* buffer: A2DP is
+# a bursty transport in a wholly separate clock domain. See ensure_bt_out.
+#
 #   $1 alsa_out|alsa_in   $2 JACK client name   $3 ALSA device (hw:2 / hw:2,0)
 #   $4 sample rate        $5 port to wait for   $6 log file for the bridge stderr
 spawn_bridge() {
   _tool="$1"; _name="$2"; _hw="$3"; _rate="$4"; _port="$5"; _blog="$6"
+  _period="$(jack_period)"
+  _nperiods="$(jack_nperiods)"
+  _buffer=$(( _period * _nperiods ))
+
+  # alsa_out/alsa_in abort at startup if target_delay + max_diff exceeds the
+  # buffer. Their defaults are derived from a buffer this code no longer picks,
+  # so set both explicitly at a quarter of the buffer (half the buffer in total)
+  # and floor them at 1 frame. That keeps a bridge startable at the small buffers
+  # a low-latency USB user asks for instead of refusing to run.
+  _target=$(( _buffer / 4 ))
+  [ "$_target" -lt 1 ] && _target=1
+
   _try=1
   _delay=1
   while [ "$_try" -le "$BRIDGE_SPAWN_TRIES" ]; do
-    log "Spawning $_name for $_hw (attempt $_try/$BRIDGE_SPAWN_TRIES)"
-    nohup "$_tool" -j "$_name" -d "$_hw" -r "$_rate" -p 256 -n 3 >>"$_blog" 2>&1 &
+    log "Spawning $_name for $_hw (attempt $_try/$BRIDGE_SPAWN_TRIES, period=$_period nperiods=$_nperiods buffer=$_buffer target_delay=$_target)"
+    nohup "$_tool" -j "$_name" -d "$_hw" -r "$_rate" -p "$_period" -n "$_nperiods" \
+      -t "$_target" -m "$_target" >>"$_blog" 2>&1 &
     _bpid=$!
     if wait_for_port_or_exit "$_bpid" "$_port"; then
       log "$_name ports spawned successfully"

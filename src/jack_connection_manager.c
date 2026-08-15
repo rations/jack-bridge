@@ -28,6 +28,7 @@ static jack_client_t *client = NULL;
 static volatile int keep_running = 1;
 static volatile int needs_reconnect = 0; /* Flag for deferred connection */
 static volatile int is_processing = 0; /* Lock to prevent concurrent routing */
+static int graph_changed = 0; /* Connections made/broken during a pass */
 static char preferred_output[64] = "internal";
 static char target_sink_prefix[64] = "system:playback_";
 
@@ -135,6 +136,7 @@ static void disconnect_from_other_sinks(const char *source_port, const char *kee
             }
             ret = jack_disconnect(client, source_port, connections[i]);
             if (ret == 0) {
+                graph_changed++;
                 fprintf(stderr, "jack-connection-manager: Disconnected '%s' from '%s'\n",
                         source_port, connections[i]);
             }
@@ -213,7 +215,9 @@ static void connect_client_to_sink(const char *client_name, size_t name_len, con
         }
         disconnect_from_other_sinks(src[i], target_sink_prefix);
         ret = jack_connect(client, src[i], sink[sink_idx]);
-        if (ret != 0 && ret != EEXIST)
+        if (ret == 0)
+            graph_changed++;
+        else if (ret != EEXIST)
             fprintf(stderr, "jack-connection-manager: ERROR: Failed to connect %s -> %s (error %d)\n",
                     src[i], sink[sink_idx], ret);
         sink_idx++;
@@ -228,15 +232,44 @@ static void connect_client_to_sink(const char *client_name, size_t name_len, con
 static void port_registration_callback(jack_port_id_t port_id, int registered, void *arg) {
     (void)arg;
     (void)port_id;
-    
+
     if (!registered) return; /* Only care about new ports */
-    
+
     /* Signal main thread to process connections */
     needs_reconnect = 1;
 }
 
-/* Process all pending connections (called from main thread, safe for jack_connect) */
-static void process_connections(void) {
+/* Port connect callback - called when any two ports are connected or disconnected.
+ *
+ * Registering this is what keeps a client on the selected output. Ports registering
+ * is not the only way a client reaches system:playback: the ALSA JACK plugin
+ * (libasound_module_pcm_jack.so, the path every non-JACK app such as a browser takes)
+ * issues its jack_connect calls to the playback_ports named in 50-jack.conf from
+ * snd_pcm_jack_prepare(), which runs on every stream start AND on every recovery from
+ * an underrun -- long after its ports first registered. With only the registration
+ * callback those reconnects were invisible, so a browser stream re-asserted
+ * system:playback_1/2 behind us and played out the internal speakers alongside the
+ * selected HDMI/USB device until some unrelated port happened to register and trigger
+ * a pass. On a machine that xruns often (an alsa_out bridge sharing a card with jackd,
+ * e.g. HDMI on sof-hda-dsp) that is constant.
+ *
+ * Same threading rule as above: notification thread, so only set the flag.
+ * Our own jack_connect/jack_disconnect calls land here too; that costs one extra pass
+ * which finds nothing to do and makes no further changes, so it converges immediately. */
+static void port_connect_callback(jack_port_id_t a, jack_port_id_t b, int connect, void *arg) {
+    (void)arg;
+    (void)a;
+    (void)b;
+    (void)connect;
+
+    /* Both directions matter: a connect may need undoing, a disconnect may have
+     * stripped a client off the target sink and left it unrouted. */
+    needs_reconnect = 1;
+}
+
+/* Process all pending connections (called from main thread, safe for jack_connect).
+ * Returns non-zero if it changed the graph. */
+static int process_connections(void) {
     const char **ports;
     int i, k;
     char seen_clients[64][128];
@@ -245,9 +278,10 @@ static void process_connections(void) {
     /* Prevent concurrent execution */
     if (is_processing) {
         fprintf(stderr, "jack-connection-manager: Skipping concurrent process_connections call\n");
-        return;
+        return 0;
     }
     is_processing = 1;
+    graph_changed = 0;
 
     /* Reload config to catch GUI changes */
     load_config();
@@ -259,7 +293,7 @@ static void process_connections(void) {
      * if those leak into routing they steal sink slots and shift the audio
      * channels (out1 -> playback_2, out2 -> playback_4). */
     ports = jack_get_ports(client, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput);
-    if (!ports) { is_processing = 0; return; }
+    if (!ports) { is_processing = 0; return 0; }
 
     for (i = 0; ports[i]; i++) {
         const char *port_name = ports[i];
@@ -341,6 +375,7 @@ static void process_connections(void) {
 
     jack_free(ports);
     is_processing = 0;
+    return graph_changed;
 }
 
 /* JACK shutdown callback */
@@ -370,6 +405,9 @@ int main(void) {
     
     /* Register callbacks */
     jack_set_port_registration_callback(client, port_registration_callback, NULL);
+    if (jack_set_port_connect_callback(client, port_connect_callback, NULL) != 0)
+        fprintf(stderr, "jack-connection-manager: WARNING: no port connect callback; "
+                        "clients that reconnect themselves to system:playback will not be corrected\n");
     jack_on_shutdown(client, jack_shutdown_callback, NULL);
     
     /* Activate client */
@@ -388,11 +426,25 @@ int main(void) {
     fprintf(stderr, "jack-connection-manager: Processing existing connections at startup\n");
     process_connections();
     
-    /* Main loop: process connections when signaled, otherwise sleep */
+    /* Main loop: process connections when signaled, otherwise sleep.
+     *
+     * A pass that changed the graph arms a settle pass ~300ms later. This covers the
+     * window a single pass cannot see: jack_port_get_all_connections() reads the
+     * client-side graph snapshot, which lags the server by a notification cycle, so a
+     * pass that interleaves with a client's own connect calls can miss one of them.
+     * That is how a stereo client ended up with one channel on the target sink and the
+     * other still on system:playback -- audio out of the selected device AND one
+     * internal speaker channel. The settle pass re-reads a settled graph and cleans up.
+     *
+     * The settle pass does not re-arm itself: any change it makes raises the connect
+     * callback, which sets needs_reconnect through the normal path above. */
     struct timespec sleep_time = {0, 100000000}; /* 100ms = 100,000,000 nanoseconds */
+    int settle_ticks = 0; /* >0 = counting down to a settle pass */
     while (keep_running) {
         if (needs_reconnect) {
             needs_reconnect = 0;
+            settle_ticks = process_connections() ? 3 : 0; /* 3 * 100ms */
+        } else if (settle_ticks > 0 && --settle_ticks == 0) {
             process_connections();
         }
         nanosleep(&sleep_time, NULL); /* 100ms sleep - responsive but low CPU */

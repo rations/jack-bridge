@@ -52,14 +52,32 @@ start_daemon() {
         sleep 1
     done
     
-    # Wait for bridge ports to spawn (max 10 seconds)
-    echo "Waiting for bridge ports..."
-    for i in $(seq 1 10); do
-        if su - "$LOGIN_USER" -c "jack_lsp 2>/dev/null | grep -q 'usb_out\\|hdmi_out'"; then
-            break
-        fi
-        sleep 1
-    done
+    # Wait for bridge ports to spawn (max 10 seconds), but only when the user's
+    # selection actually has a bridge to wait for. usb_out/hdmi_out never appear
+    # for an internal or Bluetooth preference, so waiting on them there always
+    # burns the full 10s. That is invisible at boot but not from the GUI:
+    # jack-bridge-service-helper calls this synchronously under pkexec, so an
+    # internal user would see jack-graph hang for 10s on every Apply.
+    PREFERRED_OUTPUT=internal
+    USER_HOME=$(getent passwd "$LOGIN_USER" | cut -d: -f6)
+    if [ -n "$USER_HOME" ] && [ -f "$USER_HOME/.config/jack-bridge/devices.conf" ]; then
+        . "$USER_HOME/.config/jack-bridge/devices.conf"
+    fi
+
+    case "$PREFERRED_OUTPUT" in
+        usb|hdmi)
+            echo "Waiting for bridge ports (PREFERRED_OUTPUT=$PREFERRED_OUTPUT)..."
+            for i in $(seq 1 10); do
+                if su - "$LOGIN_USER" -c "jack_lsp 2>/dev/null | grep -q 'usb_out\\|hdmi_out'"; then
+                    break
+                fi
+                sleep 1
+            done
+            ;;
+        *)
+            echo "No bridge ports needed (PREFERRED_OUTPUT=$PREFERRED_OUTPUT)"
+            ;;
+    esac
     
     # Create log file with proper permissions
     touch "$LOGFILE" 2>/dev/null || true
