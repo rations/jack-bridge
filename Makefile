@@ -15,7 +15,15 @@ BIN_DIR = contrib/bin
 MOTR_TARGET = $(BIN_DIR)/mxeq
 MOTR_SRCS = src/mxeq.c src/gui_bt.c src/bt_agent.c
 MOTR_PKGS = gtk+-3.0 glib-2.0 gio-2.0 alsa
-MOTR_CFLAGS = $(shell $(PKG_CONFIG) --cflags $(MOTR_PKGS))
+
+# Cap the GLib API level so release binaries stay runnable on older distros.
+# Without this, building on GLib >= 2.76 makes g_string_free(s, FALSE) expand to
+# g_string_free_and_steal(), a symbol absent from GLib 2.74 (Debian 12 / Devuan
+# daedalus), so the binary dies at startup with an undefined-symbol error.
+GLIB_API_LEVEL = -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_74 \
+                 -DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_74
+
+MOTR_CFLAGS = $(shell $(PKG_CONFIG) --cflags $(MOTR_PKGS)) $(GLIB_API_LEVEL)
 MOTR_LIBS   = $(shell $(PKG_CONFIG) --libs $(MOTR_PKGS))
 
 # Build jack-connection-manager (event-driven daemon) - only needs JACK
