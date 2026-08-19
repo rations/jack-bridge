@@ -57,6 +57,30 @@ as_user() {
     fi
 }
 
+# True when the card named by an ALSA device string is plugged in right now.
+# Accepts hw:CARD=id[,DEV=n] (what mxeq/jack-graph write, because card ids are
+# stable across replug) and hw:N[,M] (what a hand-edited file may hold).
+device_card_present() {
+    _d="$1"
+    case "$_d" in
+        hw:CARD=*)
+            _id="${_d#hw:CARD=}"
+            _id="${_id%%,*}"
+            [ -d "/proc/asound/$_id" ]
+            ;;
+        hw:[0-9]*)
+            _n="${_d#hw:}"
+            _n="${_n%%,*}"
+            [ -d "/proc/asound/card$_n" ]
+            ;;
+        *)
+            # Anything else (plug names, "default") cannot be checked this way;
+            # let jackd decide rather than overriding a valid device.
+            return 0
+            ;;
+    esac
+}
+
 start() {
     log_daemon_msg "Starting JACK (jackd) with realtime settings" "jackd-rt"
     
@@ -121,7 +145,19 @@ start() {
     [ -z "$USERNAME" ] && USERNAME="root"
 
     # Inline: detect ALSA device
+    #
+    # An explicit JACKD_DEVICE is a decision the user made in mxeq or jack-graph
+    # and is honoured whatever card it names, USB included -- that is what lets
+    # jackd run directly on an external interface instead of through an alsa_out
+    # bridge. But it has to be checked for presence first: if the interface was
+    # unplugged since last boot, using it means jackd never starts and nothing in
+    # the stack works. Falling through to $DETECT_SCRIPT keeps the machine
+    # audible, and that script still refuses to auto-select USB.
     DEVICE=""
+    if [ -n "$JACKD_DEVICE" ] && ! device_card_present "$JACKD_DEVICE"; then
+        log_warning_msg "jackd-rt: configured device $JACKD_DEVICE is not present; auto-detecting instead"
+        JACKD_DEVICE=""
+    fi
     if [ -n "$JACKD_DEVICE" ]; then
         DEVICE="$JACKD_DEVICE"
     elif [ -x "$DETECT_SCRIPT" ]; then

@@ -5,11 +5,13 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <atomic>
 
 class JackClient {
 public:
     using PortCallback = std::function<void()>;
     using XRunCallback = std::function<void()>;
+    using ShutdownCallback = std::function<void()>;
 
     JackClient();
     ~JackClient();
@@ -48,6 +50,10 @@ public:
 
     void set_port_callback(PortCallback cb) { m_port_callback = std::move(cb); }
     void set_xrun_callback(XRunCallback cb) { m_xrun_callback = std::move(cb); }
+    /* Fires on JACK's own thread when the server goes away -- a stop, a crash, or
+     * the restart that moving jackd onto a USB interface performs. The handler
+     * must not touch the client or any widget; marshal to the main loop first. */
+    void set_shutdown_callback(ShutdownCallback cb) { m_shutdown_callback = std::move(cb); }
 
     void scan_ports();
 
@@ -58,11 +64,15 @@ private:
     static int sample_rate_callback(jack_nframes_t nframes, void* arg);
     static int buffer_size_callback(jack_nframes_t nframes, void* arg);
     static int xrun_callback(void* arg);
+    static void shutdown_callback(void* arg);
 
     jack_client_t* m_client;
     std::vector<PortInfo> m_ports;
     PortCallback m_port_callback;
     XRunCallback m_xrun_callback;
+    ShutdownCallback m_shutdown_callback;
+    /* Set from the JACK thread, read from the GTK thread. */
+    std::atomic<bool> m_server_gone;
     uint64_t m_xrun_count;
     mutable std::mutex m_mutex;
 };

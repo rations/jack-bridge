@@ -88,8 +88,11 @@ detect_card_device() {
 start() {
     log_daemon_msg "Restoring saved JACK output device" "jack-bridge-ports"
     
-    # Check if already running
-    if pgrep -f "alsa_out -j usb_out" >/dev/null 2>&1; then
+    # Check if already running. Keyed on hdmi_out: usb_out no longer exists (USB
+    # runs jackd on the interface instead of bridging it), and an internal or USB
+    # preference has no bridge process to short-circuit on anyway -- the restore
+    # below is cheap and idempotent for those.
+    if pgrep -f "alsa_out -j hdmi_out" >/dev/null 2>&1; then
         log_progress_msg "already running"
         log_end_msg 0
         return 0
@@ -197,13 +200,22 @@ start() {
     # Internal always works (system:playback_* from jackd). Bluetooth is excluded (see above).
     PREFERRED_OUTPUT="${PREFERRED_OUTPUT:-internal}"
     ROUTE_HELPER="/usr/local/lib/jack-bridge/jack-route-select"
+    #
+    # JB_NO_SERVER_RESTART stops jack-route-select from moving jackd here.
+    # Selecting USB now restarts the server on the interface, and at boot
+    # jackd-rt has ALREADY started it from JACKD_DEVICE -- the same decision.
+    # Without the guard this service would restart the server it is waiting for,
+    # and that restart would run this service again. It is passed inline because
+    # `su -` does not carry the environment across.
     if [ "$PREFERRED_OUTPUT" = "hdmi" ] && [ -x "$ROUTE_HELPER" ]; then
         echo "jack-bridge-ports: Restoring HDMI output (PREFERRED_OUTPUT=hdmi)" >> "$LOGFILE" 2>&1
-        su - "$USERNAME" -c "$ROUTE_HELPER hdmi" >> "$LOGFILE" 2>&1 || \
+        su - "$USERNAME" -c "JB_NO_SERVER_RESTART=1 $ROUTE_HELPER hdmi" >> "$LOGFILE" 2>&1 || \
             echo "jack-bridge-ports: WARNING: jack-route-select hdmi failed" >> "$LOGFILE" 2>&1
     elif [ "$PREFERRED_OUTPUT" = "usb" ] && [ -x "$ROUTE_HELPER" ]; then
+        # USB spawns no bridge any more; this only re-applies the ALSA fragment
+        # and the graph routing for the server jackd-rt already started on it.
         echo "jack-bridge-ports: Restoring USB output (PREFERRED_OUTPUT=usb)" >> "$LOGFILE" 2>&1
-        su - "$USERNAME" -c "$ROUTE_HELPER usb" >> "$LOGFILE" 2>&1 || \
+        su - "$USERNAME" -c "JB_NO_SERVER_RESTART=1 $ROUTE_HELPER usb" >> "$LOGFILE" 2>&1 || \
             echo "jack-bridge-ports: WARNING: jack-route-select usb failed" >> "$LOGFILE" 2>&1
     else
         echo "jack-bridge-ports: PREFERRED_OUTPUT=$PREFERRED_OUTPUT (no port spawn needed)" >> "$LOGFILE" 2>&1
@@ -211,7 +223,7 @@ start() {
 
     # Verify ports
     if command -v jack_lsp >/dev/null 2>&1; then
-        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out|system):' || true)
+        PORTS=$(jack_lsp 2>/dev/null | grep -E '^(hdmi_out|system):' || true)
         if [ -n "$PORTS" ]; then
             echo "Active bridge ports:" >> "$LOGFILE" 2>&1
             echo "$PORTS" | sed 's/^/  /' >> "$LOGFILE" 2>&1
@@ -248,7 +260,7 @@ stop() {
     # Gracefully terminate alsa_out and alsa_in instances with proper signal handling
     # Use SIGTERM first (gives processes time to cleanup JACK connections)
     log_progress_msg "sending TERM signal"
-    for port in usb_out hdmi_out bluealsa system_in; do
+    for port in hdmi_out bluealsa system_in; do
         if pgrep -f "alsa_out -j $port" >/dev/null 2>&1; then
             pkill -TERM -f "alsa_out -j $port" 2>/dev/null || true
         fi
@@ -270,7 +282,7 @@ stop() {
     # Force kill any remaining stubborn processes (should be rare)
     if pgrep -f "alsa_out -j" >/dev/null 2>&1 || pgrep -f "alsa_in -j" >/dev/null 2>&1; then
         log_progress_msg "force killing remaining processes"
-        for port in usb_out hdmi_out bluealsa system_in; do
+        for port in hdmi_out bluealsa system_in; do
             pkill -KILL -f "alsa_out -j $port" 2>/dev/null || true
             pkill -KILL -f "alsa_in -j $port" 2>/dev/null || true
         done
@@ -290,15 +302,15 @@ stop() {
 
 status() {
     if command -v jack_lsp >/dev/null 2>&1; then
-        OUTPUT=$(jack_lsp 2>/dev/null | grep -E '^(usb_out|hdmi_out):' || true)
+        OUTPUT=$(jack_lsp 2>/dev/null | grep -E '^hdmi_out:' || true)
         INPUT=$(jack_lsp 2>/dev/null | grep -E '^system:capture' || true)
         BT=$(jack_lsp 2>/dev/null | grep -E '^bluealsa:' || true)
 
         if [ -n "$OUTPUT" ]; then
-            echo "Active on-demand OUTPUT bridge ports (USB/HDMI):"
+            echo "Active on-demand OUTPUT bridge ports (HDMI):"
             echo "$OUTPUT" | sed 's/^/  /'
         else
-            echo "No on-demand OUTPUT bridge ports (USB/HDMI spawned when selected)"
+            echo "No on-demand OUTPUT bridge ports (HDMI spawned when selected)"
         fi
 
         if [ -n "$INPUT" ]; then

@@ -1,6 +1,12 @@
 #!/bin/sh
 # jack-route-select - Runtime JACK routing helper for jack-bridge
-# Routes JACK graph to Internal, USB, HDMI, or Bluetooth without restarting JACK.
+# Routes the JACK graph to Internal, USB, HDMI, or Bluetooth.
+#
+# Internal, HDMI and Bluetooth are reached without restarting JACK: jackd stays
+# on the internal card and HDMI/Bluetooth get alsa_out bridges. USB is different
+# -- jackd is restarted ON the interface, because feeding an external interface
+# through alsa_out costs it exactly the latency it exists to provide. See
+# ensure_server_device().
 # Reads user config ~/.config/jack-bridge/devices.conf (overrides) and system /etc/jack-bridge/devices.conf.
 # Persists PREFERRED_OUTPUT (and BLUETOOTH_DEVICE if provided) to per-user config without root.
 
@@ -15,6 +21,9 @@ mkdir -p "$(dirname "$USER_CONF")" 2>/dev/null || true
 
 # Defaults
 PREFERRED_OUTPUT="internal"
+# Set by ensure_server_device when it actually moves jackd. route() reads it to
+# know the graph it sampled before the switch no longer exists.
+SERVER_RESTARTED=""
 BLUETOOTH_DEVICE=""
 # Bluetooth alsa_out buffering. NOTE: this is the buffer on the *BlueALSA A2DP
 # side*, NOT JACK's buffer. alsa_out is a resampling bridge between two clock
@@ -173,8 +182,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Single source of truth for the sink ports this stack manages. Both awk passes
 # below read it, so adding an output device means editing one list.
+# usb_out is absent on purpose: a USB interface is no longer bridged. When USB
+# is the selected output jackd runs on the interface itself, so its ports ARE
+# system:playback_*.
 JB_SINKS="system:playback_1 system:playback_2
-usb_out:playback_1 usb_out:playback_2
 hdmi_out:playback_1 hdmi_out:playback_2
 bluealsa:playback_1 bluealsa:playback_2"
 
@@ -227,7 +238,113 @@ get_internal_card_number() {
     '
 }
 
-# Frames per period the USB/HDMI bridges run at: whatever the user set as
+# The stable ALSA card id ("U192k", "sofhdadsp") for a card NUMBER.
+#
+# Card ids are used everywhere a device is persisted, because card numbers move:
+# plugging in the interface on this machine makes it card 0 and pushes the
+# internal card to 1. JACKD_DEVICE survives reboots, so a numeric device would
+# silently point jackd at whichever card happened to enumerate first.
+card_id_for_number() {
+  [ -r "/proc/asound/card$1/id" ] || return 0
+  cat "/proc/asound/card$1/id" 2>/dev/null || true
+}
+
+# True when a card id belongs to a USB device. /proc/asound/<id>/usbid is created
+# by the USB audio driver and by nothing else, which is exact -- unlike grepping
+# `aplay -l` for the string "USB", which also matches a card that merely mentions
+# it in its description.
+is_usb_card_id() { [ -e "/proc/asound/$1/usbid" ]; }
+
+# Card id of the first USB audio card; empty when there is none.
+usb_card_id() {
+  for _d in /proc/asound/card*/; do
+    _n="${_d#/proc/asound/card}"; _n="${_n%/}"
+    case "$_n" in ''|*[!0-9]*) continue ;; esac
+    _id="$(card_id_for_number "$_n")"
+    [ -n "$_id" ] || continue
+    if is_usb_card_id "$_id"; then
+      echo "$_id"
+      return 0
+    fi
+  done
+}
+
+internal_card_id() { card_id_for_number "$(get_internal_card_number)"; }
+
+# The card jackd is currently running on, as a card id. Empty when jackd is down.
+# jackd-rt starts it as `-d alsa -P <device> -C <device>`, so -P carries it.
+server_card_id() {
+  have ps || return 0
+  _dev=$(ps -o args= -C jackd 2>/dev/null | sed -n 's/.*-P[[:space:]]\{1,\}\([^ ]*\).*/\1/p' | tail -n 1)
+  [ -n "$_dev" ] || return 0
+  case "$_dev" in
+    hw:CARD=*) _t="${_dev#hw:CARD=}"; echo "${_t%%,*}" ;;
+    hw:*)      _t="${_dev#hw:}";      card_id_for_number "${_t%%,*}" ;;
+    *)         : ;;
+  esac
+}
+
+# Make sure jackd is running on card id $1, restarting it there if it is not.
+#
+# This is the heart of the USB restructure. An external interface is no longer
+# fed through alsa_out: when USB is selected, jackd runs ON the interface and
+# system:playback_* IS the interface. alsa_out structurally needs a buffer larger
+# than jackd's period (see the derivation in spawn_bridge), so a bridged
+# interface can never have the low latency it exists for.
+#
+# Returns 0 when jackd is already on the wanted card -- that comparison is also
+# what stops the boot path from looping, since jackd-rt has by then already
+# started the server from JACKD_DEVICE.
+ensure_server_device() {
+  _want="$1"
+  if [ -z "$_want" ]; then
+    log "ensure_server_device: no card id for this target; leaving jackd where it is"
+    return 0
+  fi
+
+  # Second guard, for the boot restore: jack-bridge-ports sets this because the
+  # server it would be restarting is the one that just started.
+  if [ -n "${JB_NO_SERVER_RESTART:-}" ]; then
+    log "ensure_server_device: JB_NO_SERVER_RESTART set; not moving jackd (wanted '$_want')"
+    return 0
+  fi
+
+  _cur="$(server_card_id)"
+  if [ "$_cur" = "$_want" ]; then
+    log "jackd already on card '$_want'; no restart"
+    return 0
+  fi
+
+  log "Moving jackd from card '${_cur:-none}' to '$_want'"
+  _helper="/usr/local/lib/jack-bridge/jack-bridge-service-helper"
+  if [ ! -x "$_helper" ]; then
+    log "ERROR: $_helper is missing; cannot move the server"
+    return 1
+  fi
+  # Root already (boot / service context): call it directly. pkexec needs an
+  # authentication agent, which no init script has.
+  if [ "$(id -u)" = "0" ]; then
+    if ! "$_helper" set-device "hw:CARD=$_want" >>"$LOGFILE" 2>&1; then
+      log "ERROR: set-device hw:CARD=$_want failed"
+      return 1
+    fi
+  else
+    if ! pkexec "$_helper" set-device "hw:CARD=$_want" >>"$LOGFILE" 2>&1; then
+      log "ERROR: pkexec set-device hw:CARD=$_want failed"
+      return 1
+    fi
+  fi
+
+  if ! wait_for_port "system:playback_1"; then
+    log "ERROR: jackd did not come back on card '$_want'"
+    return 1
+  fi
+  SERVER_RESTARTED=1
+  log "jackd is now on card '$_want'"
+  return 0
+}
+
+# Frames per period the HDMI bridge runs at: whatever the user set as
 # frames/period in jack-graph's JACK settings, nothing else. The running server
 # is asked first so a value changed at runtime (jack_bufsize) is honoured too;
 # $JACKD_DEFAULTS is the fallback for when jackd is not up yet, which is the
@@ -244,7 +361,7 @@ jack_period() {
   echo "$_p"
 }
 
-# Periods per buffer for the USB/HDMI bridges, same rule. JACK exposes no client
+# Periods per buffer for the HDMI bridge, same rule. JACK exposes no client
 # API for the ALSA driver's period count, so this comes from the running jackd's
 # own command line first and from $JACKD_DEFAULTS second. Reading the process
 # matters when a user edits the file without restarting the server: the bridge
@@ -353,13 +470,27 @@ wait_for_port_or_exit() {
 # Retrying is free when the device is ready: the first attempt returns as soon as
 # the port registers. Only a device that is not ready pays the backoff.
 #
-# Buffering: the bridge runs at the frames/period and periods/buffer the user
-# chose in jack-graph, exactly as entered, for USB and HDMI alike — the same
-# values jackd itself is running. These were previously hardcoded to 256x3, which
-# only matched jackd while its shipped default period was also 256; after the
-# user raised frames/period the bridge kept a buffer smaller than a single JACK
-# cycle's worth of headroom and the HDMI device underran audibly (a crackle
-# invisible to jackd's xrun counter, since jackd does not own that PCM).
+# Buffering: the bridge runs at the frames/period the user chose in jack-graph,
+# and at whatever period COUNT that value needs to stay startable. It cannot
+# simply mirror jackd's -n, because alsa_out sizes its own working delay by
+# subtracting jackd's period from the bridge's buffer (tools/alsa_out.c:771-777
+# in the jackd2 source):
+#
+#     target_delay = (num_periods*period_size / 2) - jack_buffer_size/2
+#
+# where jack_buffer_size is jack_get_buffer_size(), i.e. jackd's FRAMES/PERIOD --
+# not its total buffer. So the bridge's buffer has to exceed jackd's period, or
+# the delay collapses toward zero and past it:
+#
+#     jackd 256, bridge 256x3 = 768  ->  target  256 frames   (works)
+#     jackd 256, bridge 256x2 = 512  ->  target  128 frames   (USB distortion)
+#     jackd 1024, bridge  768        ->  target -128 frames   (HDMI crackle)
+#
+# Hence the floor below: bridge buffer >= 3x jackd's period, which by that same
+# formula leaves a target delay of exactly one full JACK cycle. Nothing is
+# hardcoded -- the user's frames/period drives it, and the period count is only
+# raised when their value would put the bridge under the floor.
+#
 # Bluetooth is deliberately exempt and keeps its own larger BT_* buffer: A2DP is
 # a bursty transport in a wholly separate clock domain. See ensure_bt_out.
 #
@@ -369,22 +500,29 @@ spawn_bridge() {
   _tool="$1"; _name="$2"; _hw="$3"; _rate="$4"; _port="$5"; _blog="$6"
   _period="$(jack_period)"
   _nperiods="$(jack_nperiods)"
-  _buffer=$(( _period * _nperiods ))
 
-  # alsa_out/alsa_in abort at startup if target_delay + max_diff exceeds the
-  # buffer. Their defaults are derived from a buffer this code no longer picks,
-  # so set both explicitly at a quarter of the buffer (half the buffer in total)
-  # and floor them at 1 frame. That keeps a bridge startable at the small buffers
-  # a low-latency USB user asks for instead of refusing to run.
-  _target=$(( _buffer / 4 ))
-  [ "$_target" -lt 1 ] && _target=1
+  # One full JACK cycle of target delay; see the derivation above.
+  _min_buffer=$(( _period * 3 ))
+  _raised=""
+  while [ $(( _period * _nperiods )) -lt "$_min_buffer" ]; do
+    _nperiods=$(( _nperiods + 1 ))
+    _raised="yes"
+  done
+  _buffer=$(( _period * _nperiods ))
+  if [ -n "$_raised" ]; then
+    log "$_name: raised bridge periods to $_nperiods (${_period}x${_nperiods}=${_buffer}) to clear the ${_min_buffer}-frame floor for a ${_period}-frame JACK period"
+  fi
+
+  # No -t/-m: alsa_out derives both from the buffer above, and its own default IS
+  # the relationship this code sizes for. Passing them explicitly is how the
+  # bridge previously ended up with a 128-frame delay on a 512-frame buffer.
 
   _try=1
   _delay=1
   while [ "$_try" -le "$BRIDGE_SPAWN_TRIES" ]; do
-    log "Spawning $_name for $_hw (attempt $_try/$BRIDGE_SPAWN_TRIES, period=$_period nperiods=$_nperiods buffer=$_buffer target_delay=$_target)"
+    log "Spawning $_name for $_hw (attempt $_try/$BRIDGE_SPAWN_TRIES, period=$_period nperiods=$_nperiods buffer=$_buffer min=$_min_buffer)"
     nohup "$_tool" -j "$_name" -d "$_hw" -r "$_rate" -p "$_period" -n "$_nperiods" \
-      -t "$_target" -m "$_target" >>"$_blog" 2>&1 &
+      >>"$_blog" 2>&1 &
     _bpid=$!
     if wait_for_port_or_exit "$_bpid" "$_port"; then
       log "$_name ports spawned successfully"
@@ -402,41 +540,6 @@ spawn_bridge() {
   done
   log "ERROR: $_name ports failed to spawn after $BRIDGE_SPAWN_TRIES attempts (check $_blog)"
   return 1
-}
-
-ensure_usb_out() {
-  # RESPAWN usb_out with current USB device (handles hot-plug after boot)
-  # Kill existing usb_out process (may be pointing to placeholder hw:99)
-  pkill -f "alsa_out -j usb_out" 2>/dev/null || true
-  sleep 0.3
-  
-  # Detect current USB audio device
-  found="$(find_card_device aplay USB)"
-  usb_card="${found%% *}"
-  usb_dev="${found#* }"
-  
-  # Fallback if no USB found (spawn with placeholder)
-  if [ -z "$usb_card" ]; then
-    log "No USB audio device detected; spawning usb_out with placeholder hw:99"
-    usb_card="99"
-    usb_dev="0"
-  else
-    log "USB audio device detected: card=$usb_card device=$usb_dev"
-  fi
-  
-  hw_dev="hw:${usb_card}"
-  if [ -n "$usb_dev" ] && [ "$usb_dev" != "0" ]; then
-    hw_dev="hw:${usb_card},${usb_dev}"
-  fi
-  
-  if have jack_samplerate; then
-    rate=$(jack_rate)
-  else
-    rate=48000
-  fi
-  
-  spawn_bridge alsa_out usb_out "$hw_dev" "$rate" \
-    "usb_out:playback_1" /tmp/jack-route-select-usb-out.log
 }
 
 ensure_hdmi_out() {
@@ -474,42 +577,8 @@ ensure_hdmi_out() {
     "hdmi_out:playback_1" /tmp/jack-route-select-hdmi-out.log
 }
 
-ensure_usb_in() {
-  # ON-DEMAND capture: spawn alsa_in reading from USB audio interface
-  # This creates usb_in:capture_1/2 ports for USB microphones/guitars
-
-  # Kill any existing usb_in process
-  pkill -f "alsa_in -j usb_in" 2>/dev/null || true
-  sleep 0.3
-
-  # Detect USB capture device
-  found="$(find_card_device arecord USB)"
-  usb_card="${found%% *}"
-  usb_dev="${found#* }"
-  
-  if [ -z "$usb_card" ]; then
-    usb_card="1"
-    usb_dev="0"
-  fi
-  
-  hw_dev="hw:${usb_card}"
-  if [ -n "$usb_dev" ]; then
-    hw_dev="hw:${usb_card},${usb_dev}"
-  fi
-  
-  if have jack_samplerate; then
-    rate=$(jack_rate)
-  else
-    rate=48000
-  fi
-
-  # Spawn alsa_in for USB capture (creates usb_in:capture_1/2 ports)
-  spawn_bridge alsa_in usb_in "$hw_dev" "$rate" \
-    "usb_in:capture_1" /tmp/jack-route-select-usb-in.log
-}
-
 ensure_bt_out() {
-  # ON-DEMAND spawning: Unlike USB/HDMI (which use hw:X,Y kernel nodes),
+  # ON-DEMAND spawning: Unlike HDMI (a hw:X,Y kernel node),
   # Bluetooth uses 'jackbridge_bluealsa' ALSA plugin that requires an ACTIVE connection.
   # This function spawns alsa_out ONLY when user selects Bluetooth output.
   mac_arg="$1"
@@ -604,16 +673,21 @@ route() {
   case "$target" in
     internal)
       # Detect the actual internal card (first non-USB card)
-      internal_card=$(get_internal_card_number)
-      out_pcm="${INTERNAL_DEVICE:-hw:${internal_card}}"
+      _int_id="$(internal_card_id)"
+      if [ -n "$_int_id" ]; then
+        out_pcm="${INTERNAL_DEVICE:-hw:CARD=$_int_id}"
+      else
+        out_pcm="${INTERNAL_DEVICE:-hw:$(get_internal_card_number)}"
+      fi
       ;;
     usb)
-      # Detect USB card/device as in ensure_usb_out
-      found="$(find_card_device aplay USB)"
-      if [ -n "$found" ]; then
-        out_pcm="plughw:${found% *},${found#* }"
+      # By card id, not plughw:N,M: this is jackd's own device now, and the card
+      # NUMBER of a USB interface changes with what else is plugged in.
+      _usb_id="$(usb_card_id)"
+      if [ -n "$_usb_id" ]; then
+        out_pcm="${USB_DEVICE:-hw:CARD=$_usb_id}"
       else
-        out_pcm="${USB_DEVICE:-plughw:1,0}"
+        out_pcm="${USB_DEVICE:-}"
       fi
       ;;
     hdmi)
@@ -659,47 +733,50 @@ route() {
   case "$target" in
     internal)
       # Kill all on-demand clients when switching to internal
-      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
       pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
-      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      if ! ensure_server_device "$(internal_card_id)"; then
+        log "ERROR: could not move jackd onto the internal card"
+        return 1
+      fi
       newpref="system:playback_"
       ;;
     usb)
-      # Kill on-demand HDMI and Bluetooth clients when switching to USB
-      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+      # No bridge. jackd moves ONTO the interface, so system:playback_* IS the
+      # interface: no alsa_out, no resampler, no second clock domain, and the
+      # user's frames/period is the real latency. See ensure_server_device.
       pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
-      pkill -f "alsa_in -j usb_in" 2>/dev/null || true  # Clean up any existing usb_in
 
-      # Spawn usb_out first
-      if ! ensure_usb_out; then
-        log "ERROR: ensure_usb_out failed - USB output not available"
+      _usb_id="$(usb_card_id)"
+      if [ -z "$_usb_id" ]; then
+        log "ERROR: no USB audio card present; cannot select USB"
         return 1
       fi
-
-      # Then try to spawn usb_in (for full-duplex support)
-      if ! ensure_usb_in; then
-        log "ERROR: ensure_usb_in failed - USB capture may not be available"
-        # Continue anyway - usb_out is working
+      if ! ensure_server_device "$_usb_id"; then
+        log "ERROR: could not move jackd onto USB card '$_usb_id'"
+        return 1
       fi
-
-      newpref="usb_out:playback_"
+      newpref="system:playback_"
       ;;
     hdmi)
-      # Kill on-demand USB and Bluetooth clients when switching to HDMI
-      # HDMI has no capture - system:capture (internal mic) remains available
-      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
+      # HDMI stays bridged: it is a second PCM on the card jackd already owns,
+      # in the display engine's clock domain. Capture (internal mic) keeps
+      # coming from jackd in duplex mode as system:capture_*.
       pkill -f "alsa_out -j bluealsa" 2>/dev/null || true
-      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      if ! ensure_server_device "$(internal_card_id)"; then
+        log "ERROR: could not move jackd onto the internal card for HDMI"
+        return 1
+      fi
       ensure_hdmi_out || log "WARNING: ensure_hdmi_out failed"
       newpref="hdmi_out:playback_"
       ;;
     bluetooth)
-      # Kill USB and HDMI clients when switching to Bluetooth
-      pkill -f "alsa_out -j usb_out" 2>/dev/null || true
       pkill -f "alsa_out -j hdmi_out" 2>/dev/null || true
-      pkill -f "alsa_in -j usb_in" 2>/dev/null || true
+      if ! ensure_server_device "$(internal_card_id)"; then
+        log "ERROR: could not move jackd onto the internal card for Bluetooth"
+        return 1
+      fi
       # Spawn on-demand Bluetooth client (kills existing first if any)
       ensure_bt_out "$arg2" || log "WARNING: ensure_bt_out failed"
       newpref="bluealsa:playback_"
@@ -709,6 +786,15 @@ route() {
       exit 1
       ;;
   esac
+
+  # A server restart tore down every client that was feeding a sink, so the
+  # source list sampled above names ports that no longer exist -- and so do the
+  # connections this would otherwise disconnect. jack-connection-manager wires
+  # clients to the new sink as they reconnect, the same path a fresh boot takes.
+  if [ -n "$SERVER_RESTARTED" ]; then
+    log "jackd was restarted for this switch; leaving reconnection to jack-connection-manager"
+    exit 0
+  fi
 
   # Disconnect from all known sinks
   jack_disconnect_all_sinks

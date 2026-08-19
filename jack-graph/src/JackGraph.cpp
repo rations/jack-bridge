@@ -12,25 +12,16 @@ JackGraph::JackGraph()
     setup_ui();
     setup_menu();
 
+    /* Connected before the first client open: the dispatcher is what carries a
+     * server shutdown from JACK's thread to this one, and it has to exist before
+     * anything can emit it. */
+    m_jack_shutdown_dispatcher.connect(sigc::mem_fun(*this, &JackGraph::on_jack_server_gone));
+
     // Connect to JACK if it's already running (system service)
     m_jack_connected = m_jack.connect("jack-graph");
     if (m_jack_connected) {
         std::cerr << "jack-graph: Connected to running JACK server" << std::endl;
-        m_jack.set_port_callback([this]() {
-            bool expected = false;
-            if (m_refresh_pending.compare_exchange_strong(expected, true)) {
-                Glib::signal_timeout().connect([this]() -> bool {
-                    m_refresh_pending.store(false);
-                    refresh_ports();
-                    return false;
-                }, 100);
-            }
-        });
-        m_jack.set_xrun_callback([this]() {
-            Glib::signal_idle().connect_once([this]() {
-                update_status_bar();
-            });
-        });
+        attach_jack_callbacks();
     } else {
         std::cerr << "jack-graph: JACK not running. Use Settings to start it." << std::endl;
     }
@@ -50,7 +41,78 @@ JackGraph::JackGraph()
 }
 
 JackGraph::~JackGraph() {
+    /* A pending reconnect poll would fire into a half-destroyed window. */
+    if (m_reconnect_timer.connected()) m_reconnect_timer.disconnect();
     m_config.save();
+}
+
+void JackGraph::attach_jack_callbacks() {
+    m_jack.set_port_callback([this]() {
+        bool expected = false;
+        if (m_refresh_pending.compare_exchange_strong(expected, true)) {
+            Glib::signal_timeout().connect([this]() -> bool {
+                m_refresh_pending.store(false);
+                refresh_ports();
+                return false;
+            }, 100);
+        }
+    });
+    m_jack.set_xrun_callback([this]() {
+        Glib::signal_idle().connect_once([this]() {
+            update_status_bar();
+        });
+    });
+    m_jack.set_shutdown_callback([this]() {
+        /* JACK's thread. Glib::Dispatcher is the thread-safe hop to the main
+         * loop; nothing else may be touched from here. */
+        m_jack_shutdown_dispatcher.emit();
+    });
+}
+
+/* The server went away without this window asking it to.
+ *
+ * That is now a routine event rather than a crash: selecting a USB interface
+ * restarts jackd on the interface, and so does unplugging or replugging one.
+ * Before this handler the canvas simply froze on a dead client until the user
+ * noticed and hit Refresh. */
+void JackGraph::on_jack_server_gone() {
+    if (!m_jack.is_connected()) return;  /* already torn down */
+
+    std::cerr << "jack-graph: JACK server went away; waiting for it to return" << std::endl;
+    m_jack.disconnect();
+    m_jack_connected = false;
+    refresh_ports();
+    update_status_bar();
+
+    m_reconnect_attempts = 0;
+    if (m_reconnect_timer.connected()) m_reconnect_timer.disconnect();
+    m_reconnect_timer = Glib::signal_timeout().connect(
+        sigc::mem_fun(*this, &JackGraph::try_reconnect_jack), 500);
+}
+
+bool JackGraph::try_reconnect_jack() {
+    if (m_jack_connected) return false;
+
+    if (m_jack.connect("jack-graph")) {
+        m_jack_connected = true;
+        attach_jack_callbacks();
+        refresh_ports();
+        update_status_bar();
+        std::cerr << "jack-graph: reconnected to JACK" << std::endl;
+        return false;
+    }
+
+    /* 60 * 500ms = 30s, which comfortably covers a device switch (jackd-rt
+     * restart plus the interface's own warm-up). A server still absent after
+     * that was stopped deliberately, not restarted, so stop polling and leave it
+     * to Settings -> Start. */
+    if (++m_reconnect_attempts >= 60) {
+        std::cerr << "jack-graph: JACK did not return within 30s; stopping reconnect polling"
+                  << std::endl;
+        update_status_bar();
+        return false;
+    }
+    return true;
 }
 
 void JackGraph::setup_ui() {
@@ -254,21 +316,7 @@ void JackGraph::on_menu_settings() {
         if (m_server.is_running()) {
             m_jack_connected = m_jack.connect("jack-graph");
             if (m_jack_connected) {
-                m_jack.set_port_callback([this]() {
-                    bool expected = false;
-                    if (m_refresh_pending.compare_exchange_strong(expected, true)) {
-                        Glib::signal_timeout().connect([this]() -> bool {
-                            m_refresh_pending.store(false);
-                            refresh_ports();
-                            return false;
-                        }, 100);
-                    }
-                });
-                m_jack.set_xrun_callback([this]() {
-                    Glib::signal_idle().connect_once([this]() {
-                        update_status_bar();
-                    });
-                });
+                attach_jack_callbacks();
                 refresh_ports();
             }
         }
@@ -293,6 +341,13 @@ void JackGraph::on_menu_settings() {
         update_status_bar();
     });
     
+    /* The constructor read the server before these callbacks existed, so the
+     * frames/period query had nothing to ask. Re-read now that it does. */
+    dialog.set_buffer_size_query([this]() -> unsigned int {
+        return m_jack.is_connected() ? m_jack.get_buffer_size() : 0;
+    });
+    dialog.reload();
+
     dialog.run();
 }
 

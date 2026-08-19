@@ -142,8 +142,21 @@ echo "Installed init script to ${INIT_DIR}/jackd-rt"
 
 # Install defaults file
 mkdir -p "$DEFAULTS_DIR"
-install -m 0644 contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
-echo "Installed defaults to ${DEFAULTS_DIR}/jackd-rt"
+# /etc/default/jackd-rt holds the user's JACK settings -- jack-graph writes their
+# sample rate, frames/period, periods/buffer, MIDI driver and device here. It is
+# a config file, so install it only when absent.
+#
+# This used to overwrite unconditionally, which silently reset the audio settings
+# on every upgrade: the shipped template has every value commented out, so after
+# a reinstall the init script fell back to its own defaults and ran the server at
+# JACKD_NPERIODS=3 no matter what the user had chosen. jack-graph then showed one
+# thing while jackd ran another.
+if [ -f "${DEFAULTS_DIR}/jackd-rt" ]; then
+    echo "Keeping existing ${DEFAULTS_DIR}/jackd-rt (your JACK settings live here)"
+else
+    install -m 0644 contrib/default/jackd-rt "${DEFAULTS_DIR}/jackd-rt"
+    echo "Installed defaults to ${DEFAULTS_DIR}/jackd-rt"
+fi
 
 # Ensure JACK_NO_AUDIO_RESERVATION is set in /etc/default/jackd-rt to allow service startup
 # without a session D-Bus (useful for headless/service start). If the variable already
@@ -665,6 +678,33 @@ if [ -f "contrib/usr/local/lib/jack-bridge/jack-bridge-service-helper" ]; then
     echo "  ✓ Installed jack-bridge-service-helper to ${USR_LIB_DIR}/jack-bridge-service-helper"
 else
     echo "WARNING: jack-bridge-service-helper not found"
+fi
+
+# Install the USB audio hotplug handler and its udev rule.
+#
+# Needed because jackd runs directly ON a USB interface rather than bridging it:
+# pulling the cable takes the server down, and plugging it back in does not
+# bring it back, since jackd-rt only picks a device at start.
+if [ -f "contrib/usr/local/lib/jack-bridge/jack-usb-hotplug" ]; then
+    echo "Installing USB audio hotplug handler..."
+    mkdir -p "${USR_LIB_DIR}"
+    install -m 0755 contrib/usr/local/lib/jack-bridge/jack-usb-hotplug "${USR_LIB_DIR}/jack-usb-hotplug"
+    echo "  ✓ Installed jack-usb-hotplug to ${USR_LIB_DIR}/jack-usb-hotplug"
+
+    if [ -f "contrib/etc/udev/rules.d/90-jack-bridge-usb-audio.rules" ]; then
+        mkdir -p "${ETC_DIR}/udev/rules.d"
+        install -m 0644 contrib/etc/udev/rules.d/90-jack-bridge-usb-audio.rules \
+            "${ETC_DIR}/udev/rules.d/90-jack-bridge-usb-audio.rules"
+        echo "  ✓ Installed udev rule to ${ETC_DIR}/udev/rules.d/90-jack-bridge-usb-audio.rules"
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules >/dev/null 2>&1 || true
+            echo "  ✓ Reloaded udev rules"
+        fi
+    else
+        echo "  ! udev rule not found; hotplug recovery will not run"
+    fi
+else
+    echo "WARNING: jack-usb-hotplug not found; unplugging a USB interface will leave JACK down"
 fi
 
 # --- jack-bridge Bluetooth adapter convenience helper ---

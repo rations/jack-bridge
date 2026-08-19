@@ -13,6 +13,7 @@
 /var/log/jack-connection-manager.log
 /var/log/jack-bridge-ports.log
 /var/log/jack-bridge-detect.log
+/var/log/jack-bridge-hotplug.log
 /var/log/jack-bridge-bluetooth-config.log
 /var/log/bluealsad.log
 /var/log/bluetoothd.log

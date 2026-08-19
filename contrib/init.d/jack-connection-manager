@@ -53,9 +53,10 @@ start_daemon() {
     done
     
     # Wait for bridge ports to spawn (max 10 seconds), but only when the user's
-    # selection actually has a bridge to wait for. usb_out/hdmi_out never appear
-    # for an internal or Bluetooth preference, so waiting on them there always
-    # burns the full 10s. That is invisible at boot but not from the GUI:
+    # selection actually has a bridge to wait for. HDMI is the only one left:
+    # internal and USB both run jackd directly on the card (system:playback_*),
+    # and Bluetooth is spawned on demand. Waiting on hdmi_out for any of those
+    # always burns the full 10s. That is invisible at boot but not from the GUI:
     # jack-bridge-service-helper calls this synchronously under pkexec, so an
     # internal user would see jack-graph hang for 10s on every Apply.
     PREFERRED_OUTPUT=internal
@@ -65,10 +66,10 @@ start_daemon() {
     fi
 
     case "$PREFERRED_OUTPUT" in
-        usb|hdmi)
+        hdmi)
             echo "Waiting for bridge ports (PREFERRED_OUTPUT=$PREFERRED_OUTPUT)..."
             for i in $(seq 1 10); do
-                if su - "$LOGIN_USER" -c "jack_lsp 2>/dev/null | grep -q 'usb_out\\|hdmi_out'"; then
+                if su - "$LOGIN_USER" -c "jack_lsp 2>/dev/null | grep -q 'hdmi_out'"; then
                     break
                 fi
                 sleep 1

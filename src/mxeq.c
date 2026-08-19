@@ -147,6 +147,8 @@ static GtkWidget *g_bt_tree = NULL;
    Bluetooth on success, and falls back to Internal when a BT route fails. */
 static GtkWidget *g_rb_internal = NULL;
 static GtkWidget *g_rb_bt = NULL;
+static GtkWidget *g_rb_usb = NULL;
+static GtkWidget *g_rb_hdmi = NULL;
 /* Global mixer data for dynamic card switching */
 static MixerData *g_mixer_data = NULL;
 /* Forward declaration used by Devices (Playback) panel to derive MAC from BlueZ path */
@@ -1570,6 +1572,62 @@ static int get_usb_card_number(void) {
 static gboolean is_usb_present(void) {
     return (get_usb_card_number() >= 0);
 }
+
+/* The stable ALSA card id ("U192k") for a card number, or NULL. Caller frees.
+ * jack-route-select has the same lookup in shell (card_id_for_number). */
+static gchar *card_id_for_number(int card) {
+    gchar *path = g_strdup_printf("/proc/asound/card%d/id", card);
+    gchar *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) {
+        g_free(path);
+        return NULL;
+    }
+    g_free(path);
+    return g_strstrip(contents);
+}
+
+/* TRUE when jackd is currently running on the USB interface.
+ *
+ * This replaces a `jack_lsp | grep '^usb_out:'` test. USB is no longer bridged:
+ * jack-route-select restarts jackd ON the interface, so there is no usb_out
+ * client to look for and system:playback_* IS the interface. What identifies
+ * USB mode now is which card the server was started with. jackd-rt passes it as
+ * `-P <device>`; the same parse lives in jack-route-select's server_card_id(). */
+static gboolean jackd_is_on_usb_card(void) {
+    int usb_card = get_usb_card_number();
+    if (usb_card < 0) return FALSE;
+
+    gchar *usb_id = card_id_for_number(usb_card);
+    if (!usb_id) return FALSE;
+
+    gboolean match = FALSE;
+    FILE *fp = popen("ps -o args= -C jackd 2>/dev/null", "r");
+    if (fp) {
+        char line[1024];
+        while (fgets(line, sizeof(line), fp)) {
+            char *p = strstr(line, "-P ");
+            if (!p) continue;
+            p += 3;
+            char dev[256];
+            if (sscanf(p, "%255s", dev) != 1) continue;
+
+            if (g_str_has_prefix(dev, "hw:CARD=")) {
+                gchar *id = g_strdup(dev + strlen("hw:CARD="));
+                gchar *comma = strchr(id, ',');
+                if (comma) *comma = '\0';
+                match = (g_strcmp0(id, usb_id) == 0);
+                g_free(id);
+            } else if (g_str_has_prefix(dev, "hw:")) {
+                match = (atoi(dev + 3) == usb_card);
+            }
+            if (match) break;
+        }
+        pclose(fp);
+    }
+
+    g_free(usb_id);
+    return match;
+}
 static gboolean is_bt_present(void) {
     if (g_file_test("/usr/bin/bluealsa", G_FILE_TEST_IS_REGULAR) ||
         g_file_test("/usr/sbin/bluealsa", G_FILE_TEST_IS_REGULAR)) return TRUE;
@@ -2047,6 +2105,97 @@ static gchar *bt_target_mac(void) {
     return mac;
 }
 
+/* Point the mixer section at whatever `target` implies. Extracted so the three
+ * callers -- the radio handler, the startup sync, and the live poll below --
+ * cannot drift into showing different controls for the same device. */
+static void apply_device_mixer(const char *target) {
+    if (g_strcmp0(target, "usb") == 0) {
+        int usb_card = get_usb_card_number();
+        if (usb_card >= 0) {
+            rebuild_mixer_for_card(usb_card, FALSE);
+        } else {
+            show_mixer_placeholder("The USB audio interface is not connected.");
+        }
+    } else if (g_strcmp0(target, "hdmi") == 0) {
+        show_mixer_placeholder("Mixer controls are not available for HDMI output.\nUse your display or receiver to adjust the volume.");
+    } else if (g_strcmp0(target, "bluetooth") == 0) {
+        show_mixer_placeholder("Mixer controls are not available for Bluetooth output.\nUse your Bluetooth device to adjust the volume.");
+    } else {
+        rebuild_mixer_for_card(get_internal_card_number(), TRUE);
+    }
+}
+
+/* Last device state this panel rendered, so the poll only touches widgets when
+ * something actually differs. */
+static gchar   *g_devpoll_output = NULL;
+static gboolean g_devpoll_usb_present = FALSE;
+
+/* Select a radio without letting it route.
+ *
+ * gtk_toggle_button_set_active() fires "toggled", and on_device_radio_toggled()
+ * would then re-run the very switch that has already happened -- restarting
+ * jackd a second time, or raising the Bluetooth "no device selected" dialog.
+ * Blocking the handler around the call is how the rest of this file does it
+ * (see bt_route_revert_to_internal). */
+static void set_device_radio_quietly(GtkWidget *rb) {
+    if (!rb) return;
+    g_signal_handlers_block_by_func(rb, G_CALLBACK(on_device_radio_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(rb), TRUE);
+    g_signal_handlers_unblock_by_func(rb, G_CALLBACK(on_device_radio_toggled), NULL);
+}
+
+/* Follow device changes made outside this window.
+ *
+ * The output device is no longer only ours to change: jack-graph's JACK settings
+ * writes it (it is a separate process, so nothing tells us), and a USB hotplug
+ * moves the server with no GUI involved at all. Without this the mixer kept
+ * showing the previous card's controls until mxeq was closed and reopened.
+ *
+ * PREFERRED_OUTPUT is the whole input, because the mixer content is a pure
+ * function of it -- internal and usb each map to a card, hdmi and bluetooth to a
+ * placeholder. That keeps a tick down to one small file read plus the /proc
+ * checks in is_usb_present(), which is also what makes the USB button grey out
+ * on its own when the interface is unplugged. */
+static gboolean device_state_poll(gpointer user_data) {
+    (void)user_data;
+
+    gchar *pref = load_preferred_output();
+    if (!pref) pref = g_strdup("internal");
+
+    gboolean usb_present = is_usb_present();
+    if (usb_present != g_devpoll_usb_present) {
+        g_devpoll_usb_present = usb_present;
+        if (g_rb_usb) gtk_widget_set_sensitive(g_rb_usb, usb_present);
+    }
+
+    if (g_strcmp0(pref, g_devpoll_output) == 0) {
+        g_free(pref);
+        return G_SOURCE_CONTINUE;
+    }
+
+    /* A saved preference of "usb" with no interface attached is what the hotplug
+     * fallback leaves behind: the server is back on the internal card and the
+     * user's choice is being kept for when the cable returns. Show what is
+     * actually playing, and leave devices.conf alone. */
+    const char *shown = pref;
+    if (g_strcmp0(pref, "usb") == 0 && !usb_present) shown = "internal";
+
+    fprintf(stderr, "mxeq: output changed elsewhere (%s -> %s); updating panel\n",
+            g_devpoll_output ? g_devpoll_output : "?", shown);
+
+    if (g_strcmp0(shown, "usb") == 0)            set_device_radio_quietly(g_rb_usb);
+    else if (g_strcmp0(shown, "hdmi") == 0)      set_device_radio_quietly(g_rb_hdmi);
+    else if (g_strcmp0(shown, "bluetooth") == 0) set_device_radio_quietly(g_rb_bt);
+    else                                         set_device_radio_quietly(g_rb_internal);
+
+    apply_device_mixer(shown);
+
+    g_free(g_devpoll_output);
+    g_devpoll_output = g_strdup(pref);
+    g_free(pref);
+    return G_SOURCE_CONTINUE;
+}
+
 static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
     (void)user_data;
     if (!gtk_toggle_button_get_active(tb)) return;
@@ -2063,21 +2212,15 @@ static void on_device_radio_toggled(GtkToggleButton *tb, gpointer user_data) {
 
     if (g_strcmp0(label, "internal") == 0) {
         ok = route_to_target_async("internal");
-        /* Switch mixer to show detected internal card controls */
-        int internal_card = get_internal_card_number();
-        rebuild_mixer_for_card(internal_card, TRUE);
+        apply_device_mixer("internal");
     } else if (g_strcmp0(label, "usb") == 0) {
         ok = route_to_target_async("usb");
-        /* Switch mixer to show USB card controls */
-        int usb_card = get_usb_card_number();
-        if (usb_card >= 0) {
-            rebuild_mixer_for_card(usb_card, FALSE);
-        }
+        apply_device_mixer("usb");
     } else if (g_strcmp0(label, "hdmi") == 0) {
         ok = route_to_target_async("hdmi");
-        show_mixer_placeholder("Mixer controls are not available for HDMI output.\nUse your display or receiver to adjust the volume.");
+        apply_device_mixer("hdmi");
     } else if (g_strcmp0(label, "bluetooth") == 0) {
-        show_mixer_placeholder("Mixer controls are not available for Bluetooth output.\nUse your Bluetooth device to adjust the volume.");
+        apply_device_mixer("bluetooth");
 
         /* If the BT bridge is already up, nothing to do — re-routing here would
          * also raise a spurious "no device selected" dialog when the tree has no
@@ -2256,6 +2399,8 @@ static void create_devices_panel(GtkWidget *main_box) {
        back to Internal on failure) */
     g_rb_internal = ui->rb_internal;
     g_rb_bt = ui->rb_bt;
+    g_rb_usb = ui->rb_usb;
+    g_rb_hdmi = ui->rb_hdmi;
 
     /* Presence-based sensitivity (no hardcoding) */
     gtk_widget_set_sensitive(ui->rb_internal, TRUE);
@@ -2280,8 +2425,7 @@ static void create_devices_panel(GtkWidget *main_box) {
     gboolean bt_active = FALSE;
 
     if (have_usb) {
-        FILE *fp = popen("jack_lsp 2>/dev/null | grep -q '^usb_out:'", "r");
-        if (fp) { usb_active = (pclose(fp) == 0); }
+        usb_active = jackd_is_on_usb_card();
     }
 
     if (have_hdmi) {
@@ -2300,11 +2444,12 @@ static void create_devices_panel(GtkWidget *main_box) {
     const char *startup_route = NULL;
     int init_dev_type = 0; /* 0=internal, 1=usb, 2=hdmi, 3=bt */
 
-    /* A device whose ports are actually up wins over a saved preference; only
-     * when nothing is running do we fall back to PREFERRED_OUTPUT and spawn it.
-     * USB needs that fallback as much as HDMI does: when the boot restore fails
-     * to spawn usb_out (the interface can refuse to open for the first seconds
-     * after boot), usb_active is FALSE, and without the preference check the GUI
+    /* A device that is actually live wins over a saved preference; only when
+     * nothing is running do we fall back to PREFERRED_OUTPUT and apply it.
+     * USB needs that fallback as much as HDMI does: if the boot restore could
+     * not put jackd on the interface (it can refuse to open for the first
+     * seconds after boot, and jackd-rt falls back to the internal card when it
+     * is absent), usb_active is FALSE, and without the preference check the GUI
      * silently selected Internal and left the user's saved choice unapplied. */
     if (bt_active) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->rb_bt), TRUE);
@@ -2341,6 +2486,20 @@ static void create_devices_panel(GtkWidget *main_box) {
     if (startup_route) {
         route_to_target_async(startup_route);
     }
+
+    /* Baseline the poll from PREFERRED_OUTPUT rather than from init_dev_type.
+     * The poll's job is to notice that PREFERRED_OUTPUT changed, so it has to
+     * start from the same value it will compare against. Seeding it from
+     * init_dev_type instead would make the first tick look like a change
+     * whenever live state and saved preference disagree -- which is exactly the
+     * case where the interface is unplugged -- and rebuild the mixer for
+     * nothing. Where they disagree, live state stays on screen, as above. */
+    {
+        gchar *seed = load_preferred_output();
+        g_devpoll_output = seed ? seed : g_strdup("internal");
+    }
+    g_devpoll_usb_present = is_usb_present();
+    g_timeout_add_seconds(2, device_state_poll, NULL);
 
     /* Sync mixer UI to the initially-selected device.
      * main() always initializes the mixer with the internal card; if a different

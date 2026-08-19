@@ -1,0 +1,27 @@
+# /etc/udev/rules.d/90-jack-bridge-usb-audio.rules
+#
+# Keep jackd on the right card when an audio interface is plugged in or pulled
+# out. This matters because jack-bridge runs jackd directly ON a USB interface
+# rather than bridging it through alsa_out: unplugging the interface takes the
+# server down with it, and replugging it does not bring the server back, because
+# jackd-rt only chooses its device at start.
+#
+# KERNEL=="card[0-9]*" deliberately matches only the card node. The sound
+# subsystem also emits an event per pcm and control node (pcmC0D0p, controlC0,
+# ...), and matching those would fire the handler a dozen times for one cable.
+#
+# The handler detaches itself and returns immediately, because RUN+= is meant for
+# very short tasks and a jackd restart is not one. See the long comment in
+# jack-usb-hotplug for why a detached grandchild survives under eudev, checked
+# against its source rather than taken from udev(7), whose warning describes
+# systemd-udevd's cgroup kill.
+#
+# It then settles, takes a lock, and does nothing unless jackd is actually on the
+# wrong card -- so the remaining duplicate events cost nothing.
+#
+# This rule needs udev only as a notification. Nothing else in jack-bridge
+# depends on it: if the rule never fires, the stack behaves exactly as it did
+# before hotplug recovery existed.
+
+ACTION=="add",    SUBSYSTEM=="sound", KERNEL=="card[0-9]*", RUN+="/usr/local/lib/jack-bridge/jack-usb-hotplug add"
+ACTION=="remove", SUBSYSTEM=="sound", KERNEL=="card[0-9]*", RUN+="/usr/local/lib/jack-bridge/jack-usb-hotplug remove"

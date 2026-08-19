@@ -72,6 +72,7 @@ DBUS_BLUEALSA="/usr/share/dbus-1/system.d/org.bluealsa.conf"
 DBUS_BLUEALSA_CONF="/etc/asound.conf.d/20-jack-bridge-bluealsa.conf"
 LIMITS_CONF="/etc/security/limits.d/audio.conf"
 LOGROTATE_CONF="/etc/logrotate.d/jack-bridge"
+UDEV_RULE_USB_AUDIO="/etc/udev/rules.d/90-jack-bridge-usb-audio.rules"
 PULSE_AUTOSPAWN_CONF="/etc/pulse/client.conf.d/01-no-autospawn.conf"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 ICON_FILE="$ICON_DIR/alsasoundconnectlogo.png"
@@ -223,6 +224,18 @@ fi
 if [ -f "/etc/polkit-1/rules.d/50-jack-bridge.rules" ]; then
   rm -f "/etc/polkit-1/rules.d/50-jack-bridge.rules"
   log "  Removed 50-jack-bridge.rules"
+fi
+
+# Remove the USB audio hotplug udev rule. The handler script itself lives in the
+# jack-bridge lib directory and goes with the rest of it; the rule must be
+# removed separately, or udev keeps invoking a script that is no longer there on
+# every card add and remove.
+if [ -f "$UDEV_RULE_USB_AUDIO" ]; then
+  rm -f "$UDEV_RULE_USB_AUDIO"
+  log "  Removed $UDEV_RULE_USB_AUDIO"
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+  fi
 fi
 
 # Remove D-Bus policies and services

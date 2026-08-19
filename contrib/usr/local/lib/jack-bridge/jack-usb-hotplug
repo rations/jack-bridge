@@ -1,0 +1,189 @@
+#!/bin/sh
+# jack-usb-hotplug - keep jackd on the right card across audio device hotplug.
+#
+# Run from udev (contrib/etc/udev/rules.d/90-jack-bridge-usb-audio.rules) on any
+# sound card add or remove, as root.
+#
+# Why this exists: a USB interface is no longer bridged through alsa_out. When
+# the user selects it, jackd runs ON it -- which means unplugging the interface
+# takes the server down with it, and the machine goes silent until someone
+# intervenes. Replugging it does not bring the server back either, because
+# jackd-rt only chooses a device at start.
+#
+# The recovery is deliberately thin: this script decides only WHETHER the server
+# is on the wrong card, and leaves WHICH card to jackd-rt, which already re-runs
+# its own selection on every start and already falls back to the internal card
+# when the configured device is absent (see device_card_present there). So both
+# directions are the same action:
+#
+#   unplug  -> jackd is dead      -> restart -> presence check fails -> internal
+#   replug  -> jackd is on internal, JACKD_DEVICE names the interface again
+#                                 -> restart -> presence check passes -> USB
+#
+# JACKD_DEVICE and PREFERRED_OUTPUT are never rewritten here. The user's choice
+# outlives the cable; falling back to internal is a temporary state, not a new
+# preference. That also costs nothing in routing terms: with USB unbridged,
+# PREFERRED_OUTPUT=usb and =internal both target system:playback_*.
+
+set -eu
+
+HELPER="/usr/local/lib/jack-bridge/jack-bridge-service-helper"
+DEFAULTS_FILE="/etc/default/jackd-rt"
+DETECT_SCRIPT="/usr/local/lib/jack-bridge/detect-alsa-device.sh"
+PIDFILE="/var/run/jackd-rt.pid"
+LOGFILE="/var/log/jack-bridge-hotplug.log"
+LOCKFILE="/var/run/jack-bridge-hotplug.lock"
+
+# How long to let the kernel finish enumerating a card before looking at it. A
+# single interface produces several sound-subsystem events, and /proc/asound is
+# not complete on the first one.
+SETTLE_SECS=2
+
+log() {
+    printf '%s [jack-usb-hotplug] %s\n' "$(date --iso-8601=seconds)" "$*" \
+        >> "$LOGFILE" 2>/dev/null || true
+}
+
+# Detach, because the real work (a jackd-rt restart) takes seconds and udev's
+# RUN+= is only for "very short-running foreground tasks" -- a slow one blocks
+# every further event for this and any dependent device.
+#
+# udev(7) claims forked processes are killed "detached or not". That text is
+# inherited from systemd-udevd, where the event's whole cgroup is killed. eudev
+# -- the udev this project actually runs on, and the only one it needs to,
+# since the whole stack is SysV init scripts -- has no cgroup code at all.
+# Checked against eudev-3.2.12:
+#
+#   src/udev/udev-event.c:628  kill(pid, SIGKILL) -- the direct child only, and
+#                              only on timeout. No killpg, no kill(-pid), and no
+#                              cgroup code anywhere in the tree.
+#   src/udev/udev-event.c:436  prctl(PR_SET_PDEATHSIG, SIGTERM) on the RUN child,
+#                              but prctl(2) clears that value "for the child of a
+#                              fork(2)" -- so the grandchild started below does
+#                              not carry it.
+#
+# Hence: fork once, and the work outlives the event.
+#
+# The redirects are not cosmetic. udev pipes the RUN child's stdout and stderr
+# and epolls them (udev-event.c:727-734); a grandchild holding those descriptors
+# open would keep udev waiting for EOF long after this half has exited.
+if [ "${JB_HOTPLUG_DETACHED:-}" != "1" ]; then
+    JB_HOTPLUG_DETACHED=1
+    export JB_HOTPLUG_DETACHED
+    setsid "$0" "$@" </dev/null >/dev/null 2>&1 &
+    exit 0
+fi
+
+ACTION="${1:-unknown}"
+
+# Settle BEFORE taking the lock, not after. Every event for one physical device
+# waits out the same window in parallel and then races for the lock; the winner
+# evaluates the finished state and the losers exit, because by then there is
+# nothing left to decide. Sleeping while holding the lock would instead make
+# each event re-evaluate in turn, the first of them on a half-enumerated card.
+sleep "$SETTLE_SECS"
+
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCKFILE" 2>/dev/null || true
+    if ! flock -n 9 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+# The card id ("U192k") named by an ALSA device string, or empty.
+#
+# The same parse lives in jack-route-select (server_card_id) and, as a presence
+# test, in contrib/init.d/jackd-rt (device_card_present). All three must agree on
+# what hw:CARD=id and hw:N mean; change them together.
+device_card_id() {
+    case "${1:-}" in
+        hw:CARD=*)
+            _t="${1#hw:CARD=}"
+            echo "${_t%%,*}"
+            ;;
+        hw:[0-9]*)
+            _t="${1#hw:}"
+            _t="${_t%%,*}"
+            [ -r "/proc/asound/card$_t/id" ] && cat "/proc/asound/card$_t/id" 2>/dev/null || true
+            ;;
+        *)
+            : ;;
+    esac
+}
+
+# The card jackd is running on right now, empty when it is not running.
+server_card_id() {
+    _dev=$(ps -o args= -C jackd 2>/dev/null \
+           | sed -n 's/.*-P[[:space:]]\{1,\}\([^ ]*\).*/\1/p' | tail -n 1)
+    device_card_id "$_dev"
+}
+
+# The card jackd-rt would pick if it were started now: the configured device when
+# its card is present, otherwise whatever the detector chooses. This mirrors the
+# device branch of contrib/init.d/jackd-rt.
+expected_card_id() {
+    JACKD_DEVICE=""
+    # shellcheck source=/dev/null
+    [ -r "$DEFAULTS_FILE" ] && . "$DEFAULTS_FILE"
+
+    if [ -n "${JACKD_DEVICE:-}" ]; then
+        _id="$(device_card_id "$JACKD_DEVICE")"
+        if [ -n "$_id" ] && [ -d "/proc/asound/$_id" ]; then
+            echo "$_id"
+            return 0
+        fi
+    fi
+
+    [ -x "$DETECT_SCRIPT" ] || return 0
+    device_card_id "$(/bin/sh "$DETECT_SCRIPT" 2>/dev/null || true)"
+}
+
+# Test the daemon, not the pidfile's process. jackd-rt starts the server through
+# `su -l <user> -s /bin/sh -c 'exec jackd ...'` and start-stop-daemon records the
+# pid of that WRAPPER, not of jackd -- so a live pidfile process says nothing
+# about whether the server survived. pgrep also avoids kill -0, which answers
+# EPERM rather than "gone" whenever this runs as anyone but root.
+#
+# If jackd instead hangs rather than exiting when its card disappears, this
+# returns true and the card comparison below catches it: argv still names the
+# interface that is no longer there, so the restart happens either way.
+jackd_alive() {
+    pgrep -x jackd >/dev/null 2>&1
+}
+
+# No pidfile at all means jackd-rt was stopped on purpose -- jack-graph's Stop
+# button, or a shutdown in progress -- because stop() removes it. Plugging a
+# device in must not undo that. A pidfile that is still there while jackd is not
+# running is the opposite: nothing asked the server to stop, it died on its own,
+# which is exactly what unplugging its card does.
+if [ ! -f "$PIDFILE" ]; then
+    log "$ACTION: jackd-rt is stopped (no pidfile); leaving it alone"
+    exit 0
+fi
+
+if [ ! -x "$HELPER" ]; then
+    log "$ACTION: $HELPER is missing; cannot recover"
+    exit 1
+fi
+
+want="$(expected_card_id || true)"
+have="$(server_card_id || true)"
+
+if ! jackd_alive; then
+    log "$ACTION: jackd has died (stale pidfile); restarting, expecting card '${want:-auto}'"
+elif [ -z "$want" ]; then
+    log "$ACTION: cannot determine the expected card; leaving jackd on '${have:-none}'"
+    exit 0
+elif [ "$have" = "$want" ]; then
+    log "$ACTION: jackd already on card '$have'; nothing to do"
+    exit 0
+else
+    log "$ACTION: jackd is on '${have:-none}' but should be on '$want'; restarting"
+fi
+
+if "$HELPER" refresh >>"$LOGFILE" 2>&1; then
+    log "$ACTION: restarted; jackd is now on card '$(server_card_id || true)'"
+else
+    log "$ACTION: ERROR: $HELPER refresh failed"
+    exit 1
+fi

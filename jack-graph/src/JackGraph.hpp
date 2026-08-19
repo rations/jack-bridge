@@ -1,5 +1,7 @@
 #pragma once
 
+#include <glibmm/dispatcher.h>
+
 #include <gtkmm.h>
 #include <atomic>
 #include <memory>
@@ -23,6 +25,12 @@ private:
     void setup_ui();
     void setup_menu();
     void refresh_ports();
+    /* One place that wires the JACK callbacks. It is called from three -- first
+     * connect, reconnect after Settings->Start, and reconnect after the server
+     * went away -- and every one of them must register the same set. */
+    void attach_jack_callbacks();
+    void on_jack_server_gone();
+    bool try_reconnect_jack();
     void sync_canvas_from_jack();
     void sync_canvas_from_alsa();
 
@@ -49,6 +57,10 @@ private:
     Gtk::Label m_statusbar;
 
     JackClient m_jack;
+    /* Thread-safe hop from JACK's shutdown thread to the GTK main loop. */
+    Glib::Dispatcher m_jack_shutdown_dispatcher;
+    sigc::connection m_reconnect_timer;
+    int m_reconnect_attempts = 0;
     AlsaClient m_alsa;
     Config m_config;
     JackServerControl m_server;

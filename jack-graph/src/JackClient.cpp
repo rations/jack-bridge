@@ -2,7 +2,7 @@
 #include <cstring>
 #include <algorithm>
 
-JackClient::JackClient() : m_client(nullptr), m_xrun_count(0) {
+JackClient::JackClient() : m_client(nullptr), m_server_gone(false), m_xrun_count(0) {
 }
 
 JackClient::~JackClient() {
@@ -13,6 +13,8 @@ bool JackClient::connect(const std::string& client_name) {
     if (m_client) {
         disconnect();
     }
+
+    m_server_gone.store(false);
 
     jack_status_t status;
     m_client = jack_client_open(client_name.c_str(), (jack_options_t)(JackNullOption | JackNoStartServer), &status);
@@ -26,6 +28,7 @@ bool JackClient::connect(const std::string& client_name) {
     jack_set_sample_rate_callback(m_client, sample_rate_callback, this);
     jack_set_buffer_size_callback(m_client, buffer_size_callback, this);
     jack_set_xrun_callback(m_client, xrun_callback, this);
+    jack_on_shutdown(m_client, shutdown_callback, this);
 
     if (jack_activate(m_client)) {
         jack_client_close(m_client);
@@ -39,14 +42,23 @@ bool JackClient::connect(const std::string& client_name) {
 
 void JackClient::disconnect() {
     if (!m_client) return;
-    
+
     // Clear callbacks FIRST to prevent them firing during shutdown
     m_port_callback = nullptr;
     m_xrun_callback = nullptr;
-    
-    jack_deactivate(m_client);
+    m_shutdown_callback = nullptr;
+
+    /* Once jack_on_shutdown has fired the server is already gone, so
+     * jack_deactivate would be talking to a socket nothing is answering. Only
+     * the local handle still needs freeing -- and it does still need freeing,
+     * which is why this runs from the main loop rather than from the shutdown
+     * callback itself, where closing the client is not allowed. */
+    if (!m_server_gone.load()) {
+        jack_deactivate(m_client);
+    }
     jack_client_close(m_client);
     m_client = nullptr;
+    m_server_gone.store(false);
     
     std::lock_guard<std::mutex> lock(m_mutex);
     m_ports.clear();
@@ -226,4 +238,14 @@ int JackClient::xrun_callback(void* arg) {
         }
     }
     return 0;
+}
+
+/* JACK's own thread, and by the time this runs the client handle is already
+ * dead: nothing here may call into JACK or touch a widget. It records the fact
+ * and hands off -- JackGraph marshals the teardown and the reconnect onto the
+ * GTK main loop, which is also the only place jack_client_close() is legal. */
+void JackClient::shutdown_callback(void* arg) {
+    JackClient* self = static_cast<JackClient*>(arg);
+    self->m_server_gone.store(true);
+    if (self->m_shutdown_callback) self->m_shutdown_callback();
 }

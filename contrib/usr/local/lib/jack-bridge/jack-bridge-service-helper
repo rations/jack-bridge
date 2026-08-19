@@ -45,6 +45,66 @@ EOF
         service jack-connection-manager restart || \
             echo "WARNING: jack-connection-manager failed to restart; apps will not follow the selected output"
         ;;
+    refresh)
+        # Restart the server on whatever $DEFAULTS_FILE already says, changing
+        # nothing. This is the USB hotplug path: jackd-rt re-runs its own device
+        # selection on start, and its presence check falls back to the internal
+        # card when the configured interface is not plugged in -- so "restart and
+        # let it re-decide" is the whole recovery, in both directions.
+        service jackd-rt restart
+        # Unlike set-device below, this one DOES restore the bridge ports. Its
+        # caller is the hotplug handler, not jack-route-select, so there is no
+        # loop to avoid -- and an HDMI or Bluetooth user whose server was
+        # restarted needs their alsa_out back or they get silence. The route
+        # helper it runs is passed JB_NO_SERVER_RESTART=1 by that service, so it
+        # re-applies routing without trying to move the server again.
+        service jack-bridge-ports start || \
+            echo "WARNING: jack-bridge-ports failed to start; a bridged output may be silent"
+        service jack-connection-manager restart || \
+            echo "WARNING: jack-connection-manager failed to restart; apps will not follow the selected output"
+        ;;
+    set-device)
+        # Point jackd at a different card and restart it there. This is how the
+        # USB path works now: an external interface is not bridged through
+        # alsa_out any more, jackd runs ON it, so selecting USB means moving the
+        # server rather than spawning a resampler.
+        #
+        # $DEFAULTS_FILE is sourced as root by /etc/init.d/jackd-rt, so anything
+        # written here executes as root at every boot. Validate hard, and with a
+        # fully anchored regex rather than a `case` glob -- shell globs are loose
+        # enough that hw:CARD=a*[ ;] patterns can slip past them.
+        HW="$2"
+        # Reject embedded newlines before the pattern test. grep matches a line
+        # at a time, so "hw:CARD=x<newline>JACKD_ARGS=..." passes an anchored
+        # regex on its first line and then appends a second line of its own to a
+        # file that /etc/init.d/jackd-rt sources as root. wc -l counts newlines
+        # in the value because printf adds none.
+        if [ "$(printf '%s' "$HW" | wc -l)" -ne 0 ] || \
+           ! printf '%s' "$HW" | grep -Eq '^hw:(CARD=[A-Za-z0-9_-]+(,DEV=[0-9]+)?|[0-9]+(,[0-9]+)?)$'; then
+            echo "set-device: not an ALSA device: '$HW'" >&2
+            exit 1
+        fi
+
+        if [ -f "$DEFAULTS_FILE" ]; then
+            TMP="$(mktemp "${DEFAULTS_FILE}.XXXXXX")"
+            { grep -v '^[[:space:]]*JACKD_DEVICE=' "$DEFAULTS_FILE" || true
+              echo "JACKD_DEVICE=\"$HW\""
+            } > "$TMP"
+            mv "$TMP" "$DEFAULTS_FILE"
+        else
+            # jackd-rt defaults every unset value, so a one-line file is valid.
+            echo "JACKD_DEVICE=\"$HW\"" > "$DEFAULTS_FILE"
+        fi
+        chmod 644 "$DEFAULTS_FILE"
+
+        service jackd-rt restart
+        # The manager attaches to one server and exits when that server goes
+        # away (jack_on_shutdown), so a restart always leaves it dead.
+        service jack-connection-manager restart || \
+            echo "WARNING: jack-connection-manager failed to restart; apps will not follow the selected output"
+        # Deliberately NOT jack-bridge-ports: it runs jack-route-select, which is
+        # what called this action, and that is a restart loop.
+        ;;
     set-period)
         # Record a frames/period that jack-graph already applied live with
         # jack_set_buffer_size, so the next boot starts the server the user is
@@ -83,6 +143,8 @@ EOF
         ;;
     *)
         echo "Usage: $0 {start|stop} [device] [sample_rate] [frames_per_period] [periods_per_buffer] [midi_driver]"
+        echo "       $0 refresh"
+        echo "       $0 set-device <hw:CARD=id[,DEV=n]>"
         echo "       $0 set-period <frames>"
         exit 1
         ;;

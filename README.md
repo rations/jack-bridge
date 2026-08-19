@@ -46,8 +46,9 @@
 ### Audio Routing
 - **ALSA → JACK pipeline** - All ALSA apps route through JACK, without systemd, PulseAudio, or PipeWire
 - **Multi-device support** - Seamlessly switch between internal, USB, HDMI, and Bluetooth outputs
-- **Persistent bridge ports** - USB/HDMI/Bluetooth ports spawned on-demand
-- **Capture-aware** - Records from JACK's `system:capture` `system:midi_capture` ports and custom `usb_in:capture` for external audio interface.
+- **USB interfaces run JACK directly** - Selecting a USB interface restarts jackd *on* it, so `system:playback_*` is the interface itself: no resampling bridge, no extra buffer, and the frames/period you set is the latency you get
+- **Bridge ports on demand** - HDMI and Bluetooth are reached through `alsa_out` bridges, spawned only when selected
+- **Capture-aware** - Records from JACK's `system:capture` and `system:midi_capture` ports, which are the interface's own inputs while a USB device is selected.
 - **jack-graph** - Change Jack settings and visually route audio to and from multiple apps and sources using our custom built drag-to-connect graph interface. 
 
 ### Bluetooth Audio Integration
@@ -113,6 +114,11 @@ The installer will:
 6. Create desktop launcher (Applications → Sound & Video → Alsa Sound Connect)
 7. Set up Bluetooth D-Bus policies and polkit rules
 8. Configure audio group permissions
+9. Install a udev rule so unplugging a USB interface does not leave JACK down
+
+Your settings are preserved across reinstalls: `/etc/default/jackd-rt` (sample
+rate, frames/period, periods/buffer, device) and `~/.config/jack-bridge/devices.conf`
+(selected output) are only created when absent, never overwritten.
 
 After reboot, launch **Alsa Sound Connect** from your applications menu.
 
@@ -141,9 +147,59 @@ After reboot, launch **Alsa Sound Connect** from your applications menu.
 ### Device Switching
 
 1. Expand "Devices" section
-2. Select Internal, USB, HDMI, or Bluetooth. DO NOT CHANGE INTERFACE IN JACK SETTINGS USING JACK-GRAPH
-3. Mixer automatically updates to show that device's controls (Internal & USB only, HDMI & Bluetooth are controlled by the device
-4. Audio routes to selected output immediately
+2. Select Internal, USB, HDMI, or Bluetooth
+3. Mixer automatically updates to show that device's controls (Internal & USB only; HDMI & Bluetooth are controlled by the device itself)
+4. Audio routes to the selected output
+
+Internal, HDMI and Bluetooth switch instantly — JACK keeps running and only the
+graph changes. **USB is different: selecting it restarts the JACK server on the
+interface**, which takes a couple of seconds and disconnects JACK clients. That
+is the price of running the interface directly instead of through a bridge; see
+[USB interfaces](#usb-interfaces) below.
+
+The device selector in mxeq and the Interface box in jack-graph's JACK Settings
+are two views of the same setting. Change either one and the other follows,
+live, without reopening the window.
+
+### USB interfaces
+
+A USB audio interface is **not** bridged. When you select USB, jackd is
+restarted on the interface itself, so `system:playback_*` and `system:capture_*`
+**are** the interface — no resampler, no second clock domain, no extra buffer.
+The frames/period you set is the latency you get.
+
+Everything else keeps the bridged design, because it costs nothing there:
+
+| Output | How JACK reaches it | Server restart to select? |
+|---|---|---|
+| Internal | jackd runs on the card directly | no |
+| **USB** | **jackd runs on the interface directly** | **yes** |
+| HDMI | `alsa_out` bridge from the internal card | no |
+| Bluetooth | `alsa_out` bridge to BlueALSA | no |
+
+Consequences worth knowing:
+
+- **USB is exclusive.** While jackd is on the interface, internal and HDMI are
+  not available — switching back restarts the server again.
+- **Unplugging is handled.** Pulling the cable takes the server down with it, so
+  a udev rule restarts jackd on the internal card; plugging back in returns it to
+  the interface. Your selection is remembered either way.
+- **Frames/period may need a restart.** jackd cannot reconfigure a USB capture
+  stream in place, so Apply Live restarts the server to apply the new value.
+  qjackctl does the same thing. On internal and HDMI it really is applied live.
+
+### Why bridges need more buffer than JACK
+
+`alsa_out` sizes its own working delay as
+`(bridge_periods * bridge_period / 2) - jack_period / 2` (jackd2's
+`tools/alsa_out.c`), so a bridge whose buffer does not exceed jackd's period ends
+up with no slack — or a negative delay — and crackles. jack-bridge keeps the HDMI
+bridge at a minimum of three times jackd's frames/period, raising only the period
+*count* and never the size you chose. Bluetooth keeps its own larger buffer,
+because A2DP is a bursty transport in a wholly separate clock domain.
+
+This is the reason USB is no longer bridged: an interface fed through `alsa_out`
+can never have the low latency it exists to provide.
 
 ### Bluetooth Setup
 
@@ -193,7 +249,7 @@ Bluetooth Device ←→ bluetoothd ←→ bluealsad ←→ ALSA bluealsa plugin 
 
 ### On-Demand Port Spawning
 
-USB/HDMI/Bluetooth ports are spawned **on-demand** because:
+HDMI and Bluetooth ports are spawned **on-demand** because:
 - BlueALSA PCM requires an active connection
 - Spawning BlueAlsa at boot would fail if no device connected
 - On-demand prevents error messages and saves resources
@@ -349,7 +405,7 @@ Boot Sequence:
 ├─ bluetoothd (BlueZ Bluetooth daemon)
 ├─ bluealsad (BlueALSA audio bridge)
 ├─ jackd-rt (JACK audio server)
-└─ jack-bridge-ports (persistent USB/HDMI bridge ports)
+└─ jack-bridge-ports (restores the saved output device)
 
 Shutdown Sequence (reverse order with graceful termination)
 
@@ -364,8 +420,7 @@ ALSA Application                 Steam Game (pressure-vessel)
 ALSA JACK Plugin          ───────────────►┘
     ↓
 JACK Audio Server (jackd)
-    ├─ system:playback_1/2 (internal)
-    ├─ usb_out:playback_1/2 (USB)
+    ├─ system:playback_* (internal, or the USB interface itself)
     ├─ hdmi_out:playback_1/2 (HDMI)
     └─ bluealsa:playback_1/2 (Bluetooth, on-demand)
     ↓
@@ -392,6 +447,9 @@ Audio Output
 - `/etc/init.d/jack-bridge-ports` - Bridge ports
 
 **Configuration:**
+- `/etc/default/jackd-rt` - JACK server settings written by jack-graph (device, rate, frames/period, periods/buffer, MIDI). Preserved on reinstall
+- `/etc/udev/rules.d/90-jack-bridge-usb-audio.rules` - USB audio hotplug recovery
+- `/etc/logrotate.d/jack-bridge` - caps the service logs in `/var/log`
 - `/etc/asound.conf` - ALSA routing configuration
 - `50-jack.conf` (in `/etc/alsa/conf.d/` or `/usr/share/alsa/alsa.conf.d/`) - the ALSA→JACK `pcm.jack` bridge; not modified at runtime
 - `/etc/jack-bridge/devices.conf` - Device preferences (Internal/USB/HDMI/Bluetooth)
@@ -402,6 +460,8 @@ Audio Output
 - `/usr/local/lib/jack-bridge/jack-route-select` - Device routing helper
 - `/usr/local/lib/jack-bridge/detect-alsa-device.sh` - Device detection
 - `/usr/local/lib/jack-bridge/jack-autoconnect` - Auto-connection helper
+- `/usr/local/lib/jack-bridge/jack-bridge-service-helper` - Privileged helper for jack-graph (start/stop/refresh, set-device, set-period)
+- `/usr/local/lib/jack-bridge/jack-usb-hotplug` - Restores JACK when a USB interface is unplugged or replugged
 
 **User Data:**
 - `~/Music/` - Recorded audio files

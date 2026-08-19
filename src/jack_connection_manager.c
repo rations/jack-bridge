@@ -84,9 +84,13 @@ static void load_config(void) {
         }
     }
     
-    /* Set target sink prefix based on preferred output */
+    /* Set target sink prefix based on preferred output.
+     *
+     * "usb" maps to system:playback_ because a USB interface is no longer
+     * bridged: jack-route-select restarts jackd ON the interface, so its ports
+     * ARE system:playback_*. There is no usb_out client any more. */
     if (strcmp(preferred_output, "usb") == 0) {
-        strcpy(target_sink_prefix, "usb_out:playback_");
+        strcpy(target_sink_prefix, "system:playback_");
     } else if (strcmp(preferred_output, "hdmi") == 0) {
         strcpy(target_sink_prefix, "hdmi_out:playback_");
     } else if (strcmp(preferred_output, "bluetooth") == 0) {
@@ -99,7 +103,6 @@ static void load_config(void) {
 /* Check if port is a known sink (output device) */
 static int is_sink_port(const char *port_name) {
     return (strstr(port_name, "system:playback_") != NULL ||
-            strstr(port_name, "usb_out:playback_") != NULL ||
             strstr(port_name, "hdmi_out:playback_") != NULL ||
             strstr(port_name, "bluealsa:playback_") != NULL);
 }

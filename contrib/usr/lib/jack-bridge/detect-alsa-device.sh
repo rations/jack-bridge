@@ -3,9 +3,17 @@
 # Strict POSIX sh, no here-docs into functions, no eval. Works under /bin/sh (dash).
 # Prints a device like "hw:CARD=Name" or "hw:0" on stdout and exits 0.
 #
-# CRITICAL: This script chooses the MAIN JACK device (what jackd opens with -d alsa -D).
-# USB interfaces must NEVER be selected here - they should only be used via alsa_out bridges.
-# If USB hijacks the main device, it blocks alsa_out and causes "Device or resource busy" errors.
+# This script is the AUTO-DETECT FALLBACK for jackd's main device. It runs only
+# when /etc/default/jackd-rt leaves JACKD_DEVICE empty -- see the device branch in
+# contrib/init.d/jackd-rt. An explicit JACKD_DEVICE is a choice the user made in
+# mxeq or jack-graph and is honoured whatever card it names, USB included: that
+# is how jackd comes to run directly ON an external interface rather than feeding
+# it through an alsa_out bridge.
+#
+# The guard below still applies in full to THIS path. Auto-detection must never
+# land on a USB interface: nothing has chosen it, it may not be plugged in next
+# boot, and grabbing it as the main device is what used to block the bridges with
+# "Device or resource busy" and leave the user's real selection unapplied.
 
 set -eu
 
