@@ -73,13 +73,13 @@
 
 ### Quick Install - During installation when prompted, select YES to Enable realtime priorities
 
-Download `jack-bridge-20260815.tar.gz` from releases on GitHub. Then:
+Download `jack-bridge-20260819.tar.gz` from releases on GitHub. Then:
 
 ```bash
-tar -xf jack-bridge-20260815
+tar -xf jack-bridge-20260819
 ```
 ```bash
-cd jack-bridge-20260815
+cd jack-bridge-20260819
 ```
 ```bash
 sudo sh contrib/install.sh

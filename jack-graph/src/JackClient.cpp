@@ -43,11 +43,6 @@ bool JackClient::connect(const std::string& client_name) {
 void JackClient::disconnect() {
     if (!m_client) return;
 
-    // Clear callbacks FIRST to prevent them firing during shutdown
-    m_port_callback = nullptr;
-    m_xrun_callback = nullptr;
-    m_shutdown_callback = nullptr;
-
     /* Once jack_on_shutdown has fired the server is already gone, so
      * jack_deactivate would be talking to a socket nothing is answering. Only
      * the local handle still needs freeing -- and it does still need freeing,
@@ -59,6 +54,20 @@ void JackClient::disconnect() {
     jack_client_close(m_client);
     m_client = nullptr;
     m_server_gone.store(false);
+
+    /* Cleared AFTER the close, never before. jack_client_close() does not return
+     * until JACK's notification thread is finished with this client, so once it
+     * has, nothing can still be inside one of these std::functions. Clearing
+     * them first -- as this used to -- meant the notification thread could be
+     * midway through `if (m_shutdown_callback) m_shutdown_callback();` while
+     * this thread destroyed the object it was calling. Rare in general, but the
+     * restart that Apply Live performs on a USB interface hits exactly that
+     * window: the server goes away precisely while the client is being torn
+     * down and rebuilt. */
+    m_port_callback = nullptr;
+    m_xrun_callback = nullptr;
+    m_shutdown_callback = nullptr;
+
     
     std::lock_guard<std::mutex> lock(m_mutex);
     m_ports.clear();
@@ -71,7 +80,7 @@ std::vector<JackClient::PortInfo> JackClient::get_ports() const {
 
 std::vector<JackClient::ConnectionInfo> JackClient::get_connections() const {
     std::vector<ConnectionInfo> result;
-    if (!m_client) return result;
+    if (!usable()) return result;
 
     std::lock_guard<std::mutex> lock(m_mutex);
     for (const auto& port : m_ports) {
@@ -96,7 +105,7 @@ std::vector<JackClient::ConnectionInfo> JackClient::get_connections() const {
 }
 
 bool JackClient::connect_ports(const std::string& source, const std::string& dest) {
-    if (!m_client) return false;
+    if (!usable()) return false;
     int result = jack_connect(m_client, source.c_str(), dest.c_str());
     return (result == 0 || result == EEXIST);
 }
@@ -107,7 +116,7 @@ bool JackClient::disconnect_ports(const std::string& source, const std::string& 
 }
 
 jack_nframes_t JackClient::get_buffer_size() const {
-    if (!m_client) return 0;
+    if (!usable()) return 0;
     return jack_get_buffer_size(m_client);
 }
 
@@ -117,7 +126,7 @@ jack_nframes_t JackClient::get_buffer_size() const {
  * periods/buffer and the interface are ALSA driver parameters fixed when the
  * driver opens the device, so those still need a stop and start. */
 bool JackClient::set_buffer_size(jack_nframes_t nframes) {
-    if (!m_client) return false;
+    if (!usable()) return false;
     /* JACK requires a power of two and rejects anything else, which would
      * otherwise look like a silent no-op to the caller. */
     if (nframes == 0 || (nframes & (nframes - 1)) != 0) return false;
@@ -125,7 +134,7 @@ bool JackClient::set_buffer_size(jack_nframes_t nframes) {
 }
 
 jack_nframes_t JackClient::get_sample_rate() const {
-    if (!m_client) return 0;
+    if (!usable()) return 0;
     return jack_get_sample_rate(m_client);
 }
 

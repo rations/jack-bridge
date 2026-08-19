@@ -19,6 +19,10 @@ public:
     bool connect(const std::string& client_name = "jack-graph");
     void disconnect();
     bool is_connected() const { return m_client != nullptr; }
+    /* True once this client has been told the server went away. The handle is
+     * still allocated -- it must be, so disconnect() can free it -- but calling
+     * into JACK with it dereferences shared memory that has been unmapped. */
+    bool server_gone() const { return m_server_gone.load(); }
     std::string get_actual_client_name() const;
 
     struct PortInfo {
@@ -58,6 +62,9 @@ public:
     void scan_ports();
 
 private:
+    /* A handle that is safe to call into: present, and not yet orphaned. */
+    bool usable() const { return m_client != nullptr && !m_server_gone.load(); }
+
     static void client_registration_callback(const char* name, int reg, void* arg);
     static void port_registration_callback(jack_port_id_t port_id, int reg, void* arg);
     static void port_connect_callback(jack_port_id_t a, jack_port_id_t b, int connect, void* arg);

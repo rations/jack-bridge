@@ -146,8 +146,8 @@ void GraphCanvas::layout(bool preserve_positions) {
     build_client_boxes();
 
     /* Split boxes by signal role:
-     *   sources — OUTPUT ports only  → left column  (capture, usb_in, apps)
-     *   sinks   — INPUT ports only   → right column (playback, usb_out, hdmi_out, bt)
+     *   sources — OUTPUT ports only  → left column  (system:capture, apps)
+     *   sinks   — INPUT ports only   → right column (system:playback, hdmi_out, bluealsa)
      *   mixed   — both directions    → left column, below sources */
     std::vector<ClientBox*> sources, sinks, mixed;
     for (auto& box : m_client_boxes) {

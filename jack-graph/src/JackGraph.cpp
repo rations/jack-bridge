@@ -78,6 +78,13 @@ void JackGraph::attach_jack_callbacks() {
 void JackGraph::on_jack_server_gone() {
     if (!m_jack.is_connected()) return;  /* already torn down */
 
+    /* The dispatcher hop means this can arrive late -- after something else has
+     * already dealt with the restart and opened a fresh client. Apply Live on a
+     * USB interface does exactly that: it restarts the server and reconnects
+     * before the main loop gets round to this handler. Tearing down a client
+     * that is alive and well would turn a working restart into a dropout. */
+    if (!m_jack.server_gone()) return;
+
     std::cerr << "jack-graph: JACK server went away; waiting for it to return" << std::endl;
     m_jack.disconnect();
     m_jack_connected = false;

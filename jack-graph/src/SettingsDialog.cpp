@@ -486,11 +486,18 @@ void SettingsDialog::on_apply() {
             return;
         }
 
+        /* Reconnect FIRST. refresh_running_state() re-reads the dialog, and that
+         * asks the client for its buffer size -- with the old server gone, the
+         * handle is still allocated but points at shared memory that has been
+         * unmapped, so calling into JACK with it segfaulted the whole window.
+         * m_apply_cb() drops the orphaned client and opens one on the new
+         * server, which has to happen before anything reads from it. */
+        if (m_apply_cb) m_apply_cb();
+
         /* The device did not change, so the periodic refresh would short-circuit
          * and keep showing the old numbers. Force a re-read. */
         m_running_state_valid = false;
         refresh_running_state();
-        if (m_apply_cb) m_apply_cb();
 
         m_live_status_label.set_text(
             "Frames/period is now " + fpp_str +
