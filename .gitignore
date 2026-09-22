@@ -13,6 +13,11 @@ CODE-REVIEW.md
 # silently kept the logrotate config out of git while it still shipped in the
 # release tarball -- so anyone installing from a clone got no log rotation.
 /src/*.d
+/src/gfx/*.d
+/src/platform/*.d
+/src/bluez/*.d
+/src/mxeq/*.d
+/tools/*.d
 /jack-graph/src/*.d
 # Locally built jack-graph binary; the shipped copy lives in contrib/bin/
 /jack-graph/jack-graph
