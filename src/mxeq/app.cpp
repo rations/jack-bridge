@@ -59,6 +59,11 @@ void App::message(const std::string &text, bool isError)
 {
     mPanel.showMessage(text, isError);
     requestHeight();
+    // Same reason as rebuildBluetoothPage(): the BlueZ agent's prompts and every async operation's
+    // result arrive off the bus, where nothing else marks the window dirty. requestHeight() only
+    // repaints when the height actually changed, and a strip replacing a strip does not change it.
+    if (onNeedsRepaint)
+        onNeedsRepaint();
 }
 
 //------------------------------------------------------------------------
@@ -438,6 +443,16 @@ void App::rebuildBluetoothPage()
     const bool have = !mBtSelected.empty() &&
                       mBluez.deviceState(mBtSelected, &paired, &trusted, &connected);
     mPanel.setBluetoothSelectionState(have, paired, trusted, connected);
+
+    // AND PUT IT ON THE SCREEN. Most callers of this function are D-Bus signal handlers --
+    // InterfacesAdded, PropertiesChanged, an async Pair/Connect reply -- which run from the bus's
+    // descriptor or its timeout tick, not from an input handler. Nothing along that path marks the
+    // window dirty, so without this the page held whatever it was last painted with: a device
+    // selected but its Pair/Trust/Connect buttons still drawn disabled, Scan still lit after
+    // discovery had started. The state was right and only the pixels were stale, which is why
+    // switching away and back appeared to fix it -- that is an Expose, and an Expose repaints.
+    if (onNeedsRepaint)
+        onNeedsRepaint();
 }
 
 //------------------------------------------------------------------------

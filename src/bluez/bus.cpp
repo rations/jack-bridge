@@ -238,12 +238,21 @@ void Bus::dispatchAll()
 {
     if (!mConn)
         return;
+
+    // NOT FROM INSIDE ITSELF. Dispatching a signal runs the panel's handler, which asks BlueZ about
+    // the device with a blocking call, which lands back here. The queue is drained by the outermost
+    // call either way, so returning is not a message dropped.
+    if (mDispatching)
+        return;
+    mDispatching = true;
+
     // ONE READ CAN CARRY SEVERAL MESSAGES, and libdbus hands them over one dispatch at a time. A
     // single dispatch per wake-up therefore leaves messages sitting in the queue until the next
     // one arrives -- which on an idle bus can be a long time, and looks exactly like a signal
     // that was never sent.
     while (dbus_connection_dispatch(mConn) == DBUS_DISPATCH_DATA_REMAINS) {
     }
+    mDispatching = false;
 }
 
 void Bus::handleTimeouts()
@@ -375,6 +384,20 @@ Msg Bus::callSync(DBusMessage *callMsg, int timeoutMs, std::string *error)
     dbus_error_init(&err);
     DBusMessage *reply =
         dbus_connection_send_with_reply_and_block(mConn, call.get(), timeoutMs, &err);
+
+    // A BLOCKING CALL READS THE SOCKET DRY, AND WHAT IT READS IS NOT ONLY OUR REPLY.
+    //
+    // While it waits, libdbus pulls everything the daemon has sent into its own incoming queue --
+    // signals, other calls' replies, the lot -- and hands back only the reply we asked for. The
+    // rest stay queued INSIDE libdbus, and the kernel socket buffer is now empty, so select() has
+    // nothing to report and handleFd() never runs. dispatchAll() used to be reachable from there
+    // and nowhere else, which stranded those messages until unrelated traffic happened to arrive.
+    //
+    // handleTimeouts() also drains the queue, so the 250 ms tick already bounded how long a
+    // message could sit there; this makes the common case immediate instead of up to a tick late,
+    // and removes the dependence on a timer running at all for a signal to be seen.
+    dispatchAll();
+
     if (!reply) {
         if (error)
             *error = dbus_error_is_set(&err) ? err.message : "no reply";

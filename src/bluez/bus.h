@@ -228,6 +228,11 @@ private:
     std::vector<DBusPendingCall *> mPending;
 
     bool mFilterAdded = false;
+
+    // Guards dispatchAll() against re-entering itself. A dispatched signal reaches the panel, and
+    // the panel answers questions about a device with a synchronous call -- which dispatches again.
+    // Without this, one InterfacesAdded during a busy scan recurses as deep as the queue is long.
+    bool mDispatching = false;
 };
 
 } // namespace jackbridge

@@ -778,13 +778,27 @@ void Bluez::connect(const std::string &path)
         }
         (void)error;
         DBusMessage *plain = Bus::newCall(devicePath.c_str(), kDevice1, "Connect");
-        if (!mImpl->bus.callAsync(plain, kTimeoutConnect,
-                                  [this](bool ok2, const std::string &error2, DBusMessage *) {
-                                      if (onOperation)
-                                          onOperation(ok2, ok2 ? std::string()
-                                                               : hintMessage("Connect failed",
-                                                                             error2));
-                                  })) {
+        if (!mImpl->bus.callAsync(
+                plain, kTimeoutConnect,
+                [this, devicePath](bool ok2, const std::string &error2, DBusMessage *) {
+                    // AN ERROR REPLY IS NOT THE SAME AS A DEVICE THAT DID NOT CONNECT.
+                    //
+                    // Connect() drives every profile the device claims, and it answers with an
+                    // error if ANY of them failed -- so a headset whose A2DP sink came up fine
+                    // still returns org.bluez.Error.Failed because its HFP did not, and a device
+                    // already up answers AlreadyConnected. Both were reported to the user as a
+                    // red "Connect failed" over a device that was, in fact, connected.
+                    //
+                    // So ask the device. Connected is the thing the user is actually asking about
+                    // and the thing the rest of this panel gates on, and it is authoritative in a
+                    // way the reply to a multi-profile call is not.
+                    bool connected = false;
+                    if (!ok2 && deviceState(devicePath, nullptr, nullptr, &connected) && connected)
+                        ok2 = true;
+                    if (onOperation)
+                        onOperation(ok2, ok2 ? std::string()
+                                             : hintMessage("Connect failed", error2));
+                })) {
             if (onOperation)
                 onOperation(false, hintMessage("Connect failed", "could not send the request"));
         }

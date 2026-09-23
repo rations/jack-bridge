@@ -96,6 +96,12 @@ private:
     int mPid = 0;
     long mStartNs = 0;
     std::string mPath;
+
+    // Set by stop(), read by handleExit(). arecord CATCHES SIGINT rather than dying from it: it
+    // finalises the WAV header and then exits(1), so the exit status of a perfectly good recording
+    // is indistinguishable from a real failure by status alone. What distinguishes them is whether
+    // we asked. See handleExit().
+    bool mStopRequested = false;
 };
 
 } // namespace jackbridge

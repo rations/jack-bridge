@@ -143,6 +143,7 @@ void Recorder::stop()
 
     // SIGINT, so arecord goes back and writes the real length into the WAV header it wrote at the
     // start. SIGTERM would leave a file claiming zero bytes. See the header.
+    mStopRequested = true;
     if (kill(mPid, SIGINT) != 0)
         kill(mPid, SIGTERM);
 
@@ -154,12 +155,23 @@ void Recorder::stop()
 void Recorder::handleExit(int status)
 {
     const std::string path = mPath;
+    const bool asked = mStopRequested;
     mPid = 0;
     mStartNs = 0;
+    mStopRequested = false;
 
-    // A clean exit, or the SIGINT we sent. arecord reports the signal it died from, and the one we
-    // asked for is not a failure to report.
-    const bool ok = status == -1 || (WIFEXITED(status) && WEXITSTATUS(status) == 0) ||
+    // WHETHER WE ASKED IT TO STOP IS THE TEST, NOT THE EXIT STATUS.
+    //
+    // The previous test allowed a clean exit or death by SIGINT, on the assumption that arecord
+    // dies from the signal we send. It does not: it installs a handler, prints "Aborted by signal
+    // Interrupt...", finalises the WAV header and calls exit(1). So waitpid reports WIFEXITED with
+    // status 1 -- byte for byte what a genuine failure looks like -- and every successful recording
+    // ended with a red "Recording failed" strip over a file that was perfectly fine.
+    //
+    // Only an exit we did NOT ask for can be judged by its status. An arecord that never started
+    // (no `jack` PCM, jackd down) still exits non-zero on its own and is still reported, which is
+    // the case the message is actually for.
+    const bool ok = asked || status == -1 || (WIFEXITED(status) && WEXITSTATUS(status) == 0) ||
                     (WIFSIGNALED(status) && WTERMSIG(status) == SIGINT);
 
     if (onMessage) {
