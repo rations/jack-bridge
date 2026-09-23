@@ -379,14 +379,14 @@ void sceneOverflow(Panel &p)
 
 std::vector<Panel::DeviceEntry> devices()
 {
-    // The detail line under each radio is the one thing here with no bound of its own: it carries a
-    // card id or a MAC or a reason, all of them from outside the program.
+    // The detail line under each radio: empty, the USB note, or why an output is unavailable. The
+    // USB note is the longest string devices.cpp can put there.
     std::vector<Panel::DeviceEntry> v(4);
     const char *labels[] = {"Internal", "USB", "HDMI", "Bluetooth"};
     const char *details[] = {
-        "card 0: HDA Intel PCH (hw:0,0)",
-        "no USB interface connected",
-        "card 1: HDA Intel PCH HDMI/DP,pcm=3 Digital Out",
+        "",
+        "USB is not bridged, live device switching is only for Internal, HDMI and Bluetooth",
+        "",
         "BlueALSA is not installed or not running",
     };
     for (int i = 0; i < 4; ++i) {
@@ -394,7 +394,7 @@ std::vector<Panel::DeviceEntry> devices()
         v[static_cast<size_t>(i)].detail = details[i];
         v[static_cast<size_t>(i)].radio.label = labels[i];
         v[static_cast<size_t>(i)].radio.shape = Toggle::Shape::Radio;
-        v[static_cast<size_t>(i)].enabled = i != 1;
+        v[static_cast<size_t>(i)].enabled = i != 3;
     }
     return v;
 }

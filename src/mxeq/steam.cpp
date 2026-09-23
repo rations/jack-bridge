@@ -35,6 +35,7 @@ void Steam::toggle()
         // "inactive" while the bridge still holds the PulseAudio socket -- which matters because a
         // second start would then fail to bind it.
         kill(mPid, SIGTERM);
+        mStopping = true;
         if (onMessage)
             onMessage("Stopping the Steam bridge...", false);
         return;
@@ -73,6 +74,10 @@ void Steam::handleExit(int status)
 {
     (void)status;
     mPid = 0;
+    const bool stopping = mStopping;
+    mStopping = false;
+    if (stopping && onStopped)
+        onStopped();
     if (onChanged)
         onChanged();
 }

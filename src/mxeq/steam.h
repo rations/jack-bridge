@@ -38,6 +38,10 @@ public:
     // The bridge started or stopped. The page re-reads isActive().
     std::function<void()> onChanged;
     std::function<void(const std::string &message, bool isError)> onMessage;
+    // A stop the user asked for has finished. "Stopping the Steam bridge..." is progress, not a
+    // result, so it has to come down when the child exits -- the strip otherwise stays up on every
+    // page until something else clears it.
+    std::function<void()> onStopped;
 
     // Starts the bridge if it is stopped, SIGTERMs it if it is running.
     void toggle();
@@ -54,6 +58,7 @@ private:
     void handleExit(int status);
 
     int mPid = 0;
+    bool mStopping = false;
 };
 
 } // namespace jackbridge

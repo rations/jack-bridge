@@ -87,8 +87,8 @@ public:
     // LEFT VISIBLE, never hidden -- see palette.h.
     bool available(Output o) const;
 
-    // A line under each radio saying which card it resolved to, or why it is not available. The
-    // GTK build had nowhere to put this.
+    // A line under each radio saying why it is not available, or for USB, that it is not bridged.
+    // Empty when there is nothing to say.
     std::string detail(Output o) const;
 
     // Call every two seconds. Notices an output change made by ANOTHER PROCESS -- jack-graph's

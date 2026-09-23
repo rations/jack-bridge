@@ -414,26 +414,22 @@ bool Devices::available(Output o) const
 std::string Devices::detail(Output o) const
 {
     switch (o) {
-        case Output::Internal: {
-            const int card = internalCardNumber();
-            const std::string id = cardIdForNumber(card);
-            return "card " + std::to_string(card) + (id.empty() ? "" : " (" + id + ")");
-        }
-        case Output::USB: {
-            const int card = usbCardNumber();
-            if (card < 0)
-                return "no USB interface connected";
-            const std::string id = cardIdForNumber(card);
-            return "card " + std::to_string(card) + (id.empty() ? "" : " (" + id + ")");
-        }
+        case Output::Internal:
         case Output::HDMI:
-            return "through the display or receiver";
-        case Output::Bluetooth: {
+            break;
+        case Output::USB:
+            // USB is not bridged: jack-route-select restarts jackd on the interface (see the top of
+            // devices.h), so choosing it here is not the live switch the other three are.
+            if (!usbPresent())
+                return "no USB interface connected";
+            return "USB is not bridged, live device switching is only for Internal, HDMI and "
+                   "Bluetooth";
+        case Output::Bluetooth:
             if (!btPresent())
                 return "BlueALSA is not installed or not running";
-            const std::string mac = bluetoothTargetMac();
-            return mac.empty() ? "no device selected" : mac;
-        }
+            if (bluetoothTargetMac().empty())
+                return "no device selected";
+            break;
     }
     return std::string();
 }

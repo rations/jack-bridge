@@ -105,7 +105,7 @@ public:
     //--- what the devices page is made of -------------------------------
     struct DeviceEntry {
         std::string label;  // "Internal", "USB", "HDMI", "Bluetooth"
-        std::string detail; // which card it resolved to, or why it is unavailable
+        std::string detail; // why it is unavailable, or the USB note; may be empty
         Toggle radio;
         bool enabled = true;
     };

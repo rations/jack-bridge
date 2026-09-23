@@ -141,6 +141,7 @@ bool App::start()
 
     //--- the Steam bridge -----------------------------------------------
     mSteam.onMessage = [this](const std::string &m, bool err) { message(m, err); };
+    mSteam.onStopped = [this] { mPanel.clearMessage(); };
     mSteam.onChanged = [this] {
         refreshSteamPage();
         requestHeight();
