@@ -62,6 +62,24 @@ void TextField::setEnabled(bool e)
 }
 
 //------------------------------------------------------------------------
+void TextField::setText(const std::string &t)
+{
+    clear();
+    // Through insert(), so it goes down the same path a keystroke does: the caret bookkeeping and
+    // the capacity check live there, and a second copy of either would be a second chance to get
+    // the character-boundary arithmetic wrong.
+    //
+    // In chunks, because insert() accepts at most one keystroke's worth of bytes per call. Splitting
+    // a multi-byte sequence across two calls is harmless -- insert appends bytes, so the buffer ends
+    // up holding the same sequence either way -- and a generated filename is well under one chunk
+    // anyway.
+    const size_t kChunk = 32;
+    for (size_t i = 0; i < t.size(); i += kChunk) {
+        const size_t n = t.size() - i < kChunk ? t.size() - i : kChunk;
+        insert(t.c_str() + i, static_cast<int>(n));
+    }
+}
+
 void TextField::clear()
 {
     // The whole buffer, not mLen bytes of it: a short password typed after a long one would

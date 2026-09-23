@@ -21,5 +21,7 @@ CODE-REVIEW.md
 /jack-graph/src/*.d
 # Locally built jack-graph binary; the shipped copy lives in contrib/bin/
 /jack-graph/jack-graph
+# The offline layout audit is a developer tool, built from tools/uirender.cpp and never shipped.
+/tools/uirender
 *.log
 *.tar.gz

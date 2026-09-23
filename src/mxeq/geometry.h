@@ -74,11 +74,27 @@ constexpr float kPageY = kPageRuleY + 10.0f;
 
 // Below the page: the message strip, which replaces eight gtk_message_dialog_new + gtk_dialog_run
 // sites. Contributes nothing when there is no message.
-constexpr float kStripH = 26.0f;
+//
+// IT IS TWO LINES TALL, AND THAT IS NOT A STYLE CHOICE. A modal dialog could be whatever size its
+// text needed; this strip cannot, and tools/uirender found the consequence: the longest message the
+// program can produce is
+//
+//     "Routing helper missing: /usr/local/lib/jack-bridge/jack-route-select
+//      -- run sudo ./contrib/install.sh"
+//
+// which needs 524 units against a single line's 512. That message exists to tell the user a path and
+// a command, so truncating it to "...jack-route-se..." would delete the only two pieces of
+// information in it. The path is also not bounded by anything here -- it is a compiled-in prefix --
+// so no single-line slot can be made wide enough on principle. The strip therefore wraps on word
+// boundaries into kStripLines lines, and the height below is what that costs.
+constexpr int kStripLines = 2;
+constexpr float kStripLineH = 15.0f;
+constexpr float kStripPadY = 6.0f;
+constexpr float kStripH = static_cast<float>(kStripLines) * kStripLineH + 2.0f * kStripPadY;
 constexpr float kStripGapAbove = 8.0f;
 constexpr float kStripTextSize = 12.0f;
-static_assert(kStripH > nominalAscent(kStripTextSize) + nominalDescent(kStripTextSize),
-              "the message strip is shorter than the text in it");
+static_assert(kStripLineH > nominalAscent(kStripTextSize) + nominalDescent(kStripTextSize),
+              "a message strip line is shorter than the text in it");
 
 constexpr float kPageBottomPad = 12.0f;
 
@@ -132,6 +148,14 @@ constexpr float kMixEnumGap = 8.0f;
 static_assert(kMixEnumLabelW + kMixEnumGap + 120.0f < kMixSwitchCellW,
               "an enum cell cannot hold its label and a usable dropdown");
 
+// The "scroll for more" line under an overflowing mixer page. IT GETS A BAND OF ITS OWN rather
+// than being drawn over the last visible strip: over a strip it reads as a rendering fault, and the
+// strip it lands on is one whose label it hides.
+constexpr float kMixHintH = 14.0f;
+constexpr float kMixHintSize = kMixValueSize;
+static_assert(kMixHintH > nominalAscent(kMixHintSize) + nominalDescent(kMixHintSize),
+              "the mixer scroll hint's band is shorter than the text in it");
+
 // When a card has no controls at all -- HDMI and Bluetooth have no mixer, and an exotic codec may
 // have nothing presentable -- the page draws an explanation instead.
 constexpr float kMixMessageH = 96.0f;
@@ -178,8 +202,16 @@ constexpr int kBtVisibleRows = 6;
 constexpr float kBtListH = static_cast<float>(kBtVisibleRows) * kListRowH;
 constexpr float kBtRowGap = 8.0f;
 constexpr int kBtActionCount = 5; // Pair, Trust, Connect, Remove, Set as Output
+
+// A TIGHTER GAP THAN kPillGap, and tools/uirender is why. Five equal pills across the content width
+// at the usual 6-unit gap give 101.6 units each, and "Set as Output" needs 101.8 with the pill's own
+// padding -- so the widest of the five labels overflowed by two tenths of a unit, which clipToWidth
+// would have silently turned into "Set as Outpu...". The label is the GTK build's own
+// (mxeq.c:1264) and renaming a button during a port is not a fix, so the gap gives up two units
+// instead.
+constexpr float kBtActionGap = 4.0f;
 constexpr float kBtActionW =
-    (kContentW - static_cast<float>(kBtActionCount - 1) * kPillGap) /
+    (kContentW - static_cast<float>(kBtActionCount - 1) * kBtActionGap) /
     static_cast<float>(kBtActionCount);
 
 constexpr float bluetoothPageH()
@@ -187,7 +219,10 @@ constexpr float bluetoothPageH()
     // Discoverable toggle + Scan/Stop row, the list, the action row.
     return kPillH + kBtRowGap + kBtListH + kBtRowGap + kPillH;
 }
-static_assert(kBtActionW > 70.0f, "a Bluetooth action pill is too narrow for its label");
+// 102 rather than a round 70: the bound that matters is the widest label, "Set as Output", which
+// measures 101.8 in the bundled face. This cannot assert the text width -- that needs a rasteriser --
+// so it asserts the number uirender measured against, and uirender re-measures it on every run.
+static_assert(kBtActionW > 102.0f, "a Bluetooth action pill is too narrow for \"Set as Output\"");
 
 //--- steam page -------------------------------------------------------------
 constexpr float kSteamRowGap = 10.0f;

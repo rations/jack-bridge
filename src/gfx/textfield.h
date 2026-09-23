@@ -103,6 +103,13 @@ public:
     // typed after a longer one would otherwise leave the tail of the first one behind.
     void clear();
 
+    // Replace the contents, with the caret at the end. THE ONE ADDITION to this file over
+    // simple-login-gui's copy: that program's two fields start empty by definition, and jack-bridge
+    // seeds the recorder's filename with a generated default so Record works on the first click
+    // without anybody typing anything. Silently truncates at kCapacity, on a character boundary,
+    // because a filename longer than 512 bytes is not a filename anybody meant.
+    void setText(const std::string &s);
+
     //--- input ---------------------------------------------------------
     // One keystroke. `utf8`/`len` is what the input method produced, which may be empty, and
     // may be several bytes or even several characters after a Compose sequence. Returns true if

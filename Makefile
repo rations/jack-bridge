@@ -89,11 +89,24 @@ PLAT_OBJS = src/platform/xerror.o src/platform/respath.o src/platform/fs.o \
 MXEQ_MODEL_OBJS = src/mxeq/alsamixer.o src/mxeq/devices.o src/mxeq/recorder.o \
                   src/mxeq/steam.o src/mxeq/btmodel.o
 
-.PHONY: all clean toolkit manager bridge mxeq graph install uninstall
+# mxeq's view: the five pages and the application that drives them. panel.o is in here rather than
+# with the models because it is still cairo-only -- it is what tools/uirender links.
+MXEQ_VIEW_OBJS = src/mxeq/panel.o src/mxeq/app.o
+
+# The BlueZ client. Its own directory because it is the one part of mxeq that talks to a bus, and
+# the one part that has no drawing and no ALSA in it.
+BLUEZ_OBJS = src/bluez/bluez.o
+
+# The offline layout audit. It links the GFX objects, mxeq's panel and respath -- AND NOTHING ELSE.
+# No X11, no ALSA, no dbus: if this list ever has to grow, something has reached across the line the
+# header comment draws.
+UIRENDER_OBJS = $(GFX_OBJS) src/mxeq/panel.o src/platform/respath.o tools/uirender.o
+
+.PHONY: all clean toolkit manager bridge mxeq uirender graph install uninstall
 
 # `toolkit` is the shared layer on its own, and it is what keeps this tree green between the phases
 # of the port.
-all: toolkit mxeq manager bridge graph
+all: toolkit mxeq uirender manager bridge graph
 
 toolkit: $(GFX_OBJS) $(PLAT_OBJS) $(MXEQ_MODEL_OBJS)
 
@@ -107,10 +120,47 @@ src/gfx/%.o: src/gfx/%.cpp
 src/platform/%.o: src/platform/%.cpp
 	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) $(X11_CFLAGS) -c -o $@ $<
 
-# mxeq's own objects: cairo and ALSA, no X11. panel.cpp lands here too when it arrives, which is
-# what keeps the whole visible surface auditable headlessly.
+# mxeq's own objects: cairo and ALSA, NO X11. panel.cpp is in here, which is what keeps the whole
+# visible surface auditable headlessly -- an #include of Xlib.h under src/mxeq/ would fail to
+# compile here rather than quietly costing the audit, and that is the point of the rule.
 src/mxeq/%.o: src/mxeq/%.cpp
 	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) $(ALSA_CFLAGS) -c -o $@ $<
+
+# THE ONE EXCEPTION, and it is explicit rather than pattern-matched so it cannot spread: main.cpp is
+# where the window and the application meet, so it is the only file under src/mxeq/ that sees an X
+# header. An explicit rule beats the pattern rule above for this target.
+src/mxeq/main.o: src/mxeq/main.cpp
+	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) $(X11_CFLAGS) $(ALSA_CFLAGS) -c -o $@ $<
+
+# The BlueZ client: dbus-1 and nothing else. No cairo, no X11, no ALSA.
+src/bluez/%.o: src/bluez/%.cpp
+	$(CXX) $(CXXFLAGS) $(DBUS_CFLAGS) -c -o $@ $<
+
+tools/%.o: tools/%.cpp
+	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) -c -o $@ $<
+
+# --- mxeq ---------------------------------------------------------------------------------------
+# NO -ljack, and that is deliberate: CLAUDE.md records that mxeq does not link libjack, so there is
+# no `mxeq:*` client in the JACK graph. Every JACK question it asks is a jack_lsp subprocess through
+# platform/proc. `ldd contrib/bin/mxeq` is the check, and it is item 2 of the port's verification.
+MXEQ_TARGET = $(BIN_DIR)/mxeq
+MXEQ_OBJS   = $(GFX_OBJS) $(PLAT_OBJS) $(MXEQ_MODEL_OBJS) $(MXEQ_VIEW_OBJS) $(BLUEZ_OBJS) \
+              src/mxeq/main.o
+
+mxeq: $(MXEQ_TARGET)
+$(MXEQ_TARGET): $(MXEQ_OBJS) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(LDHARDEN) -o $@ $(MXEQ_OBJS) \
+	    $(GFX_LIBS) $(X11_LIBS) $(ALSA_LIBS) $(DBUS_LIBS)
+
+# --- the offline layout audit -------------------------------------------------------------------
+# Not a test of behaviour: a test that every string the panel draws fits the slot it lands in, with
+# the bundled faces, in BOTH mixer curation modes -- only one of which is on screen on any given
+# machine. Run it before every commit that moves a rectangle.
+UIRENDER_TARGET = tools/uirender
+
+uirender: $(UIRENDER_TARGET)
+$(UIRENDER_TARGET): $(UIRENDER_OBJS)
+	$(CXX) $(CXXFLAGS) $(LDHARDEN) -o $@ $(UIRENDER_OBJS) $(GFX_LIBS)
 
 # --- the two daemons: never linked a toolkit, flags unchanged ----------------------------------
 MANAGER_TARGET = $(BIN_DIR)/jack-connection-manager
@@ -131,40 +181,23 @@ bridge: $(BRIDGE_TARGET)
 $(BRIDGE_TARGET): $(BRIDGE_SRCS) | $(BIN_DIR)
 	$(CC) $(BRIDGE_CFLAGS) -o $@ $(BRIDGE_SRCS) $(BRIDGE_LIBS)
 
-# --- STILL GTK, BEING REPLACED PHASE BY PHASE --------------------------------------------------
+# --- STILL GTK: jack-graph, BEING REPLACED IN PHASE 4 -------------------------------------------
 #
-# These two rules are the OLD build and they are kept deliberately, not by oversight. The port
-# lands in phases -- the shared toolkit, then mxeq, then jack-graph, then the settings window --
-# and each phase has to leave a tree that builds and runs. Deleting these before src/mxeq/ and
-# jack-graph/src/graphpanel.cpp exist would mean a run of commits with no working panel in them,
-# which is also a run of commits nobody can bisect.
+# This rule is the OLD build and it is kept deliberately, not by oversight. The port lands in phases
+# -- the shared toolkit, then mxeq, then jack-graph, then the settings window -- and each phase has
+# to leave a tree that builds and runs. Deleting this before jack-graph/src/graphpanel.cpp exists
+# would mean a run of commits with no working graph in them, which is also a run of commits nobody
+# can bisect.
 #
-# They are also what Phase 3 is built against: porting the BlueZ client from GDBus to libdbus-1 is
-# done against the still-GTK mxeq on its own branch, so that a failed pairing cannot be ambiguous
-# between the D-Bus rewrite and the toolkit swap.
+# WHAT GOES WHEN: this rule and jack-graph/Makefile go with Phase 4.
 #
-# WHAT GOES WHEN EACH PHASE LANDS: the mxeq rule, MOTR_* and GLIB_API_LEVEL go with Phase 2; the
-# graph rule and jack-graph/Makefile go with Phase 4.
-MOTR_TARGET = $(BIN_DIR)/mxeq
-MOTR_SRCS   = src/mxeq.c src/gui_bt.c src/bt_agent.c
-MOTR_PKGS   = gtk+-3.0 glib-2.0 gio-2.0 alsa
-
-# Cap the GLib API level so release binaries stay runnable on older distros. Without this, building
-# on GLib >= 2.76 makes g_string_free(s, FALSE) expand to g_string_free_and_steal(), a symbol
-# absent from GLib 2.74 (Debian 12 / Devuan daedalus), so the binary dies at startup with an
-# undefined-symbol error. GOES AWAY ENTIRELY with Phase 2: there is no GLib to cap.
-GLIB_API_LEVEL = -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_74 \
-                 -DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_74
-
-MOTR_CFLAGS = $(shell $(PKG_CONFIG) --cflags $(MOTR_PKGS)) $(GLIB_API_LEVEL)
-MOTR_LIBS   = $(shell $(PKG_CONFIG) --libs $(MOTR_PKGS))
-
+# THE GTK mxeq IS GONE as of this phase, and with it MOTR_*, GLIB_API_LEVEL and src/mxeq.c.
+# src/gui_bt.c and src/bt_agent.c are NO LONGER BUILT but are still in the tree on purpose: they are
+# the GDBus original the libdbus-1 client in src/bluez/ is being written from, member by member, and
+# reading them beside the port is the whole reason the plan says that port must not be guessed at.
+# They go when Phase 3 lands and src/bluez/bluez.cpp stops being a placeholder.
 GRAPH_DIR    = jack-graph
 GRAPH_TARGET = $(BIN_DIR)/jack-graph
-
-mxeq: $(MOTR_TARGET)
-$(MOTR_TARGET): $(MOTR_SRCS) | $(BIN_DIR)
-	$(CC) -Wall -Wextra -std=c11 $(MOTR_CFLAGS) -o $@ $(MOTR_SRCS) $(MOTR_LIBS)
 
 # Phony, and named `graph` rather than `jack-graph`: a target named after the jack-graph/ directory
 # would be considered up to date the moment that directory exists, and the copy would silently never
@@ -177,10 +210,12 @@ graph: | $(BIN_DIR)
 	@echo "Staged $(GRAPH_TARGET)"
 
 # Generated by -MMD; absent on the first build, which `-include` tolerates silently.
-DEPS = $(GFX_OBJS:.o=.d) $(PLAT_OBJS:.o=.d) $(MXEQ_MODEL_OBJS:.o=.d)
+DEPS = $(GFX_OBJS:.o=.d) $(PLAT_OBJS:.o=.d) $(MXEQ_MODEL_OBJS:.o=.d) \
+       $(MXEQ_VIEW_OBJS:.o=.d) $(BLUEZ_OBJS:.o=.d) src/mxeq/main.d tools/uirender.d
 -include $(DEPS)
 
 clean:
-	rm -f $(GFX_OBJS) $(PLAT_OBJS) $(MXEQ_MODEL_OBJS) $(DEPS)
-	rm -f $(MANAGER_TARGET) $(BRIDGE_TARGET) $(MOTR_TARGET) $(GRAPH_TARGET)
+	rm -f $(GFX_OBJS) $(PLAT_OBJS) $(MXEQ_MODEL_OBJS) $(MXEQ_VIEW_OBJS) $(BLUEZ_OBJS) \
+	      src/mxeq/main.o tools/uirender.o $(DEPS)
+	rm -f $(MANAGER_TARGET) $(BRIDGE_TARGET) $(MXEQ_TARGET) $(GRAPH_TARGET) $(UIRENDER_TARGET)
 	$(MAKE) -C $(GRAPH_DIR) clean
