@@ -11,7 +11,7 @@
 
 #include "mxeq/app.h"
 #include "mxeq/geometry.h"
-#include "platform/childreaper.h"
+#include "platform/wakepipe.h"
 #include "platform/x11window.h"
 
 #include <X11/Xlib.h>
@@ -76,9 +76,10 @@ int main(int argc, char *argv[])
     if (!XSetLocaleModifiers(""))
         fprintf(stderr, "jack-bridge: could not set the X locale modifiers\n");
 
-    // The SIGCHLD self-pipe, before anything can fork. arecord, pulse-jack-bridge and
-    // jack-route-select are all watched through it.
-    childreaper::install();
+    // The wake pipe, before anything can fork. arecord, pulse-jack-bridge and jack-route-select
+    // are all watched through it. mxeq uses only its SIGCHLD half -- nothing here has a second
+    // thread -- so it sets no post handler.
+    wakepipe::install();
 
     App app;
 
@@ -101,8 +102,8 @@ int main(int argc, char *argv[])
     app.onHeightChanged = [&win](float h) { win.resize(geo::kWinW, h); };
     app.onNeedsRepaint = [&win] { win.invalidate(); };
 
-    // The child-exit pipe joins the same select() the X connection is in.
-    win.addFd(childreaper::readFd(), [] { childreaper::drain(); });
+    // The wake pipe joins the same select() the X connection is in.
+    win.addFd(wakepipe::readFd(), [] { wakepipe::drain(); });
 
     // THE MIXER'S POLL DESCRIPTORS DO NOT SURVIVE A REOPEN -- snd_mixer_close() invalidates them --
     // so they are torn down and re-registered every time the output device changes and the mixer

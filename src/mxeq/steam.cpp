@@ -2,7 +2,7 @@
 
 #include "steam.h"
 
-#include "platform/childreaper.h"
+#include "platform/wakepipe.h"
 #include "platform/proc.h"
 
 #include <signal.h>
@@ -19,7 +19,7 @@ Steam::~Steam()
         // The bridge is NOT killed here. It carries audio for a running game, and closing the mixer
         // window is not a reason to mute Steam -- which is the behaviour the GTK build had, because
         // a GLib child watch on a process that outlives its parent simply stops being watched.
-        childreaper::forget(mPid);
+        wakepipe::forget(mPid);
     }
 }
 
@@ -61,7 +61,7 @@ void Steam::toggle()
     }
 
     mPid = pid;
-    childreaper::watch(pid, [this](int status) { handleExit(status); });
+    wakepipe::watch(pid, [this](int status) { handleExit(status); });
 
     if (onMessage)
         onMessage("Steam bridge started.", false);

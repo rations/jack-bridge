@@ -23,7 +23,7 @@
 //   3. THE BLUETOOTH SWITCH IS ASYNCHRONOUS THROUGHOUT. The original spawned the routing helper
 //      synchronously and then slept another one to two seconds; since the helper itself waits up to
 //      five seconds for its ports, that froze the whole window on every Bluetooth switch. Here the
-//      helper is spawned async through childreaper and the ports are polled on a timer.
+//      helper is spawned async through wakepipe and the ports are polled on a timer.
 //
 //   4. THE HELPER'S EXIT STATUS IS NOT ENOUGH. It exits zero without distinguishing a failed
 //      alsa_out spawn, so success is confirmed by polling for bluealsa:playback_1 -- twenty times

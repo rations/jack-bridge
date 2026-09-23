@@ -1,6 +1,6 @@
-// See childreaper.h.
+// See wakepipe.h.
 
-#include "childreaper.h"
+#include "wakepipe.h"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -16,7 +16,7 @@
 
 namespace jackbridge
 {
-namespace childreaper
+namespace wakepipe
 {
 
 namespace
@@ -34,14 +34,15 @@ std::vector<Watch> gWatches;
 std::function<void()> gPostHandler;
 bool gInstalled = false;
 
-// Set by postFromOtherThread(), cleared by drain(). A plain bool would be a data race: the writer
+// Set by post(), cleared by drain(). A plain bool would be a data race: the writer
 // is another thread (JACK's) and the reader is the main loop. It is the flag and not the pipe byte
 // that distinguishes a post from a SIGCHLD, because the two bytes are indistinguishable by the time
 // they arrive and because running the post handler on every child exit would be a second thing to
 // reason about.
 std::atomic<bool> gPosted{false};
 
-// THE ONLY THING THE HANDLER DOES. write() is async-signal-safe; nothing else here would be.
+// THE ONLY THING THE SIGNAL HANDLER DOES. write() is async-signal-safe; nothing else here would
+// be.
 // errno is saved and restored because the interrupted code may be about to read it, and a failed
 // write inside a handler that clobbered errno turns into a spurious error somewhere unrelated.
 extern "C" void onSigchld(int)
@@ -75,8 +76,8 @@ bool install()
     // read; on the write end so the handler cannot block inside a signal handler if the pipe
     // filled up.
     if (pipe2(gPipe, O_CLOEXEC | O_NONBLOCK) != 0) {
-        fprintf(stderr, "jack-bridge: cannot create the child-exit pipe (%s); "
-                        "child processes will not be noticed\n",
+        fprintf(stderr, "jack-bridge: cannot create the wake pipe (%s); child processes and "
+                        "cross-thread posts will not be noticed\n",
                 strerror(errno));
         gPipe[0] = gPipe[1] = -1;
         return false;
@@ -177,7 +178,7 @@ void drain()
 }
 
 //------------------------------------------------------------------------
-void postFromOtherThread()
+void post()
 {
     if (gPipe[1] < 0)
         return;
@@ -195,5 +196,5 @@ void setPostHandler(std::function<void()> fn)
     gPostHandler = std::move(fn);
 }
 
-} // namespace childreaper
+} // namespace wakepipe
 } // namespace jackbridge

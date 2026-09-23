@@ -11,11 +11,11 @@
 //
 //   * STOP IS SIGTERM AND THE STATE FOLLOWS THE CHILD. The GTK build's comment is worth keeping:
 //     do not close the pid here, because that would drop the watch's handle. The equivalent here is
-//     that childreaper owns the watch and `onChanged` fires when the child has actually gone.
+//     that wakepipe owns the watch and `onChanged` fires when the child has actually gone.
 //
 // The GTK build replaced a 1 Hz waitpid(WNOHANG) poll with g_child_watch_add for this, noting that
 // needless wakeups are wrong in a stack whose routing daemon is explicitly event-driven and idle at
-// zero CPU. platform/childreaper keeps that property: the exit arrives as a descriptor becoming
+// zero CPU. platform/wakepipe keeps that property: the exit arrives as a descriptor becoming
 // readable in the select() the window is already in.
 
 #pragma once

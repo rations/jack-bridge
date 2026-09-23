@@ -2,7 +2,7 @@
 
 #include "devices.h"
 
-#include "platform/childreaper.h"
+#include "platform/wakepipe.h"
 #include "platform/fs.h"
 #include "platform/proc.h"
 
@@ -648,7 +648,7 @@ void Devices::btRouteBegin(const std::string &mac)
     if (onMessage)
         onMessage("Switching to " + mac + "...", false);
 
-    childreaper::watch(pid, [this](int status) { btRouteChildExit(status); });
+    wakepipe::watch(pid, [this](int status) { btRouteChildExit(status); });
 }
 
 void Devices::btRouteChildExit(int status)

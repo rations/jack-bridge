@@ -18,7 +18,7 @@
 //     first, leaving a header that claims zero bytes, which most players read as an empty file. A
 //     SIGTERM follows only if the SIGINT could not be delivered at all.
 //
-// The child is watched through platform/childreaper rather than g_child_watch_add, so `onFinished`
+// The child is watched through platform/wakepipe rather than g_child_watch_add, so `onFinished`
 // arrives on the main loop exactly as the GLib callback did.
 
 #pragma once
@@ -58,7 +58,7 @@ public:
     bool start(const Settings &s);
 
     // Sends SIGINT. The state does not change here: it changes when the child actually exits and
-    // childreaper calls back, which is what keeps the button state and the process in step even
+    // wakepipe calls back, which is what keeps the button state and the process in step even
     // when arecord takes a moment to finalise the file.
     void stop();
 

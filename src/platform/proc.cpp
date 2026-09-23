@@ -173,8 +173,8 @@ int runCapture(const Argv &argv, std::string &out)
     while (waitpid(pid, &status, 0) < 0) {
         if (errno == EINTR)
             continue;
-        // ECHILD here would mean something else reaped it. childreaper only ever reaps pids it was
-        // asked to watch, precisely so this cannot happen -- see childreaper.h. Report the failure
+        // ECHILD here would mean something else reaped it. wakepipe only ever reaps pids it was
+        // asked to watch, precisely so this cannot happen -- see wakepipe.h. Report the failure
         // rather than a made-up success.
         fprintf(stderr, "jack-bridge: lost the exit status of %s (%s)\n", argv[0].c_str(),
                 strerror(errno));

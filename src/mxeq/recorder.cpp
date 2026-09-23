@@ -2,7 +2,7 @@
 
 #include "recorder.h"
 
-#include "platform/childreaper.h"
+#include "platform/wakepipe.h"
 #include "platform/fs.h"
 #include "platform/proc.h"
 
@@ -36,7 +36,7 @@ Recorder::~Recorder()
     if (mPid > 0) {
         // The callback captures `this`, and `this` is going away. Forget it BEFORE signalling, or a
         // drain() between the two would call into a destroyed object.
-        childreaper::forget(mPid);
+        wakepipe::forget(mPid);
         kill(mPid, SIGINT);
     }
 }
@@ -129,7 +129,7 @@ bool Recorder::start(const Settings &s)
 
     mPid = pid;
     mStartNs = monotonicNs();
-    childreaper::watch(pid, [this](int status) { handleExit(status); });
+    wakepipe::watch(pid, [this](int status) { handleExit(status); });
 
     fprintf(stderr, "jack-bridge: recording to %s (pid %d)\n", mPath.c_str(), pid);
     return true;

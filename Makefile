@@ -82,7 +82,7 @@ GFX_OBJS = src/gfx/canvas.o src/gfx/fontstack.o src/gfx/widgets.o src/gfx/combo.
 
 # The only place X11 lives.
 PLAT_OBJS = src/platform/xerror.o src/platform/respath.o src/platform/fs.o \
-            src/platform/proc.o src/platform/childreaper.o src/platform/x11window.o
+            src/platform/proc.o src/platform/wakepipe.o src/platform/x11window.o
 
 # mxeq's model layer: the sound card, the output device, the recorder, the Steam bridge and the
 # Bluetooth device list. No X11 and no drawing, so tools/uirender can drive the real models.

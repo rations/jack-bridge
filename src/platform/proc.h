@@ -45,7 +45,7 @@ using Argv = std::vector<std::string>;
 using EnvPairs = std::vector<std::pair<std::string, std::string>>;
 
 // Start `argv` and return its pid, or -1 having warned. The caller is responsible for the child:
-// register it with childreaper::watch() if it wants to know when it exits, which is what every
+// register it with wakepipe::watch() if it wants to know when it exits, which is what every
 // current caller does.
 //
 // Replaces g_spawn_async with G_SPAWN_DO_NOT_REAP_CHILD. stdout and stderr are INHERITED, not
