@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <map>
 
 namespace jackbridge
 {
@@ -32,6 +33,9 @@ const char *const kObjectManager = "org.freedesktop.DBus.ObjectManager";
 const char *const kProperties = "org.freedesktop.DBus.Properties";
 const char *const kAdapter1 = "org.bluez.Adapter1";
 const char *const kDevice1 = "org.bluez.Device1";
+// One per configured A2DP stream -- see BluezDeviceProps::audioConnected for what its existence
+// means and where in BlueZ that is decided.
+const char *const kMediaTransport1 = "org.bluez.MediaTransport1";
 
 // The A2DP Sink profile. A headset is an audio sink, and asking for this UUID by name is what puts
 // it on A2DP rather than on HFP -- which matters because bluealsa only offers playback_1/2 for an
@@ -88,6 +92,21 @@ struct Bluez::Impl {
 
     bool handleSignal(DBusMessage *m);
     void reportDevice(const std::string &path, const BluezDeviceProps &p);
+
+    // Re-read a device in full and report it. What a PropertiesChanged on Device1 does, and what a
+    // transport appearing or disappearing does too, since that changes the device's row without
+    // any Device1 property changing.
+    void refreshDevice(const std::string &path);
+
+    // TRANSPORT PATH -> DEVICE PATH, for every MediaTransport1 BlueZ holds. Keyed on the transport
+    // because InterfacesRemoved names only the path that went, and by then the transport's Device
+    // property cannot be read.
+    std::map<std::string, std::string> transports;
+    bool hasTransport(const std::string &devicePath) const;
+    // The device a transport belongs to: its Device property (org.bluez.MediaTransport.rst), and
+    // failing that the dev_XX_XX_XX_XX_XX_XX component of its own path, which the same document
+    // gives as the object path's shape.
+    static std::string transportDevice(const std::string &transportPath, DBusMessageIter *props);
 };
 
 //------------------------------------------------------------------------
@@ -154,6 +173,19 @@ void Bluez::Impl::readDeviceProps(DBusMessageIter *dict, BluezDeviceProps *out)
                 readVariantBool(&kv, &out->trusted);
             else if (key == "Connected")
                 readVariantBool(&kv, &out->connected);
+            else if (key == "UUIDs") {
+                std::vector<std::string> uuids;
+                if (readVariantStringArray(&kv, &uuids)) {
+                    out->audioSink = std::any_of(uuids.begin(), uuids.end(), [](std::string u) {
+                        // BlueZ writes these lower-case; compared case-blind anyway, because a
+                        // UUID's case carries no meaning and nothing promises it stays that way.
+                        std::transform(u.begin(), u.end(), u.begin(), [](char c) {
+                            return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+                        });
+                        return u == kA2dpSinkUuid;
+                    });
+                }
+            }
             else if (key == "Alias") {
                 std::string v;
                 if (readVariantString(&kv, &v) && !v.empty()) {
@@ -294,6 +326,7 @@ void Bluez::Impl::reportDevice(const std::string &path, const BluezDeviceProps &
     if (owner->onDevice) {
         BluezDeviceProps copy = p;
         copy.path = path;
+        copy.audioConnected = hasTransport(path);
         // A name is never empty by the time the panel sees one: an unnamed device still has to be
         // clickable, and its address is what the user can match against the thing in their hand.
         if (copy.name.empty()) {
@@ -302,6 +335,60 @@ void Bluez::Impl::reportDevice(const std::string &path, const BluezDeviceProps &
         }
         owner->onDevice(copy);
     }
+}
+
+void Bluez::Impl::refreshDevice(const std::string &path)
+{
+    DBusMessage *call = Bus::newCall(path.c_str(), kProperties, "GetAll");
+    if (!call)
+        return;
+    const char *dev = kDevice1;
+    dbus_message_append_args(call, DBUS_TYPE_STRING, &dev, DBUS_TYPE_INVALID);
+    std::string error;
+    Msg reply = bus.callSync(call, kTimeoutQuick, &error);
+    if (!reply)
+        return; // the device went away between the signal and the read
+    DBusMessageIter rit;
+    if (!dbus_message_iter_init(reply.get(), &rit) ||
+        dbus_message_iter_get_arg_type(&rit) != DBUS_TYPE_ARRAY)
+        return;
+    DBusMessageIter props;
+    dbus_message_iter_recurse(&rit, &props);
+    BluezDeviceProps full;
+    readDeviceProps(&props, &full);
+    reportDevice(path, full);
+}
+
+bool Bluez::Impl::hasTransport(const std::string &devicePath) const
+{
+    for (const auto &t : transports) {
+        if (t.second == devicePath)
+            return true;
+    }
+    return false;
+}
+
+std::string Bluez::Impl::transportDevice(const std::string &transportPath, DBusMessageIter *props)
+{
+    if (props) {
+        while (dbus_message_iter_get_arg_type(props) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter kv;
+            dbus_message_iter_recurse(props, &kv);
+            std::string key;
+            if (readString(&kv, &key) && key == "Device") {
+                dbus_message_iter_next(&kv);
+                std::string dev;
+                if (readVariantString(&kv, &dev) && !dev.empty())
+                    return dev;
+            }
+            dbus_message_iter_next(props);
+        }
+    }
+    const size_t d = transportPath.find("/dev_");
+    if (d == std::string::npos)
+        return std::string();
+    const size_t end = transportPath.find('/', d + 1);
+    return transportPath.substr(0, end);
 }
 
 //------------------------------------------------------------------------
@@ -347,6 +434,20 @@ bool Bluez::Impl::handleSignal(DBusMessage *m)
                     BluezDeviceProps p;
                     readDeviceProps(&props, &p);
                     reportDevice(path, p);
+                } else if (name == kMediaTransport1) {
+                    // A2DP came up for a device. Nothing on Device1 changes when it does, so
+                    // without this the row would never learn its audio is connected.
+                    DBusMessageIter props;
+                    DBusMessageIter *pp = nullptr;
+                    if (dbus_message_iter_get_arg_type(&kv) == DBUS_TYPE_ARRAY) {
+                        dbus_message_iter_recurse(&kv, &props);
+                        pp = &props;
+                    }
+                    const std::string dev = transportDevice(path, pp);
+                    if (!dev.empty()) {
+                        transports[path] = dev;
+                        refreshDevice(dev);
+                    }
                 } else if (name == kAdapter1) {
                     // An adapter appeared -- a USB dongle plugged in, or bluetoothd starting after
                     // this program did. The page comes to life without a restart.
@@ -371,6 +472,16 @@ bool Bluez::Impl::handleSignal(DBusMessage *m)
         std::string path;
         if (!readString(&it, &path))
             return false;
+
+        // A transport going is A2DP going down. It is not a device, so it must not reach
+        // onDeviceRemoved -- that would be harmless today only because no row has its path.
+        const auto t = transports.find(path);
+        if (t != transports.end()) {
+            const std::string dev = t->second;
+            transports.erase(t);
+            refreshDevice(dev);
+            return false;
+        }
 
         if (path == adapter) {
             adapter.clear();
@@ -413,24 +524,7 @@ bool Bluez::Impl::handleSignal(DBusMessage *m)
             // full GetAll rather than patched from the delta -- which is what gui_bt.c's
             // update_device_row_state() does, and for the same reason: a row patched from deltas
             // is only as correct as the first signal it ever saw.
-            DBusMessage *call = Bus::newCall(path, kProperties, "GetAll");
-            if (!call)
-                return false;
-            const char *dev = kDevice1;
-            dbus_message_append_args(call, DBUS_TYPE_STRING, &dev, DBUS_TYPE_INVALID);
-            std::string error;
-            Msg reply = bus.callSync(call, kTimeoutQuick, &error);
-            if (!reply)
-                return false; // the device went away between the signal and the read
-            DBusMessageIter rit;
-            if (!dbus_message_iter_init(reply.get(), &rit) ||
-                dbus_message_iter_get_arg_type(&rit) != DBUS_TYPE_ARRAY)
-                return false;
-            DBusMessageIter props;
-            dbus_message_iter_recurse(&rit, &props);
-            BluezDeviceProps full;
-            readDeviceProps(&props, &full);
-            reportDevice(path, full);
+            refreshDevice(path);
             return false;
         }
     }
@@ -667,6 +761,34 @@ std::vector<BluezDeviceProps> Bluez::knownDevices()
         return out;
     }
 
+    // TWO PASSES OVER ONE REPLY. The dictionary is in no promised order, and a speaker already
+    // playing when this program starts has its transport somewhere in it -- possibly after the
+    // device. Collecting every transport first is what lets the device pass say, correctly, that
+    // its audio is connected. This is also the one authoritative moment for the transport table,
+    // so it is rebuilt here rather than patched.
+    mImpl->transports.clear();
+    mImpl->forEachManagedObject(reply.get(), [&](const std::string &path,
+                                                 DBusMessageIter *ifaces) {
+        while (dbus_message_iter_get_arg_type(ifaces) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter kv;
+            dbus_message_iter_recurse(ifaces, &kv);
+            std::string name;
+            if (readString(&kv, &name) && name == kMediaTransport1) {
+                dbus_message_iter_next(&kv);
+                DBusMessageIter props;
+                DBusMessageIter *pp = nullptr;
+                if (dbus_message_iter_get_arg_type(&kv) == DBUS_TYPE_ARRAY) {
+                    dbus_message_iter_recurse(&kv, &props);
+                    pp = &props;
+                }
+                const std::string dev = Impl::transportDevice(path, pp);
+                if (!dev.empty())
+                    mImpl->transports[path] = dev;
+            }
+            dbus_message_iter_next(ifaces);
+        }
+    });
+
     mImpl->forEachManagedObject(reply.get(), [&](const std::string &path,
                                                  DBusMessageIter *ifaces) {
         while (dbus_message_iter_get_arg_type(ifaces) == DBUS_TYPE_DICT_ENTRY) {
@@ -681,6 +803,7 @@ std::vector<BluezDeviceProps> Bluez::knownDevices()
                     BluezDeviceProps p;
                     p.path = path;
                     Impl::readDeviceProps(&props, &p);
+                    p.audioConnected = mImpl->hasTransport(path);
                     if (p.name.empty()) {
                         const size_t slash = path.rfind('/');
                         p.name = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -776,25 +899,26 @@ void Bluez::connect(const std::string &path)
                 onOperation(true, std::string());
             return;
         }
-        (void)error;
+        // NOT RETRIED WHEN A RETRY CANNOT HELP. A page timeout means the device did not answer
+        // at all -- off, out of range, or held by a phone -- and the generic Connect pages the same
+        // silent device again, doubling the wait before the same error. An unpowered adapter is
+        // the same story. Both strings are src/error.h's.
+        if (error == "br-connection-page-timeout" || error == "br-connection-adapter-not-powered") {
+            if (onOperation)
+                onOperation(false, hintMessage("Connect failed", error));
+            return;
+        }
         DBusMessage *plain = Bus::newCall(devicePath.c_str(), kDevice1, "Connect");
         if (!mImpl->bus.callAsync(
                 plain, kTimeoutConnect,
-                [this, devicePath](bool ok2, const std::string &error2, DBusMessage *) {
-                    // AN ERROR REPLY IS NOT THE SAME AS A DEVICE THAT DID NOT CONNECT.
-                    //
-                    // Connect() drives every profile the device claims, and it answers with an
-                    // error if ANY of them failed -- so a headset whose A2DP sink came up fine
-                    // still returns org.bluez.Error.Failed because its HFP did not, and a device
-                    // already up answers AlreadyConnected. Both were reported to the user as a
-                    // red "Connect failed" over a device that was, in fact, connected.
-                    //
-                    // So ask the device. Connected is the thing the user is actually asking about
-                    // and the thing the rest of this panel gates on, and it is authoritative in a
-                    // way the reply to a multi-profile call is not.
-                    bool connected = false;
-                    if (!ok2 && deviceState(devicePath, nullptr, nullptr, &connected) && connected)
-                        ok2 = true;
+                [this](bool ok2, const std::string &error2, DBusMessage *) {
+                    // THE REPLY IS THE VERDICT, because BlueZ already made it the right one.
+                    // device_profile_connected() in src/device.c resets a Connect() error to
+                    // success when any service ended up connected, and connect_profiles() answers
+                    // success, not AlreadyConnected, for a device that is already up. So an error
+                    // here means nothing connected. Second-guessing it with Device1.Connected --
+                    // which an earlier revision did -- reported SUCCESS for a speaker whose only
+                    // link was the one left idling after pairing, i.e. the exact opposite.
                     if (onOperation)
                         onOperation(ok2, ok2 ? std::string()
                                              : hintMessage("Connect failed", error2));
@@ -833,14 +957,9 @@ void Bluez::removeDevice(const std::string &path)
         onOperation(false, hintMessage("Remove failed", error));
 }
 
-bool Bluez::deviceState(const std::string &path, bool *paired, bool *trusted, bool *connected)
+bool Bluez::deviceState(const std::string &path, BluezDeviceProps *out)
 {
-    if (paired)
-        *paired = false;
-    if (trusted)
-        *trusted = false;
-    if (connected)
-        *connected = false;
+    *out = BluezDeviceProps();
     if (!mImpl->bus.isOpen() || path.empty())
         return false;
 
@@ -863,14 +982,10 @@ bool Bluez::deviceState(const std::string &path, bool *paired, bool *trusted, bo
     DBusMessageIter dict;
     dbus_message_iter_recurse(&it, &dict);
     BluezDeviceProps p;
+    p.path = path;
     Impl::readDeviceProps(&dict, &p);
-
-    if (paired)
-        *paired = p.paired;
-    if (trusted)
-        *trusted = p.trusted;
-    if (connected)
-        *connected = p.connected;
+    p.audioConnected = mImpl->hasTransport(path);
+    *out = p;
     return true;
 }
 
@@ -880,13 +995,45 @@ bool Bluez::deviceState(const std::string &path, bool *paired, bool *trusted, bo
 // user who cannot pair actually needs to check.
 std::string Bluez::hintMessage(const std::string &prefix, const std::string &detail)
 {
+    // A REASON BLUEZ NAMED GETS ADVICE ABOUT THAT REASON. The strings are the br-connection-*
+    // reasons from src/error.h (btd_error_bredr_conn_from_errno), which is what BlueZ puts in the
+    // message of a failed Connect/ConnectProfile. Only reasons with one clear remedy are listed.
+    //
+    // Everything else keeps the GTK build's catch-all, which leads with group membership and the
+    // polkit rule. That is the right first check for an ACCESS failure and the wrong one for a
+    // device that simply did not answer -- it sent the user checking their groups over a speaker
+    // that was switched off.
+    struct Hint {
+        const char *reason;
+        const char *advice;
+    };
+    static const Hint kHints[] = {
+        {"br-connection-page-timeout",
+         "The device did not answer. Check it is switched on, in range, and not connected to "
+         "another device such as a phone."},
+        {"br-connection-adapter-not-powered", "The Bluetooth adapter is switched off."},
+        {"br-connection-profile-unavailable",
+         "No audio profile in common. Check that bluealsad is running."},
+        {"br-connection-key-missing",
+         "The pairing keys no longer match. Remove the device and pair it again."},
+        {"br-connection-refused", "The device refused. Remove it and pair it again."},
+    };
+
     std::string m = prefix;
     if (!prefix.empty() && !detail.empty())
         m += ": ";
     m += detail;
-    m += "  Check: your user is in the 'audio' group (and 'bluetooth' if it exists); "
-         "/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules exists; "
-         "the adapter is powered and the device is in range.";
+    for (const Hint &h : kHints) {
+        if (detail == h.reason)
+            return m + "  " + h.advice;
+    }
+    // EVERY CHECK THE GTK BUILD LISTED, IN FEWER WORDS. The full sentence measured 1258 units
+    // behind the longest reason BlueZ can give, in a strip that holds 973, so it was cut off
+    // mid-path -- and nothing measured it until uirender's corpus carried it. The polkit rule is
+    // named by file rather than by its /etc/polkit-1/rules.d/ path: the name is what a search
+    // finds, and it is the part that was being cut.
+    m += "  Check: membership of the 'audio' (and 'bluetooth') group, "
+         "90-jack-bridge-bluetooth.rules, adapter on, device in range.";
     return m;
 }
 

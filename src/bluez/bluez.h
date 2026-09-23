@@ -44,7 +44,34 @@ struct BluezDeviceProps {
     std::string name; // Alias if BlueZ gave one, else Name, else empty
     bool paired = false;
     bool trusted = false;
+
+    // BlueZ's Device1.Connected, VERBATIM -- and it does not mean what a user means by it. BlueZ
+    // sets it on the kernel's MGMT_EV_DEVICE_CONNECTED (src/adapter.c, connected_callback ->
+    // device_add_connection), which is the baseband ACL link. Pairing cannot happen without that
+    // link, so Connected goes true DURING Pair and stays true for the few seconds the link idles
+    // afterwards; bluetoothctl shows "Connected: yes" at the same moments. For a speaker that is a
+    // radio link with no audio on it. Use connectedForUse() for anything a user sees.
     bool connected = false;
+
+    // The device advertises the A2DP Audio Sink service (0000110b-...): it can play what we send.
+    // Read from Device1.UUIDs. This is what makes a device a candidate for "Set as Output".
+    bool audioSink = false;
+
+    // A2DP IS ACTUALLY UP: BlueZ holds a org.bluez.MediaTransport1 for this device. BlueZ creates
+    // one in set_configuration() when the stream is configured against an endpoint (bluealsa's)
+    // and destroys it in clear_configuration() when A2DP goes down (profiles/audio/media.c); it
+    // exists in state "idle" too, so it means connected, not merely streaming.
+    bool audioConnected = false;
+
+    // What "Connected" means to a person. For a device that can take our audio, it is connected
+    // when the audio is -- a paired speaker whose link is up only because pairing just finished is
+    // NOT connected in any sense that helps anyone. For anything else (a game controller) BlueZ's
+    // link-level Connected is the only signal there is, and for HID it is the right one: the link
+    // IS the input connection.
+    bool connectedForUse() const
+    {
+        return audioSink ? audioConnected : connected;
+    }
 };
 
 class Bluez
@@ -155,7 +182,9 @@ public:
 
     // Synchronous, because both are quick and the caller acts on the answer immediately.
     void removeDevice(const std::string &path);
-    bool deviceState(const std::string &path, bool *paired, bool *trusted, bool *connected);
+    // A fresh read of one device, with audioConnected filled from the transports this client is
+    // tracking. False if the device could not be read.
+    bool deviceState(const std::string &path, BluezDeviceProps *out);
 
     // The hint block compose_hint_message() appended to every failure (gui_bt.c:603). Kept verbatim
     // in substance: these three lines are what a user who cannot pair actually needs, and they were

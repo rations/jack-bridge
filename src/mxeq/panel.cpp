@@ -205,12 +205,13 @@ void Panel::setBluetoothState(bool adapterReady, bool discoverable, bool discove
 }
 
 void Panel::setBluetoothSelectionState(bool haveSelection, bool paired, bool trusted,
-                                       bool connected)
+                                       bool connected, bool audioSink)
 {
     mBtHaveSelection = haveSelection;
     mBtPaired = paired;
     mBtTrusted = trusted;
     mBtConnected = connected;
+    mBtAudioSink = audioSink;
     applyBluetoothGating(); // the five actions -- see applyBluetoothGating()
     repaint();
 }
@@ -497,7 +498,9 @@ void Panel::applyBluetoothGating()
     mBtActions[kTrust].enabled = mBtHaveSelection && mBtPaired && !mBtTrusted;
     mBtActions[kConnect].enabled = mBtHaveSelection && mBtPaired && !mBtConnected;
     mBtActions[kRemove].enabled = mBtHaveSelection;
-    mBtActions[kSetOutput].enabled = mBtHaveSelection && mBtConnected;
+    // An OUTPUT has to be able to play audio. A connected game controller used to light this up,
+    // and routing to it could only fail -- bluealsa has no PCM for a device with no A2DP sink.
+    mBtActions[kSetOutput].enabled = mBtHaveSelection && mBtAudioSink && mBtConnected;
 
     mBtScan.enabled = mBtAdapterReady && !mBtDiscovering;
     mBtStopScan.enabled = mBtAdapterReady && mBtDiscovering;

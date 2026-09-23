@@ -119,6 +119,20 @@ const char *const kMessages[] = {
     "Stopping the Steam bridge...",
     "JACK is not running. Start it from jack-graph's JACK Settings window first.",
     "No Bluetooth device selected. Open the Bluetooth page, connect a device, and try again.",
+    // Bluez::hintMessage(), one per reason it names, plus its catch-all with the LONGEST reason
+    // string src/error.h can put in front of it. These are the messages a failed Pair or Connect
+    // shows, and until they were listed here none of them had ever been measured.
+    "Connect failed: br-connection-page-timeout  The device did not answer. Check it is switched "
+    "on, in range, and not connected to another device such as a phone.",
+    "Connect failed: br-connection-adapter-not-powered  The Bluetooth adapter is switched off.",
+    "Connect failed: br-connection-profile-unavailable  No audio profile in common. Check that "
+    "bluealsad is running.",
+    "Connect failed: br-connection-key-missing  The pairing keys no longer match. Remove the "
+    "device and pair it again.",
+    "Connect failed: br-connection-refused  The device refused. Remove it and pair it again.",
+    "Connect failed: br-connection-concurrent-connection-limit  Check: membership of the "
+    "'audio' (and 'bluetooth') group, 90-jack-bridge-bluetooth.rules, adapter on, device in "
+    "range.",
     "Could not start arecord. Check that it is installed and that jackd is running.",
     "Recording failed. Check that jackd is running and that the ALSA `jack` PCM is configured.",
     "Could not start pulse-jack-bridge. Check that it is installed: sudo ./contrib/install.sh",
@@ -419,7 +433,7 @@ void sceneCommon(Panel &p)
     p.setRecorderState(false, "Idle");
     p.setBluetoothDevices(btRows());
     p.setBluetoothState(true, true, true);
-    p.setBluetoothSelectionState(true, true, true, true);
+    p.setBluetoothSelectionState(true, true, true, true, true);
     p.setSteamState(false, "Steam bridge is not running");
 }
 
@@ -1093,7 +1107,7 @@ int main(int argc, char **argv)
         sceneInternal(p);
         p.setBluetoothDevices({});
         p.setBluetoothState(false, false, false);
-        p.setBluetoothSelectionState(false, false, false, false);
+        p.setBluetoothSelectionState(false, false, false, false, false);
         p.setPage(Panel::Page::Bluetooth);
         render(p, 1.0f, out + "/bluetooth-unavailable@1.00x.png");
     }

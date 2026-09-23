@@ -203,7 +203,10 @@ public:
     // Which actions the selected device can take, so a pill that cannot work is drawn disabled
     // rather than failing when pressed. This is the gating the GTK build did with
     // gui_bt_get_device_state before each call.
-    void setBluetoothSelectionState(bool haveSelection, bool paired, bool trusted, bool connected);
+    // `connected` is BluezDeviceProps::connectedForUse(), and `audioSink` says whether the device
+    // can play audio at all -- Set as Output needs both.
+    void setBluetoothSelectionState(bool haveSelection, bool paired, bool trusted, bool connected,
+                                    bool audioSink);
 
     void setSteamState(bool active, const std::string &status);
 
@@ -351,6 +354,7 @@ private:
     bool mBtPaired = false;
     bool mBtTrusted = false;
     bool mBtConnected = false;
+    bool mBtAudioSink = false;
 
     // Steam.
     PillToggle mSteamToggle;

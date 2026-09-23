@@ -153,7 +153,10 @@ bool App::start()
         d.name = p.name;
         d.paired = p.paired;
         d.trusted = p.trusted;
-        d.connected = p.connected;
+        // connectedForUse(), NOT BlueZ's raw Connected -- see BluezDeviceProps. The raw one is true
+        // for the whole of a Pair and for a few seconds after it, which put a "Connected" chip on a
+        // speaker that had no audio connection at all.
+        d.connected = p.connectedForUse();
         mBtModel.upsert(d);
         rebuildBluetoothPage();
     };
@@ -296,7 +299,7 @@ bool App::start()
         d.name = p.name;
         d.paired = p.paired;
         d.trusted = p.trusted;
-        d.connected = p.connected;
+        d.connected = p.connectedForUse();
         mBtModel.upsert(d);
     }
     mBtModel.setFavourite(Devices::loadBluetoothDeviceMac());
@@ -419,10 +422,10 @@ void App::rebuildBluetoothPage()
     // The action gating, from the selected device's live state. Re-read rather than taken from the
     // model, because the model is only as fresh as the last signal and this is what the GTK build
     // checked with gui_bt_get_device_state immediately before each call.
-    bool paired = false, trusted = false, connected = false;
-    const bool have = !mBtSelected.empty() &&
-                      mBluez.deviceState(mBtSelected, &paired, &trusted, &connected);
-    mPanel.setBluetoothSelectionState(have, paired, trusted, connected);
+    BluezDeviceProps sel;
+    const bool have = !mBtSelected.empty() && mBluez.deviceState(mBtSelected, &sel);
+    mPanel.setBluetoothSelectionState(have, sel.paired, sel.trusted, sel.connectedForUse(),
+                                      sel.audioSink);
 }
 
 //------------------------------------------------------------------------

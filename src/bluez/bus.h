@@ -122,6 +122,9 @@ bool readBool(DBusMessageIter *it, bool *out);              // b
 // dictionaries are a{sv}, so almost every value this program reads arrives boxed.
 bool readVariantString(DBusMessageIter *it, std::string *out);
 bool readVariantBool(DBusMessageIter *it, bool *out);
+// A variant holding `as` -- Device1.UUIDs. Every element that is not a string is skipped rather
+// than read, for the same reason as the rest of this block.
+bool readVariantStringArray(DBusMessageIter *it, std::vector<std::string> *out);
 
 //--- writing ------------------------------------------------------------------------------------
 // Properties.Set takes (ssv) and the variant has to be built by hand: there is no format-string

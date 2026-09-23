@@ -75,6 +75,25 @@ bool readVariantBool(DBusMessageIter *it, bool *out)
     return readBool(&v, out);
 }
 
+bool readVariantStringArray(DBusMessageIter *it, std::vector<std::string> *out)
+{
+    if (dbus_message_iter_get_arg_type(it) != DBUS_TYPE_VARIANT)
+        return false;
+    DBusMessageIter v;
+    dbus_message_iter_recurse(it, &v);
+    if (dbus_message_iter_get_arg_type(&v) != DBUS_TYPE_ARRAY)
+        return false;
+    DBusMessageIter a;
+    dbus_message_iter_recurse(&v, &a);
+    while (dbus_message_iter_get_arg_type(&a) != DBUS_TYPE_INVALID) {
+        std::string s;
+        if (readString(&a, &s))
+            out->push_back(std::move(s));
+        dbus_message_iter_next(&a);
+    }
+    return true;
+}
+
 //------------------------------------------------------------------------
 bool appendPropertySet(DBusMessage *m, const char *iface, const char *name, bool value)
 {
