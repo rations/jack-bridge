@@ -331,7 +331,10 @@ int AlsaMixer::volume(const Element &e) const
     }
     if (max <= min)
         return 0;
-    const long pct = (value - min) * 100 / (max - min);
+
+    // ROUNDED, NOT TRUNCATED, AND THE SAME AT BOTH ENDS -- see setVolume().
+    const long span = max - min;
+    const long pct = ((value - min) * 100 + span / 2) / span;
     return static_cast<int>(std::clamp<long>(pct, 0, 100));
 }
 
@@ -341,17 +344,26 @@ void AlsaMixer::setVolume(const Element &e, int percent)
         return;
     const int p = std::clamp(percent, 0, 100);
 
+    // BOTH LEGS OF THE CONVERSION ROUND, AND THEY HAVE TO AGREE.
+    //
+    // A card has far fewer raw steps than the 101 percentages the panel talks in -- this codec's
+    // Master is 0..87 -- so percent -> raw -> percent is only ever approximately the identity. With
+    // truncation on both legs the approximation is biased downwards twice and 99 of 101 values come
+    // back lower than they went in: drag the slider to 50, release, and the readout reads 49, which
+    // looks exactly like the panel refusing the value the user just chose. Rounding costs nothing
+    // and leaves only the 13 collisions the step count makes unavoidable, where two percentages
+    // genuinely share one raw step.
     long min = 0, max = 0;
     if (e.isCapture) {
         snd_mixer_selem_get_capture_volume_range(e.elem, &min, &max);
         if (max <= min)
             return;
-        snd_mixer_selem_set_capture_volume_all(e.elem, min + (max - min) * p / 100);
+        snd_mixer_selem_set_capture_volume_all(e.elem, min + ((max - min) * p + 50) / 100);
     } else {
         snd_mixer_selem_get_playback_volume_range(e.elem, &min, &max);
         if (max <= min)
             return;
-        snd_mixer_selem_set_playback_volume_all(e.elem, min + (max - min) * p / 100);
+        snd_mixer_selem_set_playback_volume_all(e.elem, min + ((max - min) * p + 50) / 100);
     }
 }
 
