@@ -61,16 +61,27 @@ void pairStereoPorts(std::vector<std::shared_ptr<Node>> &ports)
 constexpr float kBoxRadius = 6.0f;
 constexpr float kPortRadius = 6.0f;
 constexpr float kPortBgRadius = 3.0f;
-// TEXT SIZES, AT THE FAMILY'S FLOOR. These were 11 and 9, which is what Pango's 9pt and 7.5pt
-// measured out to in the gtkmm build -- and nothing else in this project draws below 12. A graph is
-// read at arm's length while patching, so the two sizes here are the shared body and small sizes
-// rather than a pair of numbers of their own: a client name is body text and a port name is the
-// small text beside it.
-constexpr float kHeaderTextSize = geo::kBodySize;  // 13
-constexpr float kPortTextSize = geo::kSmallSize;   // 12
+// TEXT SIZES, AND THE ONE REASON THEY ARE ABOVE THE FAMILY'S BODY SIZE. Everywhere else in this
+// project a logical unit IS a pixel, so geo::kBodySize lands on screen at the size it names. Not
+// here: this canvas is drawn through a zoom, and the zoom a freshly opened window picks is
+// fitToWindow's, which is below 1 for any graph wider than the viewport -- a typical desktop
+// graph fits at about 0.9, and a busy one a good deal less. A 13-unit name drawn at 0.76 is 9
+// pixels tall, which is what "the font is too small in the boxes" was: the number was fine and
+// the zoom ate it.
+//
+// So these are sized to be right AFTER that scaling rather than before it, and kBoxColGap below is
+// part of the same fix -- gap is pure whitespace, and whitespace in the content bounds comes
+// straight off the fit zoom, which comes straight off every glyph on screen.
+constexpr float kHeaderTextSize = 16.0f;
+constexpr float kPortTextSize = 14.0f;
 constexpr float kLayoutMargin = 20.0f;
 constexpr float kBoxRowGap = 10.0f;
-constexpr float kBoxColGap = 250.0f;
+// THE GAP BETWEEN THE THREE COLUMNS, and it is not free. It was 250, which put 500 units of empty
+// canvas into content bounds only 948 units of which were boxes -- a third of the window's width
+// spent on nothing, and since fitToWindow divides the viewport by those bounds, it shrank every
+// box and every label by a quarter to make room for it. 120 still reads as three distinct columns
+// and still leaves a cable room to curve.
+constexpr float kBoxColGap = 120.0f;
 
 } // namespace
 
@@ -476,6 +487,11 @@ ClientBox *GraphPanel::boxAt(double x, double y)
             return &box;
     }
     return nullptr;
+}
+
+void GraphPanel::forgetSavedPositions()
+{
+    mSavedPositions.clear();
 }
 
 ClientBox *GraphPanel::boxFor(const std::string &client)

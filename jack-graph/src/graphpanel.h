@@ -59,6 +59,12 @@ public:
     // undo a layout the user arranged by hand.
     void removeAll();
 
+    // FORGET WHERE THE USER PUT THINGS, so the next layout() places every box by the automatic
+    // rule again. Only the toolbar's Refresh asks for this: a refresh JACK asked for -- a client
+    // appearing, a port going away, a reconnect -- must leave an arrangement alone, or any
+    // application opening a port would scatter the boxes the user just tidied.
+    void forgetSavedPositions();
+
     const std::vector<std::shared_ptr<Node>> &nodes() const
     {
         return mNodes;

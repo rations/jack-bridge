@@ -112,7 +112,10 @@ public:
 
 private:
     void attachJackCallbacks();
-    void refreshPorts();
+    // forgetPositions drops the saved box positions first, so the rebuild lays the graph out by
+    // the automatic rule instead of restoring the user's arrangement. Only Tool::Refresh passes
+    // true; every automatic caller leaves the arrangement alone.
+    void refreshPorts(bool forgetPositions = false);
     void schedulePortRefresh();
     void startReconnectPoll();
     bool tryReconnectJack();

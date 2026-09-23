@@ -219,10 +219,16 @@ bool App::tryReconnectJack()
 }
 
 //------------------------------------------------------------------------
-void App::refreshPorts()
+void App::refreshPorts(bool forgetPositions)
 {
     mJack.scan_ports();
     mGraph.removeAll();
+
+    // AFTER removeAll(), NOT BEFORE. removeAll() saves every box's current position on its way out
+    // -- that is what carries an arrangement across a rebuild -- so clearing the saved positions
+    // first would simply see them written again.
+    if (forgetPositions)
+        mGraph.forgetSavedPositions();
 
     if (mJackConnected) {
         const std::string ourClient = mJack.get_actual_client_name();
@@ -304,7 +310,11 @@ void App::onTool(Tool t)
 {
     switch (t) {
     case Tool::Refresh:
-        refreshPorts();
+        // THE TOOLBAR'S REFRESH IS THE ONE THAT FORGETS. Pressing it means "lay this out again",
+        // which is the only way back to the automatic layout once boxes have been dragged; the
+        // fitToWindow() below has always said as much, since it overrides the view the user set.
+        // Every other path into refreshPorts() is JACK's doing, not the user's, and keeps both.
+        refreshPorts(true);
         mGraph.fitToWindow();
         break;
     case Tool::ZoomOut:
