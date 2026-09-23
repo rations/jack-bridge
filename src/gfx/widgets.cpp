@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <vector>
 
 namespace jackbridge
 {
@@ -97,6 +99,58 @@ float thumbTravelW(const Rect &r)
 }
 } // namespace
 
+void drawWrappedText(Canvas &c, const Rect &area, const std::string &text, uint32_t rgb,
+                     float size, float lineH, int maxLines)
+{
+    c.setFont(Font::Body);
+    c.setFontSize(size);
+    c.setColor(rgb);
+
+    std::vector<std::string> lines;
+    size_t pos = 0;
+    while (pos < text.size() && static_cast<int>(lines.size()) < maxLines) {
+        // The longest prefix of the remainder that fits, ending at a space.
+        size_t take = text.size() - pos;
+        if (c.stringWidth(text.substr(pos, take).c_str()) > area.w) {
+            size_t fit = pos;
+            size_t probe = pos;
+            while (probe < text.size()) {
+                const size_t sp = text.find(' ', probe);
+                const size_t end = sp == std::string::npos ? text.size() : sp;
+                if (c.stringWidth(text.substr(pos, end - pos).c_str()) > area.w)
+                    break;
+                fit = end;
+                if (sp == std::string::npos)
+                    break;
+                probe = sp + 1;
+            }
+            // Nothing fit: one word is wider than the line. Take it whole and let the clip below
+            // shorten it.
+            take = fit > pos ? fit - pos : (text.find(' ', pos) == std::string::npos
+                                                ? text.size() - pos
+                                                : text.find(' ', pos) - pos);
+        }
+        lines.push_back(text.substr(pos, take));
+        pos += take;
+        while (pos < text.size() && text[pos] == ' ')
+            ++pos;
+    }
+    // Anything that did not fit in maxLines lines joins the last one, which is then clipped -- so an
+    // over-long message ends in an ellipsis instead of losing its tail without saying so.
+    if (pos < text.size() && !lines.empty())
+        lines.back() += " " + text.substr(pos);
+
+    // Vertically centred as a block, so a one-line message sits in the middle of the strip rather
+    // than at the top of it.
+    const float blockH = static_cast<float>(lines.size()) * lineH;
+    float y = area.centerY() - blockH * 0.5f + lineH * 0.5f;
+    for (const std::string &line : lines) {
+        const std::string t = c.clipToWidth(line, area.w);
+        c.drawString(t.c_str(), area.x, y + size * geo::kLabelBaselineBias);
+        y += lineH;
+    }
+}
+//------------------------------------------------------------------------
 void Slider::draw(Canvas &c) const
 {
     const float grooveY = rect.centerY() - geo::kGrooveH / 2.0f;

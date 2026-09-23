@@ -19,7 +19,9 @@ CODE-REVIEW.md
 /src/mxeq/*.d
 /tools/*.d
 /jack-graph/src/*.d
-# Locally built jack-graph binary; the shipped copy lives in contrib/bin/
+# jack-graph has no Makefile of its own any more -- the root one builds it straight into
+# contrib/bin/, which is already ignored above. This entry stays for a tree that still has the old
+# in-place binary lying around from before the port.
 /jack-graph/jack-graph
 # The offline layout audit is a developer tool, built from tools/uirender.cpp and never shipped.
 /tools/uirender

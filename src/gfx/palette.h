@@ -81,6 +81,12 @@ constexpr uint32_t kPortText = 0xCCCCD9;
 constexpr uint32_t kConnector = 0x8C8C99; // 0.55, 0.55, 0.60 at alpha 0.5, pen 2.0
 constexpr uint32_t kPreview = 0xE68033;   // 0.9, 0.5, 0.2 at alpha 0.7, dashed
 
+// THE TWO PORT COLOURS CARRY MEANING AND ARE NOT DECORATION: blue is an audio port, green is a
+// MIDI port, and that is the only thing on screen distinguishing them -- a port's name does not
+// say which it is. GraphCanvas::draw_port picks between them from Node::type.
+constexpr uint32_t kPortAudio = 0x4073D9; // 0.25, 0.45, 0.85
+constexpr uint32_t kPortMidi = 0x33B359;  // 0.20, 0.70, 0.35
+
 } // namespace graph
 
 } // namespace pal

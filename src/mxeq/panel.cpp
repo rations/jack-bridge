@@ -61,68 +61,6 @@ float multilineText(Canvas &c, const Rect &area, const std::string &text, uint32
     return y - area.y;
 }
 
-// Break `text` into at most `maxLines` lines that each fit `w`, on WORD boundaries, and draw them.
-//
-// Only the message strip needs this, and geometry.h records why: the longest message the program can
-// produce carries a compiled-in path and a shell command, so it is both longer than one line and the
-// one message where truncation would delete the whole point. The rest of the panel's multi-line text
-// is hand-broken with '\n' and goes through multilineText() above -- a written sentence breaks better
-// where its author broke it than where its width happens to run out.
-//
-// A word too long for a line on its own is CLIPPED rather than broken mid-character: that word is a
-// path, and half a path invites the reader to type it.
-void wrappedText(Canvas &c, const Rect &area, const std::string &text, uint32_t rgb, float size,
-                 float lineH, int maxLines)
-{
-    c.setFont(Font::Body);
-    c.setFontSize(size);
-    c.setColor(rgb);
-
-    std::vector<std::string> lines;
-    size_t pos = 0;
-    while (pos < text.size() && static_cast<int>(lines.size()) < maxLines) {
-        // The longest prefix of the remainder that fits, ending at a space.
-        size_t take = text.size() - pos;
-        if (c.stringWidth(text.substr(pos, take).c_str()) > area.w) {
-            size_t fit = pos;
-            size_t probe = pos;
-            while (probe < text.size()) {
-                const size_t sp = text.find(' ', probe);
-                const size_t end = sp == std::string::npos ? text.size() : sp;
-                if (c.stringWidth(text.substr(pos, end - pos).c_str()) > area.w)
-                    break;
-                fit = end;
-                if (sp == std::string::npos)
-                    break;
-                probe = sp + 1;
-            }
-            // Nothing fit: one word is wider than the line. Take it whole and let the clip below
-            // shorten it.
-            take = fit > pos ? fit - pos : (text.find(' ', pos) == std::string::npos
-                                                ? text.size() - pos
-                                                : text.find(' ', pos) - pos);
-        }
-        lines.push_back(text.substr(pos, take));
-        pos += take;
-        while (pos < text.size() && text[pos] == ' ')
-            ++pos;
-    }
-    // Anything that did not fit in maxLines lines joins the last one, which is then clipped -- so an
-    // over-long message ends in an ellipsis instead of losing its tail without saying so.
-    if (pos < text.size() && !lines.empty())
-        lines.back() += " " + text.substr(pos);
-
-    // Vertically centred as a block, so a one-line message sits in the middle of the strip rather
-    // than at the top of it.
-    const float blockH = static_cast<float>(lines.size()) * lineH;
-    float y = area.centerY() - blockH * 0.5f + lineH * 0.5f;
-    for (const std::string &line : lines) {
-        const std::string t = c.clipToWidth(line, area.w);
-        c.drawString(t.c_str(), area.x, y + size * geo::kLabelBaselineBias);
-        y += lineH;
-    }
-}
-
 } // namespace
 
 //------------------------------------------------------------------------
@@ -572,7 +510,7 @@ void Panel::draw(Canvas &c) const
         c.setColor(rgb, kOutlineAlphaIdle);
         c.setPenSize(1.0f);
         c.strokeRoundRect(mMessageRect, geo::kFieldRadius);
-        wrappedText(c,
+        drawWrappedText(c,
                     Rect(mMessageRect.x + geo::kFieldPadX, mMessageRect.y + geo::kStripPadY,
                          mMessageRect.w - 2.0f * geo::kFieldPadX,
                          mMessageRect.h - 2.0f * geo::kStripPadY),

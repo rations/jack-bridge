@@ -50,10 +50,6 @@ constexpr float kContentW = kWinW - 2.0f * kMargin;
 constexpr float kWinMinH = 240.0f;
 constexpr float kWinMaxH = 760.0f;
 
-// The layout is audited at these three scales.
-constexpr float kScaleMin = 0.75f;
-constexpr float kScaleMax = 2.0f;
-
 //--- the title and tab bar --------------------------------------------------
 constexpr float kTitleSize = 15.0f;
 constexpr float kTitleY = 10.0f; // top of the title's band

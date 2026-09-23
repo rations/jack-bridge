@@ -98,10 +98,30 @@ MXEQ_VIEW_OBJS = src/mxeq/panel.o src/mxeq/app.o
 # includes <dbus/dbus.h>.
 BLUEZ_OBJS = src/bluez/bus.o src/bluez/agent.o src/bluez/bluez.o
 
-# The offline layout audit. It links the GFX objects, mxeq's panel and respath -- AND NOTHING ELSE.
-# No X11, no ALSA, no dbus: if this list ever has to grow, something has reached across the line the
-# header comment draws.
-UIRENDER_OBJS = $(GFX_OBJS) src/mxeq/panel.o src/platform/respath.o tools/uirender.o
+# jack-graph's model layer, all of it untouched by the port: it never linked a toolkit. JackClient
+# and AlsaClient are the only two that talk to a server; the other five are pure data.
+GRAPH_MODEL_OBJS = jack-graph/src/JackClient.o jack-graph/src/AlsaClient.o \
+                   jack-graph/src/Config.o jack-graph/src/JackServerControl.o \
+                   jack-graph/src/Node.o jack-graph/src/Connection.o jack-graph/src/ClientBox.o
+
+# jack-graph's view: the graph itself, the JACK Settings window, the toolbar and status line, and
+# the application that drives them. THE THREE PANELS ARE CAIRO ONLY, like src/mxeq/panel.o, which is
+# what lets tools/uirender audit them; app.o is where libjack appears.
+GRAPH_VIEW_OBJS = jack-graph/src/graphpanel.o jack-graph/src/settingspanel.o \
+                  jack-graph/src/chrome.o jack-graph/src/app.o
+
+# The offline layout audit. It links the GFX objects, BOTH BINARIES' CAIRO-ONLY PANELS, the
+# pure-data model types the graph panel lays out, and respath -- AND NOTHING ELSE. No X11, no ALSA,
+# no dbus, no jack: if this list ever has to grow past that, something has reached across the line
+# the header comment draws.
+#
+# jack-graph's settingspanel.o is NOT here, and that is the one deliberate gap: it takes a
+# JackServerControl&, which links libjack and libasound. uirender.cpp's header says what it measures
+# instead.
+UIRENDER_OBJS = $(GFX_OBJS) src/mxeq/panel.o \
+                jack-graph/src/graphpanel.o jack-graph/src/chrome.o \
+                jack-graph/src/Node.o jack-graph/src/Connection.o jack-graph/src/ClientBox.o \
+                src/platform/respath.o tools/uirender.o
 
 .PHONY: all clean toolkit manager bridge mxeq uirender graph install uninstall
 
@@ -137,8 +157,22 @@ src/mxeq/main.o: src/mxeq/main.cpp
 src/bluez/%.o: src/bluez/%.cpp
 	$(CXX) $(CXXFLAGS) $(DBUS_CFLAGS) -c -o $@ $<
 
+# jack-graph's objects. THE SAME RULE AS src/mxeq/: cairo, plus the two servers its model layer
+# talks to, and NO X11 -- graphpanel.cpp, settingspanel.cpp and chrome.cpp draw through Canvas and
+# nothing else, which is what keeps them auditable headlessly.
+jack-graph/src/%.o: jack-graph/src/%.cpp
+	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) $(JACK_CFLAGS) $(ALSA_CFLAGS) -c -o $@ $<
+
+# THE ONE EXCEPTION, explicit so it cannot spread, exactly as src/mxeq/main.o is: main.cpp is where
+# the windows and the application meet, so it is the only file under jack-graph/src/ that sees an X
+# header.
+jack-graph/src/main.o: jack-graph/src/main.cpp
+	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) $(X11_CFLAGS) $(JACK_CFLAGS) $(ALSA_CFLAGS) -c -o $@ $<
+
+# The audit sees both binaries' geometry headers, so it needs jack-graph/src on the include path.
+# Still no X11, ALSA, jack or dbus cflags: it composes the panels and nothing else.
 tools/%.o: tools/%.cpp
-	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(GFX_CFLAGS) -Ijack-graph/src -c -o $@ $<
 
 # --- mxeq ---------------------------------------------------------------------------------------
 # NO -ljack, and that is deliberate: CLAUDE.md records that mxeq does not link libjack, so there is
@@ -182,39 +216,33 @@ bridge: $(BRIDGE_TARGET)
 $(BRIDGE_TARGET): $(BRIDGE_SRCS) | $(BIN_DIR)
 	$(CC) $(BRIDGE_CFLAGS) -o $@ $(BRIDGE_SRCS) $(BRIDGE_LIBS)
 
-# --- STILL GTK: jack-graph, BEING REPLACED IN PHASE 4 -------------------------------------------
+# --- jack-graph -------------------------------------------------------------------------------
+# X11 + Cairo + FreeType, like mxeq, out of the same src/gfx and src/platform objects. jack-graph
+# has no Makefile of its own any more: two copies of canvas.cpp in one repository would be a second
+# implementation for uirender to fail to audit.
 #
-# This rule is the OLD build and it is kept deliberately, not by oversight. The port lands in phases
-# -- the shared toolkit, then mxeq, then jack-graph, then the settings window -- and each phase has
-# to leave a tree that builds and runs. Deleting this before jack-graph/src/graphpanel.cpp exists
-# would mean a run of commits with no working graph in them, which is also a run of commits nobody
-# can bisect.
-#
-# WHAT GOES WHEN: this rule and jack-graph/Makefile go with Phase 4.
-#
-# THE GTK mxeq IS GONE, and with it MOTR_*, GLIB_API_LEVEL, src/mxeq.c, src/gui_bt.c and
-# src/bt_agent.c. There is no GLib left in this tree at all; the BlueZ client is src/bluez/ on
-# libdbus-1.
-GRAPH_DIR    = jack-graph
+# THIS ONE DOES LINK libjack, and mxeq deliberately does not -- see the note on the mxeq target.
+# jack-graph is a JACK client by definition: it is the graph.
 GRAPH_TARGET = $(BIN_DIR)/jack-graph
+GRAPH_OBJS   = $(GFX_OBJS) $(PLAT_OBJS) $(GRAPH_MODEL_OBJS) $(GRAPH_VIEW_OBJS) \
+               jack-graph/src/main.o
 
-# Phony, and named `graph` rather than `jack-graph`: a target named after the jack-graph/ directory
-# would be considered up to date the moment that directory exists, and the copy would silently never
-# run. Phony also means the staging step cannot be skipped just because contrib/bin/jack-graph is
-# present -- a stale binary sitting there is exactly how a release once shipped a build that would
-# not run on the oldest supported distro.
-graph: | $(BIN_DIR)
-	$(MAKE) -C $(GRAPH_DIR)
-	install -m 0755 $(GRAPH_DIR)/jack-graph $(GRAPH_TARGET)
-	@echo "Staged $(GRAPH_TARGET)"
+# Named `graph` rather than `jack-graph`: a phony target named after the jack-graph/ directory would
+# be considered up to date the moment that directory exists, and the build would silently never run.
+graph: $(GRAPH_TARGET)
+$(GRAPH_TARGET): $(GRAPH_OBJS) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(LDHARDEN) -o $@ $(GRAPH_OBJS) \
+	    $(GFX_LIBS) $(X11_LIBS) $(JACK_LIBS) $(ALSA_LIBS)
 
 # Generated by -MMD; absent on the first build, which `-include` tolerates silently.
 DEPS = $(GFX_OBJS:.o=.d) $(PLAT_OBJS:.o=.d) $(MXEQ_MODEL_OBJS:.o=.d) \
-       $(MXEQ_VIEW_OBJS:.o=.d) $(BLUEZ_OBJS:.o=.d) src/mxeq/main.d tools/uirender.d
+       $(MXEQ_VIEW_OBJS:.o=.d) $(BLUEZ_OBJS:.o=.d) src/mxeq/main.d \
+       $(GRAPH_MODEL_OBJS:.o=.d) $(GRAPH_VIEW_OBJS:.o=.d) jack-graph/src/main.d \
+       tools/uirender.d
 -include $(DEPS)
 
 clean:
 	rm -f $(GFX_OBJS) $(PLAT_OBJS) $(MXEQ_MODEL_OBJS) $(MXEQ_VIEW_OBJS) $(BLUEZ_OBJS) \
-	      src/mxeq/main.o tools/uirender.o $(DEPS)
+	      src/mxeq/main.o $(GRAPH_MODEL_OBJS) $(GRAPH_VIEW_OBJS) jack-graph/src/main.o \
+	      tools/uirender.o $(DEPS)
 	rm -f $(MANAGER_TARGET) $(BRIDGE_TARGET) $(MXEQ_TARGET) $(GRAPH_TARGET) $(UIRENDER_TARGET)
-	$(MAKE) -C $(GRAPH_DIR) clean

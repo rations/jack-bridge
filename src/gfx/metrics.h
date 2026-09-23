@@ -40,6 +40,13 @@ constexpr float nominalDescent(float size)
     return size * 0.26f;
 }
 
+//--- the window scale -------------------------------------------------------
+// What --scale and $JACK_BRIDGE_SCALE are clamped to, and the three scales tools/uirender audits
+// every page at. Shared rather than per-binary: one environment variable sets both windows, so one
+// pair of bounds has to answer for both.
+constexpr float kScaleMin = 0.75f;
+constexpr float kScaleMax = 2.0f;
+
 //--- text -------------------------------------------------------------------
 constexpr float kBodySize = 13.0f;
 constexpr float kGroupTitleSize = 13.0f;

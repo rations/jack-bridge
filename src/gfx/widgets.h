@@ -47,6 +47,23 @@ void drawGroupBox(Canvas &c, const Rect &frame, const char *title);
 void drawRowText(Canvas &c, const Rect &row, const char *text, uint32_t rgb,
                  float size);
 
+// `text` broken over at most `maxLines` lines that each fit `area.w`, on WORD BOUNDARIES, drawn as
+// a block centred vertically in `area`.
+//
+// Both windows have one place that needs this and they are the same place: a sentence whose length
+// is not the author's to choose. In mxeq it is the message strip, whose longest message carries a
+// compiled-in path and a shell command -- see mxeq/geometry.h. In the JACK Settings window it is
+// the live-status line, which reports back whatever the server or pkexec said. Everything else
+// either fits or is hand-broken with '\n', which reads better than a break where the width happens
+// to run out.
+//
+// A word too long for a line on its own is CLIPPED rather than broken mid-character: that word is
+// a path, and half a path invites the reader to type it. Anything past maxLines joins the last
+// line and is clipped with it, so an over-long message ends in an ellipsis rather than losing its
+// tail without saying so.
+void drawWrappedText(Canvas &c, const Rect &area, const std::string &text, uint32_t rgb,
+                     float size, float lineH, int maxLines);
+
 // --- The volume slider ------------------------------------------------------
 // 0..100, matching the range AlsaMixer already converts the element's raw range into.
 struct Slider {

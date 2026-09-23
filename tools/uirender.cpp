@@ -21,10 +21,22 @@
 // fabricated data is the only way to see both, and every check below that names a checkbox exists
 // because CLAUDE.md records that placement as having been reverted onto USB on request.
 //
-// NO X SERVER, NO SOUND CARD, NO BLUETOOTH ADAPTER. It links src/gfx, src/mxeq/panel.o and
-// src/platform/respath.o and nothing else, which is what the Makefile's "the gfx layer does not
-// link X11" rule is for. If this tool ever needs libX11 or libasound to build, something has
-// reached across that line.
+// IT AUDITS BOTH BINARIES. mxeq's five pages, and jack-graph's toolbar, status line, graph canvas
+// and About card. The one thing it cannot compose is jack-graph's SettingsPanel, and the reason is
+// worth stating rather than leaving as a gap: that panel takes a JackServerControl&, and
+// JackServerControl links libjack and libasound -- so pulling it in here would drag both into a
+// tool whose whole claim is that it needs neither. Constructing one would also run `aplay -l` and
+// `ps`, which would make the audit's content whatever this machine happens to have plugged in,
+// which is the opposite of what an audit is for. So its FIXED strings -- every label, pill, group
+// title, note line and combo item, which is where an overflow can actually happen -- are measured
+// against its geometry below, and its device names are left to clipToWidth, as a name off the
+// hardware always was.
+//
+// NO X SERVER, NO SOUND CARD, NO BLUETOOTH ADAPTER. It links src/gfx, src/mxeq/panel.o,
+// jack-graph's two cairo-only panels, the pure-data model types they need, and
+// src/platform/respath.o -- and nothing else, which is what the Makefile's "the gfx layer does not
+// link X11" rule is for. If this tool ever needs libX11, libasound or libjack to build, something
+// has reached across that line.
 //
 // Text metrics are scale-invariant in logical units -- Canvas sets CAIRO_HINT_METRICS_OFF, so a
 // string's width at scale s is exactly s times its width at scale 1 -- so the AUDIT RUNS ONCE while
@@ -35,8 +47,11 @@
 //
 // Usage: uirender [--out <dir>]
 
+#include "chrome.h"
 #include "gfx/fontstack.h"
 #include "gfx/palette.h"
+#include "graphgeometry.h"
+#include "graphpanel.h"
 #include "mxeq/geometry.h"
 #include "mxeq/panel.h"
 #include "platform/respath.h"
@@ -554,6 +569,204 @@ void auditPanel(Canvas &c, Panel &p, const char *scene)
 }
 
 //------------------------------------------------------------------------
+// jack-graph.
+//
+// THE GRAPH'S OWN CONTENT IS NOT AUDITED FOR WIDTH, and that is deliberate. A client box's header
+// is a JACK client name and a port row is a JACK port name; both are whatever the running programs
+// call themselves, both are clipped with an ellipsis by graphpanel.cpp on purpose, and the GTK
+// build's Pango layout ellipsised them too. What IS audited is everything this repository chose the
+// wording of: the toolbar pills, the status line, the About card and the settings window's labels.
+
+// The status line at its longest: update_status_bar() joins five facts with " | " and the numbers
+// are the widest they plausibly get -- a 192 kHz server with a six-figure xrun count, and the
+// longest string JackServerControl::get_status() returns.
+const char *const kWidestStatus =
+    "JACK: connected | Buffer: 8192 frames | Rate: 192000 Hz | Xruns: 999999 | "
+    "Server: Running | ALSA MIDI: connected";
+
+// The About card's four strings, copied from chrome.cpp. Duplicated here for the same reason
+// kMessages above is: the audit has to hold the literal, and a literal held in two places that
+// disagree is caught by the picture this tool writes.
+const char *const kAboutStrings[] = {"Jack Graph", "Version 0.1.0",
+                                     "JACK and ALSA port connection manager", "GPL-3.0+"};
+
+// Everything the JACK Settings window draws that this repository chose the wording of. From
+// settingspanel.cpp; see the note in the header about why the panel itself is not composed here.
+const char *const kSetGroupTitles[] = {"JACK Server", "Audio", "MIDI"};
+const char *const kSetLabels[] = {"Interface:", "Sample Rate:", "Frames/Period:",
+                                  "Periods/Buffer:", "MIDI Driver:"};
+const char *const kSetStatusLabels[] = {"Status: Running", "Status: Stopped"};
+const char *const kSetPills[] = {"Start", "Stop", "Apply Live", "Close"};
+const char *const kSetNotes[] = {"Apply Live changes frames/period on the running server.",
+                                 "Everything else needs Stop then Start."};
+// The combo item lists, with the same tokens SettingsPanel's constructor sets.
+const char *const kSetRates[] = {"44100", "48000", "88200", "96000", "192000"};
+const char *const kSetFrames[] = {"64", "128", "256", "512", "1024", "2048"};
+const char *const kSetPeriods[] = {"2", "3", "4", "5", "6", "7", "8"};
+const char *const kSetMidi[] = {"None", "ALSA SEQ"};
+// The longest thing mLiveStatus can hold, which is drawn wrapped over kSetStatusLines lines.
+const char *const kSetLiveStatus =
+    "Frames/period is now 2048. The interface cannot change it while running, so the server was "
+    "restarted -- JACK clients will have reconnected.";
+
+// A graph with something in every shape the panel can draw: two clients with audio ports, one with
+// MIDI, a stereo pair to exercise pairStereoPorts, and a name longer than a box.
+void sceneGraph(GraphPanel &g)
+{
+    struct PortSpec {
+        const char *name;
+        PortType type;
+        PortDirection dir;
+    };
+    static const PortSpec kPorts[] = {
+        {"system:capture_1", PortType::AUDIO, PortDirection::OUTPUT},
+        {"system:capture_2", PortType::AUDIO, PortDirection::OUTPUT},
+        {"system:playback_1", PortType::AUDIO, PortDirection::INPUT},
+        {"system:playback_2", PortType::AUDIO, PortDirection::INPUT},
+        {"system:midi_capture_1", PortType::MIDI, PortDirection::OUTPUT},
+        {"system:midi_playback_1", PortType::MIDI, PortDirection::INPUT},
+        {"alsa_pcm:playback_1", PortType::AUDIO, PortDirection::OUTPUT},
+        {"alsa_pcm:playback_2", PortType::AUDIO, PortDirection::OUTPUT},
+        {"pulse_bridge:playback_1", PortType::AUDIO, PortDirection::OUTPUT},
+        {"pulse_bridge:playback_2", PortType::AUDIO, PortDirection::OUTPUT},
+        {"usb_out:playback_1", PortType::AUDIO, PortDirection::INPUT},
+        {"usb_out:playback_2", PortType::AUDIO, PortDirection::INPUT},
+        // A stereo pair in the "<base>" / "<base>R" spelling pairStereoPorts exists for, and a
+        // client name wider than a box, which is what clipToWidth is there to survive.
+        {"REAPER (A Very Long Session Name):out", PortType::AUDIO, PortDirection::OUTPUT},
+        {"REAPER (A Very Long Session Name):outR", PortType::AUDIO, PortDirection::OUTPUT},
+    };
+
+    std::vector<std::shared_ptr<Node>> made;
+    for (const PortSpec &p : kPorts) {
+        auto n = std::make_shared<Node>(p.name, p.type, p.dir);
+        made.push_back(n);
+        g.addNode(n);
+    }
+    // Two cables, so the connector curve is in the picture as well as the boxes.
+    g.addConnection(std::make_shared<Connection>(made[6], made[2], PortType::AUDIO));
+    g.addConnection(std::make_shared<Connection>(made[7], made[3], PortType::AUDIO));
+    g.layout(false);
+}
+
+// Compose the graph window the way jack-graph's App::draw does -- ground, then the canvas, then the
+// chrome over it. Four lines, repeated here rather than reached for, because App links libjack.
+void drawGraphWindow(Canvas &c, Chrome &chrome, const GraphPanel &graph)
+{
+    c.setColor(pal::kBgColor);
+    c.fillRect(c.bounds());
+    chrome.layout(c);
+    graph.draw(c);
+    chrome.draw(c);
+}
+
+void auditGraph(Canvas &c, Chrome &chrome)
+{
+    static const Tool kTools[] = {Tool::Refresh,  Tool::ZoomOut,  Tool::ZoomIn, Tool::ZoomNormal,
+                                  Tool::Fit,      Tool::Settings, Tool::About};
+
+    float total = geo::kGraphMargin;
+    for (Tool t : kTools) {
+        const Pill *p = chrome.pill(t);
+        if (!p) {
+            fprintf(stderr, "uirender: the toolbar has no pill for tool %d\n", static_cast<int>(t));
+            ++gFailures;
+            continue;
+        }
+        checkPill(c, "a toolbar pill", *p);
+        total += p->rect.w + geo::kToolbarGap;
+    }
+    total += geo::kGraphMargin - geo::kToolbarGap;
+
+    // THE TOOLBAR AT THE NARROWEST THE WINDOW GETS. Every other rectangle in this window grows with
+    // it, so this is the only width that can run out -- and it runs out silently, by drawing the
+    // last pill off the edge.
+    if (total > geo::kGraphMinW) {
+        fprintf(stderr,
+                "uirender: the toolbar needs %.1f but the smallest window is %.1f wide\n",
+                static_cast<double>(total), static_cast<double>(geo::kGraphMinW));
+        ++gFailures;
+    }
+
+    // The status line, at the narrowest window, in the row Chrome::draw puts it in.
+    checkFits(c, "the status line", kWidestStatus, geo::kGraphMinW - 2.0f * geo::kGraphMargin,
+              Font::Body, geo::kStatusSize);
+}
+
+void auditAbout(Canvas &c)
+{
+    const float w = geo::kAboutW - 2.0f * geo::kSetMargin;
+    checkFits(c, "the About title", kAboutStrings[0], w, Font::Title, geo::kAboutTitleSize);
+    for (int i = 1; i < 4; ++i)
+        checkFits(c, "an About line", kAboutStrings[i], w, Font::Body, geo::kAboutTextSize);
+
+    Pill close;
+    close.label = "Close";
+    close.rect = Rect(0.0f, 0.0f, geo::kSetButtonW, geo::kPillH);
+    checkPill(c, "the About Close pill", close);
+}
+
+// The JACK Settings window's fixed strings, against the slots settingspanel.cpp draws them in.
+void auditSettings(Canvas &c)
+{
+    for (const char *t : kSetGroupTitles)
+        checkFits(c, "a settings group title", t, geo::kSetContentW - 2.0f * geo::kGroupTitleX,
+                  Font::Body, geo::kGroupTitleSize);
+
+    for (const char *t : kSetLabels)
+        checkFits(c, "a settings field label", t, geo::kSetLabelW, Font::Body, geo::kBodySize);
+
+    // The server status shares its row with Start and Stop, so its slot is what is left of the
+    // group's inner width once both pills and the gap between them are taken off.
+    const float statusSlot = geo::kSetContentW - 2.0f * geo::kSetGroupPad -
+                             2.0f * geo::kSetButtonW - geo::kPillGap - geo::kSetLabelGap;
+    for (const char *t : kSetStatusLabels)
+        checkFits(c, "the server status", t, statusSlot, Font::Body, geo::kBodySize);
+
+    // Start, Stop and Close are kSetButtonW; Apply Live is kSetApplyW.
+    for (const char *t : kSetPills) {
+        Pill p;
+        p.label = t;
+        p.rect = Rect(0.0f, 0.0f,
+                      strcmp(t, "Apply Live") == 0 ? geo::kSetApplyW : geo::kSetButtonW,
+                      geo::kPillH);
+        checkPill(c, "a settings pill", p);
+    }
+
+    for (const char *t : kSetNotes)
+        checkFits(c, "a settings note line", t, geo::kSetContentW - geo::kSetGroupPad, Font::Body,
+                  geo::kSetNoteSize);
+
+    // The combos. The Interface combo is the wide one -- it spans the Apply Live column too -- and
+    // its items are device names off the machine, so only the four fixed lists are measured.
+    const float comboSlot = geo::kSetComboW - geo::kComboArrowW - geo::kComboPadX;
+    const float popupSlot = geo::kSetComboW - geo::kPopupTickW - geo::kComboPadX;
+    for (const char *t : kSetRates) {
+        checkFits(c, "a sample rate", t, comboSlot, Font::Body, geo::kBodySize);
+        checkFits(c, "a sample rate", t, popupSlot, Font::Body, geo::kPopupTextSize);
+    }
+    for (const char *t : kSetFrames) {
+        checkFits(c, "a frames/period item", t, comboSlot, Font::Body, geo::kBodySize);
+        checkFits(c, "a frames/period item", t, popupSlot, Font::Body, geo::kPopupTextSize);
+    }
+    for (const char *t : kSetPeriods) {
+        checkFits(c, "a periods/buffer item", t, comboSlot, Font::Body, geo::kBodySize);
+        checkFits(c, "a periods/buffer item", t, popupSlot, Font::Body, geo::kPopupTextSize);
+    }
+    for (const char *t : kSetMidi) {
+        checkFits(c, "a MIDI driver item", t, comboSlot, Font::Body, geo::kBodySize);
+        checkFits(c, "a MIDI driver item", t, popupSlot, Font::Body, geo::kPopupTextSize);
+    }
+
+    // The live-status line, wrapped over kSetStatusLines. The same 90% allowance the mxeq message
+    // strip uses, and for the same reason: word wrapping cannot use a line's last few units.
+    const float statusLine = geo::kSetContentW;
+    checkFits(c, "the longest live status", kSetLiveStatus,
+              statusLine * (static_cast<float>(geo::kSetStatusLines) - 0.10f), Font::Body,
+              geo::kSetStatusSize);
+}
+
+//------------------------------------------------------------------------
 bool render(Panel &p, float scale, const std::string &outPath)
 {
     p.layout();
@@ -594,6 +807,62 @@ void renderPages(Panel &p, const char *scene, float scale, const std::string &ou
             ++gFailures;
         }
     }
+}
+
+// The graph window at one size and one scale. Composed into an image surface exactly as
+// X11Window::paint would, which is what makes the picture worth looking at.
+bool renderGraph(Chrome &chrome, GraphPanel &graph, float w, float h, float scale,
+                 const std::string &outPath)
+{
+    chrome.setWindow(Rect(0.0f, 0.0f, w, h));
+    graph.setRect(chrome.canvasRect());
+    // AFTER the rect, not before: fitToWindow() measures against the viewport it was last given, so
+    // fitting at the old size and then shrinking the window is how the picture ends up clipped.
+    graph.fitToWindow();
+
+    const int pw = static_cast<int>(w * scale + 0.5f);
+    const int ph = static_cast<int>(h * scale + 0.5f);
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
+    if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(s);
+        return false;
+    }
+    cairo_t *cr = cairo_create(s);
+    cairo_scale(cr, scale, scale);
+    {
+        FontStack fonts;
+        fonts.load(resourceDir());
+        Canvas c(cr, &fonts, w, h);
+        drawGraphWindow(c, chrome, graph);
+    }
+    cairo_destroy(cr);
+    const bool ok = cairo_surface_write_to_png(s, outPath.c_str()) == CAIRO_STATUS_SUCCESS;
+    cairo_surface_destroy(s);
+    return ok;
+}
+
+bool renderAbout(AboutCard &about, float scale, const std::string &outPath)
+{
+    const float h = about.layout();
+    const int pw = static_cast<int>(geo::kAboutW * scale + 0.5f);
+    const int ph = static_cast<int>(h * scale + 0.5f);
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
+    if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(s);
+        return false;
+    }
+    cairo_t *cr = cairo_create(s);
+    cairo_scale(cr, scale, scale);
+    {
+        FontStack fonts;
+        fonts.load(resourceDir());
+        Canvas c(cr, &fonts, geo::kAboutW, h);
+        about.draw(c);
+    }
+    cairo_destroy(cr);
+    const bool ok = cairo_surface_write_to_png(s, outPath.c_str()) == CAIRO_STATUS_SUCCESS;
+    cairo_surface_destroy(s);
+    return ok;
 }
 
 } // namespace
@@ -649,6 +918,28 @@ int main(int argc, char **argv)
                               "Channels", "Rate", "Mono", "Stereo", "44100 Hz", "48000 Hz",
                               "Connected", "Paired", "Trusted", "Input Source", "Idle"})
             checkGlyphs(fonts, "a panel string", t, Font::Body);
+        // jack-graph's own strings, in both windows.
+        for (const char *t : {"Refresh", "Zoom -", "Zoom +", "Zoom 1:1", "Fit", "JACK Settings",
+                              "About"})
+            checkGlyphs(fonts, "a toolbar pill", t, Font::Body);
+        checkGlyphs(fonts, "the status line", kWidestStatus, Font::Body);
+        checkGlyphs(fonts, "the About title", kAboutStrings[0], Font::Title);
+        for (int i = 1; i < 4; ++i)
+            checkGlyphs(fonts, "an About line", kAboutStrings[i], Font::Body);
+        for (const char *t : kSetGroupTitles)
+            checkGlyphs(fonts, "a settings group title", t, Font::Body);
+        for (const char *t : kSetLabels)
+            checkGlyphs(fonts, "a settings field label", t, Font::Body);
+        for (const char *t : kSetStatusLabels)
+            checkGlyphs(fonts, "the server status", t, Font::Body);
+        for (const char *t : kSetPills)
+            checkGlyphs(fonts, "a settings pill", t, Font::Body);
+        for (const char *t : kSetNotes)
+            checkGlyphs(fonts, "a settings note line", t, Font::Body);
+        for (const char *t : kSetMidi)
+            checkGlyphs(fonts, "a MIDI driver item", t, Font::Body);
+        checkGlyphs(fonts, "the longest live status", kSetLiveStatus, Font::Body);
+
         // clipToWidth appends U+2026 whenever anything is truncated, so the ellipsis itself has to
         // exist or an elided string ends in a gap -- which is the failure this whole tool is about,
         // appearing in the mechanism meant to soften it.
@@ -694,6 +985,9 @@ int main(int argc, char **argv)
         // The scroll hint on an overflowing mixer page, at its widest.
         checkFits(c, "the mixer scroll hint", "scroll for more (999 controls)", geo::kContentW,
                   Font::Body, geo::kMixValueSize);
+
+        // The JACK Settings window, measured rather than composed -- see the header.
+        auditSettings(c);
 
         cairo_destroy(cr);
         cairo_surface_destroy(s);
@@ -805,6 +1099,70 @@ int main(int argc, char **argv)
         p.press(fieldX, rateY, 1);
         p.release(fieldX, rateY, 1);
         render(p, 1.0f, out + "/combo-open@1.00x.png");
+    }
+
+    //--------------------------------------------------------------------
+    // jack-graph: the toolbar and status line audited against the rects Chrome::layout() assigned,
+    // then the whole window drawn at three scales and at the smallest size it can be.
+    {
+        Chrome chrome;
+        GraphPanel graph;
+        sceneGraph(graph);
+
+        cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 8, 8);
+        cairo_t *cr = cairo_create(s);
+        {
+            Canvas c(cr, &fonts, geo::kGraphW, geo::kGraphH);
+            chrome.setWindow(Rect(0.0f, 0.0f, geo::kGraphW, geo::kGraphH));
+            chrome.layout(c);
+            chrome.setStatus(kWidestStatus);
+            auditGraph(c, chrome);
+            auditAbout(c);
+        }
+        cairo_destroy(cr);
+        cairo_surface_destroy(s);
+
+        for (float scale : kScales) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s/graph@%.2fx.png", out.c_str(),
+                     static_cast<double>(scale));
+            if (!renderGraph(chrome, graph, geo::kGraphW, geo::kGraphH, scale, buf)) {
+                fprintf(stderr, "uirender: could not write %s\n", buf);
+                ++gFailures;
+            }
+        }
+        // THE SMALLEST WINDOW, which is the one the toolbar can run out of room in.
+        if (!renderGraph(chrome, graph, geo::kGraphMinW, geo::kGraphMinH, 1.0f,
+                         out + "/graph-min@1.00x.png")) {
+            fprintf(stderr, "uirender: could not write the smallest graph window\n");
+            ++gFailures;
+        }
+        // And an empty one: JACK stopped, nothing to draw but the chrome saying so.
+        {
+            Chrome bare;
+            GraphPanel none;
+            bare.setStatus("JACK: not connected | Server: Stopped");
+            none.layout(false);
+            if (!renderGraph(bare, none, geo::kGraphW, geo::kGraphH, 1.0f,
+                             out + "/graph-empty@1.00x.png")) {
+                fprintf(stderr, "uirender: could not write the empty graph window\n");
+                ++gFailures;
+            }
+        }
+    }
+
+    // The About card, which is its own dialog window.
+    {
+        AboutCard about;
+        for (float scale : kScales) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s/about@%.2fx.png", out.c_str(),
+                     static_cast<double>(scale));
+            if (!renderAbout(about, scale, buf)) {
+                fprintf(stderr, "uirender: could not write %s\n", buf);
+                ++gFailures;
+            }
+        }
     }
 
     if (gFailures > 0) {
