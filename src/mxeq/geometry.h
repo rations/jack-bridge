@@ -127,22 +127,28 @@ static_assert(kMixSwitchW > kIndicatorSize + kIndicatorGap + 30.0f,
 static_assert(kMixRowH >= 2.0f * kThumbR + 4.0f, "a mixer row cannot hold its slider thumb");
 static_assert(kMixRowH > kIndicatorSize + 2.0f, "a mixer row cannot hold its checkbox indicator");
 
-// The divider and the switch row beneath the strips. INTERNAL CARD ONLY (AlsaMixer::usesSwitchRow).
-// Both contribute ZERO HEIGHT when nothing landed in them, which is mixer_sync_switch_row()'s rule
-// carried across from a pair of gtk_widget_set_visible calls into the layout itself.
-constexpr float kMixDividerGap = 10.0f;
+// A CONTROL WITH NO SLIDER OF ITS OWN STILL GETS A ROW OF ITS OWN, in the card's element order,
+// in the same single grid as the strips. There is no second zone and no divider any more.
+//
+// There used to be one: the internal card drew its strips, then a rule, then a two-column block of
+// checkboxes and dropdowns, while USB drew a single grid. Two layouts meant the same four checkbox
+// roles landed in two different places depending on which card you were looking at, and only one
+// card is ever on screen -- so the arrangement nobody could compare was the one that had to be
+// described in prose to be understood. It is one grid now, on every card.
+//
+// A switch-only control (IEC958, S/PDIF) is a checkbox row; an enum (Input Source) is a label and a
+// dropdown. Both align with the strips above them: the label sits in the strips' label column and
+// the control starts where their grooves start, so the page reads as one set of columns.
 constexpr float kMixSwitchRowH = 24.0f;
-constexpr float kMixSwitchRowGap = 6.0f;
-// A switch-row cell holds a checkbox with an ALSA element's own name in it -- "IEC958", "Capture",
-// "IEC958 (S/PDIF)" on a codec that spells it that way -- or a labelled dropdown. Two per row.
-constexpr float kMixSwitchCellW = (kContentW - kMixSwitchRowGap) / 2.0f;
 
 // An enum row is taller: it is a label and a combo, not a checkbox.
 constexpr float kMixEnumRowH = kComboH + 4.0f;
-constexpr float kMixEnumLabelW = 110.0f;
-constexpr float kMixEnumGap = 8.0f;
-static_assert(kMixEnumLabelW + kMixEnumGap + 120.0f < kMixSwitchCellW,
-              "an enum cell cannot hold its label and a usable dropdown");
+constexpr float kMixEnumLabelW = kMixLabelW;
+constexpr float kMixEnumGap = kMixLabelGap;
+static_assert(kMixEnumLabelW + kMixEnumGap + 120.0f < kContentW,
+              "an enum row cannot hold its label and a usable dropdown");
+static_assert(kMixSwitchRowH > kIndicatorSize + 2.0f,
+              "a switch row cannot hold its checkbox indicator");
 
 // The "scroll for more" line under an overflowing mixer page. IT GETS A BAND OF ITS OWN rather
 // than being drawn over the last visible strip: over a strip it reads as a rendering fault, and the

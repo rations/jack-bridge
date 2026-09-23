@@ -14,12 +14,15 @@
 // to see "IEC958 (S/PD..." is a user on a different fontconfig.
 //
 // IT RENDERS THE MIXER PAGE IN BOTH CURATION MODES, and that is the point of having it at all.
-// panel.h sets out the four roles a checkbox plays in this mixer -- "Mute", "Enable", the internal
-// card's own "Capture", and any switch-only control such as "IEC958" -- and the two layouts place
-// them differently: the internal card gets a two-zone page with a switch row, USB gets one grid
-// with the switch inline. ONLY ONE OF THE TWO IS ON SCREEN ON ANY GIVEN MACHINE. Handing the panel
-// fabricated data is the only way to see both, and every check below that names a checkbox exists
-// because CLAUDE.md records that placement as having been reverted onto USB on request.
+// A curated internal codec and an uncurated USB interface expose very different element sets, and
+// ONLY ONE OF THE TWO IS ON SCREEN ON ANY GIVEN MACHINE -- handing the panel fabricated data is the
+// only way to see both. panel.h sets out the three roles a checkbox plays ("Mute", "Enable", and a
+// switch-only control's own name such as "IEC958"), all of which these scenes carry.
+//
+// The internal scene also pins the ORDERING, which is the fault the single grid can have and the
+// two-zone layout could not: its switch-only control and its dropdown carry element indices that
+// fall BETWEEN the strips', so a page that appends each widget kind in turn puts them at the foot
+// instead of among the sliders. That is invisible to a compiler and obvious in a picture.
 //
 // IT AUDITS BOTH BINARIES. mxeq's five pages, and jack-graph's toolbar, status line, graph canvas
 // and About card. The one thing it cannot compose is jack-graph's SettingsPanel, and the reason is
@@ -94,9 +97,15 @@ const char *const kWidestSwitchLabels[] = {
     "IEC958 (S/PDIF)", "IEC958 (S/PDIF) #1", "Capture #1", "Capture", "IEC958",
 };
 
-// The two labels the strip-row checkbox can carry, roles 1 and 2. Pinned by name because the slot
-// they share (geo::kMixSwitchW) was sized for them and for nothing else.
+// The two labels the strip-row checkbox can carry. Pinned by name because the slot they share
+// (geo::kMixSwitchW) was sized for them and for nothing else.
 const char *const kStripSwitchLabels[] = {"Mute", "Enable"};
+
+// An enum row's label sits in the strips' label column, so the widest control name a codec can put
+// on a dropdown is bound by geo::kMixLabelW just as a strip's is.
+const char *const kWidestEnumLabels[] = {
+    "Input Source", "Input Source #1", "Clock Source", "Digital Source",
+};
 
 // Every message the app can put in the strip at the foot of the page, collected from devices.cpp,
 // recorder.cpp, steam.cpp and app.cpp. These replaced eight gtk_message_dialog_new sites, and a
@@ -293,36 +302,37 @@ Panel::EnumCell makeEnumCell(const char *label, std::vector<ComboItem> items, in
     return e;
 }
 
-// THE INTERNAL CARD: the two-zone layout. Strips, then a divider, then a switch row carrying the
-// element's own ALSA names -- "Capture" and "IEC958" side by side, which is check 3a on the machine
-// and is the placement panel.h calls role 3 and role 4.
+// THE INTERNAL CARD. One grid, as every card now is. What this scene pins that the USB one cannot
+// is the INTERLEAVING: the switch-only control and the dropdown carry element indices that fall
+// BETWEEN the strips', so they must be drawn between them. Appending each widget kind in turn --
+// which is what the old two-zone layout did -- puts them at the foot of the page instead, and the
+// picture is the only thing that catches it.
 void sceneInternal(Panel &p)
 {
     std::vector<Panel::Strip> strips;
     strips.push_back(makeStrip("Master", 72, "Mute", false, 0));
     strips.push_back(makeStrip("Headphone", 55, "Mute", false, 1));
     strips.push_back(makeStrip("Headphone #1", 55, "Mute", true, 2));
-    strips.push_back(makeStrip("Speaker", 90, "Mute", true, 3));
-    strips.push_back(makeStrip("PCM", 100, nullptr, false, 4));
-    strips.push_back(makeStrip("Front Mic Boost #1", 18, nullptr, false, 5));
-    // A capture element with BOTH a volume and a switch, on the internal card: it gets the gain
-    // slider here and its switch goes in the row below, NOT at the end of this strip. That split is
-    // role 3 and it is the one this machine cannot show when a USB interface is selected.
-    strips.push_back(makeStrip("Capture", 64, nullptr, false, 6));
-    p.setMixer(std::move(strips),
-               {makeSwitchCell("Capture", true, 6), makeSwitchCell("IEC958 (S/PDIF)", false, 7)},
+    strips.push_back(makeStrip("PCM", 100, nullptr, false, 3));
+    strips.push_back(makeStrip("Front Mic Boost #1", 18, nullptr, false, 4));
+    // A capture element with both a volume and a switch: the gain slider AND its own inline
+    // "Enable", on every card now. There is no second placement to test any more.
+    strips.push_back(makeStrip("Capture", 64, "Enable", true, 5));
+    // Element 6 and 8 sit among the strips, not after them: 7 and 9 follow below.
+    strips.push_back(makeStrip("Line Boost", 30, nullptr, false, 7));
+    strips.push_back(makeStrip("Rear Mic", 0, "Mute", true, 9));
+    p.setMixer(std::move(strips), {makeSwitchCell("IEC958 (S/PDIF)", false, 6)},
                {makeEnumCell("Input Source",
                              {{"Rear Mic", "Rear Mic"},
                               {"Front Mic", "Front Mic"},
                               {"Line", "Line"},
                               {"Internal Mic", "Internal Mic"}},
-                             8)},
-               true);
+                             8)});
 }
 
-// A USB INTERFACE: one grid, no switch row. The capture strip carries its own "Enable" box (role 2)
-// and any switch-only control sits inline (role 4). CLAUDE.md records that this placement was
-// reverted onto USB on request, so it is pinned here rather than left to a reviewer's memory.
+// A USB INTERFACE. Same layout as the internal card now -- what still differs between them is
+// CURATION, not arrangement, and that is what this scene is for: an uncurated card shows every
+// control it has, with names no allow-list ever predicted.
 void sceneUsb(Panel &p)
 {
     std::vector<Panel::Strip> strips;
@@ -335,8 +345,7 @@ void sceneUsb(Panel &p)
     strips.push_back(makeStrip("Input 1", 45, "Enable", true, 6));
     strips.push_back(makeStrip("Input 2", 45, "Enable", true, 7));
     p.setMixer(std::move(strips), {makeSwitchCell("Auto Gain Control", false, 8)},
-               {makeEnumCell("Clock Source", {{"Internal", "Internal"}, {"S/PDIF", "S/PDIF"}}, 9)},
-               false);
+               {makeEnumCell("Clock Source", {{"Internal", "Internal"}, {"S/PDIF", "S/PDIF"}}, 9)});
 }
 
 // The card that overflows the window. An uncurated USB interface can expose far more controls than
@@ -351,7 +360,7 @@ void sceneOverflow(Panel &p)
         strips.push_back(makeStrip(buf, (i * 7) % 101, i % 3 == 0 ? "Enable" : nullptr, i % 2 == 0,
                                    i));
     }
-    p.setMixer(std::move(strips), {}, {}, false);
+    p.setMixer(std::move(strips), {}, {});
 }
 
 std::vector<Panel::DeviceEntry> devices()
@@ -906,6 +915,8 @@ int main(int argc, char **argv)
             checkGlyphs(fonts, "a switch label", t, Font::Body);
         for (const char *t : kStripSwitchLabels)
             checkGlyphs(fonts, "a strip switch label", t, Font::Body);
+        for (const char *t : kWidestEnumLabels)
+            checkGlyphs(fonts, "an enum row label", t, Font::Body);
         for (const char *t : kMessages)
             checkGlyphs(fonts, "a message", t, Font::Body);
         for (const char *t : kMixerPlaceholders)
@@ -954,17 +965,22 @@ int main(int argc, char **argv)
         for (const char *t : kWidestStripLabels)
             checkFits(c, "the widest mixer strip label", t, geo::kMixLabelW, Font::Body,
                       geo::kMixLabelSize);
-        // A switch-row cell holds an indicator, its gap and the element's own name.
-        const float switchCellSlot =
-            geo::kMixSwitchCellW - geo::kIndicatorSize - geo::kIndicatorGap;
+        // A switch-only control's row holds an indicator, its gap and the element's own name,
+        // across the label and control columns together.
+        const float switchRowSlot = geo::kMixLabelW + geo::kMixLabelGap + geo::kMixGrooveW -
+                                    geo::kIndicatorSize - geo::kIndicatorGap;
         for (const char *t : kWidestSwitchLabels)
-            checkFits(c, "the widest switch-row label", t, switchCellSlot, Font::Body,
+            checkFits(c, "the widest switch-only row label", t, switchRowSlot, Font::Body,
                       geo::kBodySize);
         // And the strip-row checkbox, whose slot was sized for exactly these two words.
         const float stripSwitchSlot = geo::kMixSwitchW - geo::kIndicatorSize - geo::kIndicatorGap;
         for (const char *t : kStripSwitchLabels)
-            checkFits(c, "a strip switch label (role 1/2)", t, stripSwitchSlot, Font::Body,
+            checkFits(c, "a strip switch label (Mute/Enable)", t, stripSwitchSlot, Font::Body,
                       geo::kBodySize);
+        // An enum row's label shares the strips' label column, so it is bound by that.
+        for (const char *t : kWidestEnumLabels)
+            checkFits(c, "the widest enum row label", t, geo::kMixLabelW, Font::Body,
+                      geo::kMixLabelSize);
 
         // The message strip. panel.h explains why this replaced eight modal dialogs; a modal dialog
         // could be any size it liked, and this one line cannot, so every message it can carry is
@@ -1035,7 +1051,7 @@ int main(int argc, char **argv)
     {
         Panel p;
         sceneCommon(p);
-        p.setMixer({}, {}, {}, false);
+        p.setMixer({}, {}, {});
         p.setMixerPlaceholder("Mixer controls are not available for HDMI output.\n"
                               "Audio is routed through hdmi_out:playback_1/2.");
         p.setPage(Panel::Page::Mixer);

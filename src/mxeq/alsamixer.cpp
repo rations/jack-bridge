@@ -151,10 +151,6 @@ bool AlsaMixer::open(int cardNumber, bool curate)
 {
     close();
 
-    // Assigned from what was ASKED FOR, before the fallback can run, and never touched again --
-    // see the header note. An unrecognised internal codec keeps the two-zone layout.
-    mUsesSwitchRow = curate;
-
     if (!attach(cardNumber))
         return false;
 

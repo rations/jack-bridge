@@ -108,12 +108,12 @@ void Panel::setPage(Page p)
 
 //------------------------------------------------------------------------
 void Panel::setMixer(std::vector<Strip> strips, std::vector<SwitchCell> switches,
-                     std::vector<EnumCell> enums, bool useSwitchRow)
+                     std::vector<EnumCell> enums)
 {
     mStrips = std::move(strips);
     mSwitches = std::move(switches);
     mEnums = std::move(enums);
-    mUseSwitchRow = useSwitchRow;
+    buildMixRows();
     mMixerPlaceholder.clear();
     mMixerScroll = 0.0f;
     mDragStrip = -1;
@@ -238,6 +238,54 @@ void Panel::clearMessage()
 }
 
 //------------------------------------------------------------------------
+// The page's order, once, so layout(), the height and draw() cannot disagree about it.
+//
+// A stable sort on the element index: cells of different kinds never share one, and a card that
+// somehow gave two cells the same index keeps them in the order they were built rather than
+// swapping them about between rebuilds.
+void Panel::buildMixRows()
+{
+    mMixRows.clear();
+    mMixRows.reserve(mStrips.size() + mSwitches.size() + mEnums.size());
+    for (size_t i = 0; i < mStrips.size(); ++i)
+        mMixRows.push_back({MixRowKind::Strip, i});
+    for (size_t i = 0; i < mSwitches.size(); ++i)
+        mMixRows.push_back({MixRowKind::Switch, i});
+    for (size_t i = 0; i < mEnums.size(); ++i)
+        mMixRows.push_back({MixRowKind::Enum, i});
+
+    std::stable_sort(mMixRows.begin(), mMixRows.end(), [this](const MixRow &a, const MixRow &b) {
+        return mixRowElement(a) < mixRowElement(b);
+    });
+}
+
+int Panel::mixRowElement(const MixRow &r) const
+{
+    switch (r.kind) {
+        case MixRowKind::Strip:
+            return mStrips[r.index].element;
+        case MixRowKind::Switch:
+            return mSwitches[r.index].element;
+        case MixRowKind::Enum:
+            return mEnums[r.index].element;
+    }
+    return -1;
+}
+
+float Panel::mixRowHeight(const MixRow &r) const
+{
+    switch (r.kind) {
+        case MixRowKind::Strip:
+            return geo::kMixRowH;
+        case MixRowKind::Switch:
+            return geo::kMixSwitchRowH;
+        case MixRowKind::Enum:
+            return geo::kMixEnumRowH;
+    }
+    return geo::kMixRowH;
+}
+
+//------------------------------------------------------------------------
 float Panel::mixerContentH() const
 {
     if (!mMixerPlaceholder.empty())
@@ -245,22 +293,12 @@ float Panel::mixerContentH() const
     if (mStrips.empty() && mSwitches.empty() && mEnums.empty())
         return geo::kMixMessageH;
 
-    float h = static_cast<float>(mStrips.size()) * (geo::kMixRowH + geo::kMixRowGap);
-
-    // THE DIVIDER AND THE SWITCH ROW CONTRIBUTE ZERO HEIGHT WHEN EMPTY. This is
-    // mixer_sync_switch_row()'s rule, which was two gtk_widget_set_visible calls, expressed as a
-    // layout condition instead.
-    const bool anyAux = !mSwitches.empty() || !mEnums.empty();
-    if (anyAux) {
-        if (mUseSwitchRow)
-            h += geo::kMixDividerGap;
-
-        // Two cells per row, checkboxes first, then the enum rows which are taller.
-        const int switchRows = (static_cast<int>(mSwitches.size()) + 1) / 2;
-        h += static_cast<float>(switchRows) * (geo::kMixSwitchRowH + geo::kMixSwitchRowGap);
-        const int enumRows = (static_cast<int>(mEnums.size()) + 1) / 2;
-        h += static_cast<float>(enumRows) * (geo::kMixEnumRowH + geo::kMixSwitchRowGap);
-    }
+    // One pass over the rows in the order they are drawn in, so a page of strips, checkboxes and
+    // dropdowns measures as exactly what it draws. A control that is not there contributes no row
+    // and therefore no height, which is what the old divider-and-zone condition was for.
+    float h = 0.0f;
+    for (const MixRow &r : mMixRows)
+        h += mixRowHeight(r) + geo::kMixRowGap;
     return h;
 }
 
@@ -337,45 +375,41 @@ float Panel::layout()
 void Panel::layoutMixer(float y)
 {
     const float x = geo::kMargin;
+    // ONE SET OF COLUMNS FOR EVERY ROW KIND. The label column is the strips' label column and the
+    // control column starts where their grooves start, so a dropdown lines up under a slider
+    // instead of starting its own grid half a page down.
+    const float controlX = x + geo::kMixLabelW + geo::kMixLabelGap;
 
-    for (Strip &s : mStrips) {
-        const float grooveX = x + geo::kMixLabelW + geo::kMixLabelGap;
-        s.slider.rect = Rect(grooveX, y, geo::kMixGrooveW, geo::kMixRowH);
+    for (const MixRow &r : mMixRows) {
+        const float rowH = mixRowHeight(r);
 
-        // The labelled switch at the right end: role 1 (Mute) or role 2 (Enable). The rect is the
-        // whole cell, indicator and word together, because a 16-unit box is not a target.
-        const float switchX = x + geo::kContentW - geo::kMixSwitchW;
-        s.switchBox.rect = Rect(switchX, y, geo::kMixSwitchW, geo::kMixRowH);
+        switch (r.kind) {
+            case MixRowKind::Strip: {
+                Strip &s = mStrips[r.index];
+                s.slider.rect = Rect(controlX, y, geo::kMixGrooveW, rowH);
 
-        y += geo::kMixRowH + geo::kMixRowGap;
-    }
+                // The labelled switch at the right end: "Mute" or "Enable". The rect is the whole
+                // cell, indicator and word together, because a 16-unit box is not a target.
+                const float switchX = x + geo::kContentW - geo::kMixSwitchW;
+                s.switchBox.rect = Rect(switchX, y, geo::kMixSwitchW, rowH);
+                break;
+            }
 
-    const bool anyAux = !mSwitches.empty() || !mEnums.empty();
-    if (!anyAux)
-        return;
+            case MixRowKind::Switch:
+                // A switch-only control has no groove to sit beside, so its box takes the label and
+                // control columns together -- the whole span a strip's slider occupies, which keeps
+                // the click target generous without running under the readout column.
+                mSwitches[r.index].toggle.rect =
+                    Rect(x, y, geo::kMixLabelW + geo::kMixLabelGap + geo::kMixGrooveW, rowH);
+                break;
 
-    if (mUseSwitchRow)
-        y += geo::kMixDividerGap;
+            case MixRowKind::Enum:
+                mEnums[r.index].combo.setRect(Rect(controlX, y + (rowH - geo::kComboH) * 0.5f,
+                                                   geo::kMixGrooveW, geo::kComboH));
+                break;
+        }
 
-    // Roles 3 and 4: a labelled checkbox per cell, two cells to a row, each labelled with the
-    // element's own ALSA name.
-    for (size_t i = 0; i < mSwitches.size(); ++i) {
-        const int col = static_cast<int>(i) % 2;
-        const float cx = x + static_cast<float>(col) * (geo::kMixSwitchCellW + geo::kMixSwitchRowGap);
-        mSwitches[i].toggle.rect = Rect(cx, y, geo::kMixSwitchCellW, geo::kMixSwitchRowH);
-        if (col == 1 || i + 1 == mSwitches.size())
-            y += geo::kMixSwitchRowH + geo::kMixSwitchRowGap;
-    }
-
-    for (size_t i = 0; i < mEnums.size(); ++i) {
-        const int col = static_cast<int>(i) % 2;
-        const float cx = x + static_cast<float>(col) * (geo::kMixSwitchCellW + geo::kMixSwitchRowGap);
-        const float comboX = cx + geo::kMixEnumLabelW + geo::kMixEnumGap;
-        const float comboW = geo::kMixSwitchCellW - geo::kMixEnumLabelW - geo::kMixEnumGap;
-        mEnums[i].combo.setRect(
-            Rect(comboX, y + (geo::kMixEnumRowH - geo::kComboH) * 0.5f, comboW, geo::kComboH));
-        if (col == 1 || i + 1 == mEnums.size())
-            y += geo::kMixEnumRowH + geo::kMixSwitchRowGap;
+        y += rowH + geo::kMixRowGap;
     }
 }
 
@@ -549,55 +583,62 @@ void Panel::drawMixer(Canvas &c) const
     // the message strip below it.
     c.pushClip(mMixerViewport);
 
-    for (const Strip &s : mStrips) {
-        // Skip a strip entirely outside the viewport: at 30 units a row, a USB interface with forty
-        // controls would otherwise measure and clip forty labels to draw six.
-        if (s.slider.rect.bottom() < mMixerViewport.y ||
-            s.slider.rect.y > mMixerViewport.bottom())
-            continue;
+    // ONE PASS, IN THE PAGE'S ORDER -- the same order layout() assigned the rects in.
+    for (const MixRow &r : mMixRows) {
+        switch (r.kind) {
+            case MixRowKind::Strip: {
+                const Strip &s = mStrips[r.index];
+                // Skip a strip entirely outside the viewport: at 30 units a row, a USB interface
+                // with forty controls would otherwise measure and clip forty labels to draw six.
+                if (s.slider.rect.bottom() < mMixerViewport.y ||
+                    s.slider.rect.y > mMixerViewport.bottom())
+                    break;
 
-        textLine(c, geo::kMargin, s.slider.rect.centerY(), s.label.c_str(), pal::kTextColor,
-                 geo::kMixLabelSize, geo::kMixLabelW);
+                textLine(c, geo::kMargin, s.slider.rect.centerY(), s.label.c_str(),
+                         pal::kTextColor, geo::kMixLabelSize, geo::kMixLabelW);
 
-        s.slider.draw(c);
+                s.slider.draw(c);
 
-        // The numeric readout, right-aligned in its slot so the digits do not shift as the value
-        // crosses 10 and 100.
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%d", s.slider.value);
-        c.setFont(Font::Body);
-        c.setFontSize(geo::kMixValueSize);
-        c.setColor(s.slider.enabled ? pal::kDimColor : pal::kDisabledColor);
-        const float vx = s.slider.rect.right() + geo::kMixValueGap + geo::kMixValueW -
-                         c.stringWidth(buf);
-        c.drawString(buf, vx,
-                     s.slider.rect.centerY() + geo::kMixValueSize * geo::kLabelBaselineBias);
+                // The numeric readout, right-aligned in its slot so the digits do not shift as the
+                // value crosses 10 and 100.
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%d", s.slider.value);
+                c.setFont(Font::Body);
+                c.setFontSize(geo::kMixValueSize);
+                c.setColor(s.slider.enabled ? pal::kDimColor : pal::kDisabledColor);
+                const float vx = s.slider.rect.right() + geo::kMixValueGap + geo::kMixValueW -
+                                 c.stringWidth(buf);
+                c.drawString(buf, vx,
+                             s.slider.rect.centerY() +
+                                 geo::kMixValueSize * geo::kLabelBaselineBias);
 
-        if (s.hasSwitch)
-            s.switchBox.draw(c);
-    }
+                if (s.hasSwitch)
+                    s.switchBox.draw(c);
+                break;
+            }
 
-    const bool anyAux = !mSwitches.empty() || !mEnums.empty();
-    if (anyAux && mUseSwitchRow && !mStrips.empty()) {
-        // The divider. Only on the internal card's two-zone layout, and only when something landed
-        // below it -- which is mixer_sync_switch_row()'s rule.
-        const float dy = mStrips.back().slider.rect.bottom() + geo::kMixDividerGap * 0.5f;
-        c.setColor(pal::kGold, kHairlineAlpha);
-        c.setPenSize(1.0f);
-        c.strokeLine(geo::kMargin, dy, geo::kMargin + geo::kContentW, dy);
-    }
+            case MixRowKind::Switch: {
+                const SwitchCell &sc = mSwitches[r.index];
+                if (sc.toggle.rect.bottom() < mMixerViewport.y ||
+                    sc.toggle.rect.y > mMixerViewport.bottom())
+                    break;
+                sc.toggle.draw(c);
+                break;
+            }
 
-    for (const SwitchCell &s : mSwitches)
-        s.toggle.draw(c);
-
-    for (const EnumCell &e : mEnums) {
-        const Rect &r = e.combo.rect();
-        textLine(c, geo::kMargin + (r.x > geo::kMargin + geo::kMixSwitchCellW
-                                        ? geo::kMixSwitchCellW + geo::kMixSwitchRowGap
-                                        : 0.0f),
-                 r.centerY(), e.label.c_str(), pal::kDimColor, geo::kBodySize,
-                 geo::kMixEnumLabelW);
-        e.combo.drawClosed(c);
+            case MixRowKind::Enum: {
+                const EnumCell &e = mEnums[r.index];
+                const Rect &er = e.combo.rect();
+                if (er.bottom() < mMixerViewport.y || er.y > mMixerViewport.bottom())
+                    break;
+                // The label in the strips' label column, so it reads as one more row of the same
+                // grid rather than a block with its own indent.
+                textLine(c, geo::kMargin, er.centerY(), e.label.c_str(), pal::kDimColor,
+                         geo::kMixLabelSize, geo::kMixLabelW);
+                e.combo.drawClosed(c);
+                break;
+            }
+        }
     }
 
     c.popClip();

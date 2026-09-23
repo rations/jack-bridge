@@ -320,8 +320,6 @@ void App::rebuildMixerPage()
     std::vector<Panel::SwitchCell> switches;
     std::vector<Panel::EnumCell> enums;
 
-    const bool useSwitchRow = mMixer.usesSwitchRow();
-
     for (size_t i = 0; i < mElements.size(); ++i) {
         const AlsaMixer::Element &e = mElements[i];
         const int index = static_cast<int>(i);
@@ -334,37 +332,24 @@ void App::rebuildMixerPage()
                 s.slider.value = mMixer.volume(e);
                 s.slider.enabled = true;
 
-                // ROLES 1 AND 2. A playback element with a switch gets a box labelled "Mute", which
-                // is INVERTED against ALSA. A capture element with a switch gets one labelled
-                // "Enable", which is not -- but only when there is no switch row, because on the
-                // internal card that switch goes to the row instead (role 3).
-                if (!e.isCapture && e.hasSwitch) {
+                // ROLES 1 AND 2, AND THE SAME PLACE ON EVERY CARD. A playback element with a
+                // switch gets a box labelled "Mute", which is INVERTED against ALSA -- the box
+                // says muted, ALSA stores playing, and this is the only spot that knows it drew
+                // the word "Mute". A capture element with a switch gets "Enable", which is not
+                // inverted.
+                if (e.hasSwitch) {
                     s.hasSwitch = true;
-                    s.switchBox.label = "Mute";
-                    s.switchBox.on = !mMixer.switchOn(e);
-                } else if (e.isCapture && e.hasSwitch && !useSwitchRow) {
-                    s.hasSwitch = true;
-                    s.switchBox.label = "Enable";
-                    s.switchBox.on = mMixer.switchOn(e);
+                    s.switchBox.label = e.isCapture ? "Enable" : "Mute";
+                    s.switchBox.on = e.isCapture ? mMixer.switchOn(e) : !mMixer.switchOn(e);
                 }
                 strips.push_back(std::move(s));
-
-                // ROLE 3: the same capture element's switch, on the internal card, in the switch
-                // row, labelled with the element's OWN ALSA NAME -- "Capture", "Capture #1".
-                if (e.isCapture && e.hasSwitch && useSwitchRow) {
-                    Panel::SwitchCell sc;
-                    sc.element = index;
-                    sc.toggle.label = e.name;
-                    sc.toggle.on = mMixer.switchOn(e);
-                    switches.push_back(std::move(sc));
-                }
                 break;
             }
 
             case AlsaMixer::Kind::Switch: {
-                // ROLE 4: a switch-only control -- IEC958, S/PDIF -- labelled with its own name.
-                // Switch row on the internal card, inline on USB; the panel places it either way
-                // from useSwitchRow, so there is nothing to decide here.
+                // ROLE 3: a switch-only control -- IEC958, S/PDIF -- labelled with its own name,
+                // because that name is the only thing on screen saying what the box does. It has
+                // no slider to sit beside, so the panel gives it a row of its own, in card order.
                 Panel::SwitchCell sc;
                 sc.element = index;
                 sc.toggle.label = e.name;
@@ -388,7 +373,7 @@ void App::rebuildMixerPage()
         }
     }
 
-    mPanel.setMixer(std::move(strips), std::move(switches), std::move(enums), useSwitchRow);
+    mPanel.setMixer(std::move(strips), std::move(switches), std::move(enums));
 }
 
 //------------------------------------------------------------------------

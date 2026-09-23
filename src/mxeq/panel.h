@@ -28,27 +28,31 @@
 // screen telling you what the box does. An icon cannot say IEC958.
 //
 //   1. PLAYBACK MUTE -- label "Mute", on any playback element that has a playback switch. Under the
-//      slider in the GTK build (mxeq.c:704-713); at the right end of the strip row here, on both
-//      cards.
+//      slider in the GTK build (mxeq.c:704-713); at the right end of the strip row here.
 //
-//   2. CAPTURE ENABLE, USB ONLY -- label "Enable", on a capture element with both a volume and a
-//      switch, when there is no switch row (mxeq.c:717-729). Under its own slider before; at the
-//      right end of its strip row here. CLAUDE.md records that this USB placement was reverted onto
-//      USB on request, so it stays.
+//   2. CAPTURE ENABLE -- label "Enable", on a capture element with both a volume and a switch, at
+//      the right end of its own strip row. ON EVERY CARD.
 //
-//   3. THE SAME CAPTURE ELEMENT'S SWITCH, INTERNAL CARD ONLY -- labelled with the element's own
-//      ALSA name, e.g. "Capture" (mxeq.c:801-806). In the switch row beside IEC958, unchanged.
+//   3. ANY SWITCH-ONLY CONTROL -- labelled with the element's own ALSA name: "IEC958", "S/PDIF",
+//      and whatever else a codec exposes. A checkbox row of its own, in the card's element order.
 //
-//   4. ANY SWITCH-ONLY CONTROL -- labelled with the element's own ALSA name: "IEC958", "S/PDIF",
-//      and whatever else a codec exposes. Switch row on the internal card, inline on USB.
-//      Identical to before.
+// THERE WERE FOUR ROLES AND NOW THERE ARE THREE, because the old 2 and 3 were the same control in
+// two places: a capture element with a volume and a switch got an inline "Enable" on USB and a
+// "Capture" checkbox in a separate zone on the internal card. One card is ever on screen, so the
+// difference was invisible to the only person who could have judged it, and the second placement
+// cost a whole second layout to express. Both are the inline "Enable" now, and the strip's own
+// label already says which capture it is -- a box reading "Capture" next to a slider labelled
+// "Capture" said it twice.
 //
-// So on the internal card the switch row still shows a labelled "Capture" and a labelled "IEC958"
-// side by side, and on USB the capture strip still carries its own "Enable" with any switch-only
-// control inline. mixer_sync_switch_row()'s rule survives as a LAYOUT CONDITION: the divider and the
-// switch row contribute zero height when nothing landed in them.
+// The divider and the switch row are gone with it: one grid, every card, in ALSA element order.
+// What mixer_sync_switch_row() was protecting -- a zone that takes no height when nothing is in it
+// -- is now free, because a control with nothing to show simply contributes no row.
 //
-// "Input Source" and any other enumerated control stays a labelled dropdown, now a gfx::Combo.
+// "Input Source" and any other enumerated control stays a labelled dropdown, now a gfx::Combo. It
+// is NOT reducible to the checkboxes beside the mic and line sliders: those set each input's
+// MONITORING level (pvolume/pswitch -- how loud it plays back through the speakers), while the enum
+// is a mux picking which single input the capture ADC actually records. Different hardware, and
+// the enum's one-of-N cannot be drawn as N independent boxes without lying about it.
 //------------------------------------------------------------------------------------------------
 
 #pragma once
@@ -84,8 +88,8 @@ public:
         int element = -1; // index into the app's element list
     };
 
-    // A labelled checkbox in the switch row, or inline on USB. Roles 3 and 4: the label is the
-    // element's own ALSA name.
+    // A switch-only control -- IEC958, S/PDIF -- as a checkbox row of its own, labelled with the
+    // element's own ALSA name because that name is the only thing on screen saying what it does.
     struct SwitchCell {
         Toggle toggle;
         int element = -1;
@@ -151,10 +155,11 @@ public:
     void setPage(Page p);
 
     // Replaces the whole mixer. Called on every card change, exactly as the GTK build destroyed and
-    // rebuilt its widgets. `useSwitchRow` is AlsaMixer::usesSwitchRow(): the two-zone layout, which
-    // is the internal card only.
+    // rebuilt its widgets. The three vectors stay separate because each is a different widget and
+    // the app refreshes them in place by index; what orders them on screen is mMixRows, built here
+    // from each cell's `element` so the page follows the CARD's order rather than the widget kind.
     void setMixer(std::vector<Strip> strips, std::vector<SwitchCell> switches,
-                  std::vector<EnumCell> enums, bool useSwitchRow);
+                  std::vector<EnumCell> enums);
 
     // Shown instead of the strips when the output has no mixer: HDMI, Bluetooth, or a card with
     // nothing presentable on it.
@@ -298,7 +303,20 @@ private:
     std::vector<Strip> mStrips;
     std::vector<SwitchCell> mSwitches;
     std::vector<EnumCell> mEnums;
-    bool mUseSwitchRow = false;
+
+    // THE ONE THING THAT ORDERS THE MIXER PAGE. Laying the three vectors out one after another put
+    // every dropdown below every checkbox below every slider, which is the widget's order and not
+    // the card's: on this ALC897 it dragged Input Source down past Rear Mic, which sits after it on
+    // the card. Sorting by `element` puts each control back where the codec has it.
+    enum class MixRowKind { Strip, Switch, Enum };
+    struct MixRow {
+        MixRowKind kind;
+        size_t index; // into mStrips / mSwitches / mEnums
+    };
+    std::vector<MixRow> mMixRows;
+    void buildMixRows();
+    int mixRowElement(const MixRow &r) const;
+    float mixRowHeight(const MixRow &r) const;
     std::string mMixerPlaceholder;
     float mMixerScroll = 0.0f;
     // The rect the strips are clipped to, so a scrolled strip is cut at the viewport edge.

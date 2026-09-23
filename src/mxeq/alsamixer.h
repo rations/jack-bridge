@@ -24,11 +24,9 @@
 //   3. isDspTopologyControl() matches by SHAPE, not by name: an uppercase widget type, a widget
 //      number, a dot, an instance number. See the comment on it.
 //
-// ONE NON-OBVIOUS CONSEQUENCE OF (2) IS PRESERVED EXACTLY. usesSwitchRow() reports what was
-// REQUESTED, not whether curation actually matched anything. In the GTK build `use_switch_row` was
-// assigned from the `curate` argument before the fallback ran and the fallback never touched it, so
-// an unrecognised internal codec shows every control AND STILL USES THE TWO-ZONE LAYOUT. That is
-// the behaviour, so that is what this reports.
+// usesSwitchRow() IS GONE, along with the two-zone layout it selected. The panel draws one grid on
+// every card now, in ALSA element order, so nothing here decides an arrangement any more -- `curate`
+// narrows the element SET and that is all it does. See panel.h.
 //
 //------------------------------------------------------------------------------------------------
 // EXTERNAL CHANGES ARE DELIVERED LIVE, WHICH IS NEW. The GTK mxeq called no snd_mixer_poll_*
@@ -102,8 +100,8 @@ public:
     std::function<void()> onDescriptorsChanged;
 
     // Open `cardNumber` as hw:N and collect its controls. `curate` narrows the set to
-    // kInternalAllow and selects the two-zone layout, and is TRUE for the internal card only:
-    // USB interfaces are never curated, because their controls are the point of the device.
+    // kInternalAllow and is TRUE for the internal card only: USB interfaces are never curated,
+    // because their controls are the point of the device.
     //
     // Returns false having warned. A card with no simple elements at all is a failure here, and
     // the panel draws its own explanation.
@@ -122,14 +120,6 @@ public:
     int cardNumber() const
     {
         return mCard;
-    }
-
-    // Whether the panel should draw the two-zone layout: a column of strips, then a divider and a
-    // row of switches and dropdowns. Internal card only. READ THE HEADER NOTE: this is what was
-    // asked for, not whether curation matched.
-    bool usesSwitchRow() const
-    {
-        return mUsesSwitchRow;
     }
 
     // True when curation was asked for and matched nothing, so the fallback showed everything.
@@ -209,7 +199,6 @@ private:
 
     snd_mixer_t *mHandle = nullptr;
     int mCard = -1;
-    bool mUsesSwitchRow = false;
     bool mCurationFellBack = false;
     std::vector<Element> mElements;
     std::vector<int> mFds;
