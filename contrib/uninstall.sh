@@ -20,7 +20,7 @@ echo "========================================="
 echo ""
 echo "This will remove:"
 echo "  - Init scripts and service registrations"
-echo "  - Installed binaries (mxeq, BlueALSA tools, jack-graph)"
+echo "  - Installed binaries (mxeq, BlueALSA tools, jack-graph) and their bundled fonts"
 echo "  - Configuration files"
 echo "  - Desktop launchers and icons"
 echo "  - Polkit rules and D-Bus policies"
@@ -77,6 +77,7 @@ PULSE_AUTOSPAWN_CONF="/etc/pulse/client.conf.d/01-no-autospawn.conf"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 ICON_FILE="$ICON_DIR/alsasoundconnectlogo.png"
 ICON_ALSA_SOUND_CONNECT="$ICON_DIR/alsa-sound-connect.png"
+SHARE_DIR="/usr/local/share/jack-bridge"
 ALSA_PLUGIN_DIR="/usr/lib/x86_64-linux-gnu/alsa-lib"
 BLUEALSA_PCM_PLUGIN="$ALSA_PLUGIN_DIR/libasound_module_pcm_bluealsa.so"
 BLUEALSA_CTL_PLUGIN="$ALSA_PLUGIN_DIR/libasound_module_ctl_bluealsa.so"
@@ -211,6 +212,17 @@ fi
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
 fi
+
+# Remove the bundled fonts, which are the only fonts mxeq and jack-graph had: both draw their own
+# text with FreeType and neither goes through fontconfig, so nothing else on the system can be
+# using these copies. Removed with the directory rather than file by file, because install.sh
+# copies whatever resources/fonts holds and a later release may hold more.
+if [ -d "$SHARE_DIR/fonts" ]; then
+  rm -rf "$SHARE_DIR/fonts"
+  log "  Removed $SHARE_DIR/fonts"
+fi
+# Only if it is now empty: a packager may have put something else under it.
+rmdir "$SHARE_DIR" 2>/dev/null && log "  Removed $SHARE_DIR" || true
 
 log "Removing polkit and D-Bus policies..."
 

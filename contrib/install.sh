@@ -211,7 +211,7 @@ fi
 # (Devuan 5 / glibc 2.36). glibc is backward compatible, so that build also runs
 # on Devuan 6; the reverse is not true, which is what the separate
 # jack-graph-devuan-five-version used to work around. Build it with
-# `cd jack-graph && make` on a Devuan 5 machine and copy it here.
+# `make graph` from the repository root on a Devuan 5 machine and copy it here.
 JACK_GRAPH_SRC="contrib/bin/jack-graph"
 
 if [ -f "$JACK_GRAPH_SRC" ]; then
@@ -221,7 +221,7 @@ if [ -f "$JACK_GRAPH_SRC" ]; then
     echo "  ✓ Installed jack-graph to /usr/local/bin/jack-graph"
 else
     echo "WARNING: jack-graph binary not found at $JACK_GRAPH_SRC"
-    echo "         Build with: cd jack-graph && make"
+    echo "         Build with: make graph   (from the repository root)"
 fi
 
 # Install jack-graph desktop file
@@ -250,6 +250,29 @@ pcm.current_input {
 EOF
 chmod 644 "${ASOUND_D_DIR}/current_input.conf"
 echo "Installed default ${ASOUND_D_DIR}/current_input.conf (pcm.current_input -> input_card0)"
+
+# Install the bundled fonts BEFORE either GUI.
+#
+# BOTH BINARIES DRAW THEIR OWN TEXT with FreeType and neither uses fontconfig, so these two faces
+# are not a theming preference -- they are the only fonts the windows have. The compiled-in
+# JACKBRIDGE_RESOURCE_DIR_DEFAULT is where they are looked for first (the Makefile's SHAREDIR), and
+# tools/uirender audits every label against these exact files. Without them a binary falls back to
+# a system face, which FontStack warns about, and the layout on screen is no longer the layout the
+# audit passed.
+FONT_SRC_DIR="resources/fonts"
+FONT_DST_DIR="/usr/local/share/jack-bridge/fonts"
+if [ -d "$FONT_SRC_DIR" ]; then
+    echo "Installing the bundled fonts to ${FONT_DST_DIR}..."
+    mkdir -p "$FONT_DST_DIR"
+    # The licence files travel with the faces: both are redistributed under their own terms.
+    for f in "$FONT_SRC_DIR"/*; do
+        [ -f "$f" ] || continue
+        install -m 0644 "$f" "$FONT_DST_DIR/" || true
+    done
+    echo "  ✓ Installed $(ls -1 "$FONT_SRC_DIR" | wc -l) file(s) to ${FONT_DST_DIR}"
+else
+    echo "WARNING: $FONT_SRC_DIR not found; mxeq and jack-graph will fall back to a system font."
+fi
 
 # Install bundled Alsa Sound Connect GUI from repo contrib/ paths
 # The mxeq binary and desktop file are expected to be committed into the repo at:

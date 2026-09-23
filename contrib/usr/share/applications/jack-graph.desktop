@@ -7,3 +7,9 @@ Terminal=false
 Type=Application
 Categories=AudioVideo;Audio;Midi;Multimedia;
 Keywords=audio;JACK;ALSA;connections;
+# Ties the window to this entry in a dock or task list: it must match the res_class in the
+# window's WM_CLASS, which jack-graph/src/main.cpp sets with
+# X11Window::open(..., "jack-graph", ...). The JACK Settings and About dialogs carry the
+# same class deliberately, so a dock groups them with the graph instead of listing three
+# applications.
+StartupWMClass=jack-graph

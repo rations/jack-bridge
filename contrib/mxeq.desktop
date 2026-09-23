@@ -8,3 +8,6 @@ Icon=alsa-sound-connect
 Terminal=false
 Categories=AudioVideo;Audio;Multimedia;
 Keywords=audio;JACK;ALSA;connections;
+# Ties the window to this entry in a dock or task list: it must match the res_class in the
+# window's WM_CLASS, which src/mxeq/main.cpp sets with X11Window::open(..., "mxeq", ...).
+StartupWMClass=mxeq

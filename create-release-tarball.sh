@@ -34,8 +34,17 @@ cp -r 50-jack.conf "$TEMP_DIR/jack-bridge-${VERSION}/"
 # Installation system
 cp -r contrib/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 
-# Source code (needed for building)
+# Source code (needed for building). Both GUIs build from the ONE root Makefile now -- jack-graph
+# has no Makefile of its own -- so its sources travel with src/.
 cp -r src/ "$TEMP_DIR/jack-bridge-${VERSION}/"
+cp -r jack-graph/ "$TEMP_DIR/jack-bridge-${VERSION}/"
+
+# The bundled fonts. NOT OPTIONAL and not a theme: mxeq and jack-graph draw every glyph themselves
+# through FreeType and neither goes through fontconfig, so without these two faces both windows
+# fall back to whatever the system has and the layout stops being the one tools/uirender audits.
+# install.sh copies this directory to /usr/local/share/jack-bridge/fonts, which is the path
+# compiled into both binaries.
+cp -r resources/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 
 # Additional files needed by installer
 cp -r usr/ "$TEMP_DIR/jack-bridge-${VERSION}/"
