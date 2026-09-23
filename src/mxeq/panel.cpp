@@ -200,6 +200,7 @@ void Panel::setBluetoothState(bool adapterReady, bool discoverable, bool discove
     mBtDiscovering = discovering;
     mBtDiscoverable.on = discoverable;
     mBtDiscoverable.enabled = adapterReady;
+    applyBluetoothGating(); // Scan and Stop -- see applyBluetoothGating()
     repaint();
 }
 
@@ -210,6 +211,7 @@ void Panel::setBluetoothSelectionState(bool haveSelection, bool paired, bool tru
     mBtPaired = paired;
     mBtTrusted = trusted;
     mBtConnected = connected;
+    applyBluetoothGating(); // the five actions -- see applyBluetoothGating()
     repaint();
 }
 
@@ -472,10 +474,25 @@ void Panel::layoutBluetooth(float y)
         mBtActions[i].label = kBtActionLabels[i];
     }
 
-    // THE GATING. Each action is drawn disabled rather than hidden when it cannot work, and the
-    // conditions are the ones the GTK build checked with gui_bt_get_device_state before each call:
-    // Trust and Connect both require Paired, and it reported "Device is not paired" as an error
-    // dialog AFTER the click. Refusing before the click says the same thing without a dialog.
+    applyBluetoothGating();
+}
+
+//------------------------------------------------------------------------
+// THE GATING. Each action is drawn disabled rather than hidden when it cannot work, and the
+// conditions are the ones the GTK build checked with gui_bt_get_device_state before each call:
+// Trust and Connect both require Paired, and it reported "Device is not paired" as an error dialog
+// AFTER the click. Refusing before the click says the same thing without a dialog.
+//
+// THIS IS STATE, NOT GEOMETRY, AND IT MUST NOT LIVE ONLY IN layoutBluetooth(). It used to: the
+// setters below stored the new flags and repainted, but the flags only reached the buttons on the
+// next layout(), and nothing on the Bluetooth page triggers one -- selecting a device, a Pair
+// completing and discovery starting all change state without changing a single rect. So every
+// button kept the enabled state of the last layout, which in practice meant the last TAB SWITCH:
+// select a device and Pair stayed grey until you went to another page and came back, and Stop
+// stayed grey after Scan the same way. The recorder's setter applies its enabled states itself and
+// never had the problem; this now follows it.
+void Panel::applyBluetoothGating()
+{
     mBtActions[kPair].enabled = mBtHaveSelection && !mBtPaired;
     mBtActions[kTrust].enabled = mBtHaveSelection && mBtPaired && !mBtTrusted;
     mBtActions[kConnect].enabled = mBtHaveSelection && mBtPaired && !mBtConnected;

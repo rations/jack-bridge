@@ -316,6 +316,10 @@ private:
     std::vector<MixRow> mMixRows;
     void buildMixRows();
     int mixRowElement(const MixRow &r) const;
+
+    // The Bluetooth page's enabled/active states from the stored flags. Called by layoutBluetooth()
+    // AND by both Bluetooth setters, because the flags change without any rect changing.
+    void applyBluetoothGating();
     float mixRowHeight(const MixRow &r) const;
     std::string mMixerPlaceholder;
     float mMixerScroll = 0.0f;
