@@ -52,14 +52,10 @@ cp -r usr/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 # Build system
 cp Makefile "$TEMP_DIR/jack-bridge-${VERSION}/"
 
-# NOTHING BUILT ON THIS MACHINE BUT THE BINARIES THE INSTALLER USES.
-#
-# `cp -r src/` and `cp -r jack-graph/` carry every object file and dependency file the last build
-# left, and those are this machine's. On a release with an older glibc, `make` sees objects newer
-# than their sources, skips recompiling them and links them -- which produces the very binary the
-# rebuild was meant to replace. The binaries in contrib/bin are what install.sh installs; build
-# them with `make clean && make` on the oldest release you ship to (glibc is backward compatible,
-# not forward) before running this.
+# NO BUILD LEFTOVERS. The release's binaries are the prebuilt ones in contrib/bin, which is what
+# install.sh installs -- it builds nothing. `cp -r src/` and `cp -r jack-graph/` would otherwise
+# also carry every object and dependency file the last local build left, which are not part of a
+# release. (mxeq and jack-graph in contrib/bin must come from a Devuan 5 build; see install.sh.)
 find "$TEMP_DIR/jack-bridge-${VERSION}" \( -name '*.o' -o -name '*.d' \) -type f -delete
 
 # The last gtkmm build of jack-graph, from when Devuan 5 needed its own binary. install.sh stopped

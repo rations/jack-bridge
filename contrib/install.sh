@@ -226,10 +226,11 @@ fi
 # on Devuan 6 and 7; the reverse is not true, which is what the separate
 # jack-graph-devuan-five-version used to work around.
 #
-# THE SAME IS TRUE OF mxeq, and of everything else in contrib/bin: built on Devuan 6
-# (glibc 2.41) both GUIs require GLIBC_2.38 and will not start on Devuan 5. Build the
-# whole set with `make clean && make` from the repository root on a Devuan 5 machine
-# -- the clean matters, because objects compiled here would otherwise be relinked.
+# This installer builds nothing: it copies the prebuilt binaries in contrib/bin, which
+# ship in the release tarball. THE SAME RULE APPLIES TO mxeq: a GUI built on Devuan 6
+# (glibc 2.41) requires GLIBC_2.38 and will not start on Devuan 5, so the mxeq and
+# jack-graph that go into contrib/bin for a release must be built on Devuan 5. The
+# other binaries in contrib/bin already run on Devuan 5 (they need GLIBC_2.34 or older).
 JACK_GRAPH_SRC="contrib/bin/jack-graph"
 
 if [ -f "$JACK_GRAPH_SRC" ]; then

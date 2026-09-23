@@ -359,11 +359,13 @@ daemon above is upstream code and does use GLib; so does bluez itself.) The two
 fonts in `resources/fonts/` are the only fonts the windows have, and the
 installer copies them to `/usr/local/share/jack-bridge/fonts`.
 
-**Build on the oldest release you install to.** glibc is backward compatible but
-not forward: built on Devuan 6, `mxeq` and `jack-graph` need `GLIBC_2.38` and will
-not start on Devuan 5 (glibc 2.36), while a Devuan 5 build runs on 5, 6 and 7.
-`make clean` first — objects compiled on another release would otherwise be
-relinked as they are.
+**Release binaries are built on Devuan 5.** `contrib/install.sh` does not build
+anything: it installs the prebuilt binaries in `contrib/bin`, which ship in the
+release tarball. glibc is backward compatible but not forward, so built on
+Devuan 6, `mxeq` and `jack-graph` need `GLIBC_2.38` and will not start on Devuan 5
+(glibc 2.36), while a Devuan 5 build runs on 5, 6 and 7. Build them on Devuan 5
+and copy them into `contrib/bin` before creating a release. The other binaries in
+`contrib/bin` already run on Devuan 5.
 
 1. **Install build dependencies:**
 
