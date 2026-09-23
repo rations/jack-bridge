@@ -118,15 +118,24 @@ int main(int argc, char *argv[])
     };
     app.onMixerDescriptorsChanged = registerMixerFds;
 
-    // The same for libdbus: it adds a watch during authentication, so the set changes at runtime and
-    // registering once would miss it. bus.h explains why the one-descriptor shortcut is wrong.
+    // The same for libdbus: it adds a watch during authentication and toggles watches on and off
+    // as its outgoing queue fills and drains, so the set changes at runtime and registering once
+    // would miss it. bus.h explains at length why the one-descriptor shortcut is wrong.
+    //
+    // The fd and its direction are CAPTURED BY VALUE into each handler, so a handler always tells
+    // the bus which descriptor fired. Handing libdbus a descriptor that is not ready would make it
+    // read a socket nobody wrote to.
     std::vector<int> busTokens;
     auto registerBusFds = [&] {
         for (int t : busTokens)
             win.removeFd(t);
         busTokens.clear();
-        for (int fd : app.bluez().watchDescriptors())
-            busTokens.push_back(win.addFd(fd, [&app] { app.bluez().handleWatches(); }));
+        for (const Bluez::Watch &w : app.bluez().watchDescriptors()) {
+            const int fd = w.fd;
+            const bool write = w.write;
+            busTokens.push_back(
+                win.addFd(fd, [&app, fd, write] { app.bluez().handleWatch(fd, write); }, write));
+        }
     };
     app.bluez().onWatchesChanged = registerBusFds;
 
@@ -172,5 +181,10 @@ int main(int argc, char *argv[])
     };
 
     win.run(cb);
+
+    // BEFORE ANYTHING IN THIS FUNCTION IS DESTROYED. app.h explains why at length: the callbacks
+    // registered above point at `win`, `mixerTokens` and `busTokens`, all of which are destroyed
+    // before `app` is, and closing the mixer and the bus both fire callbacks.
+    app.shutdown();
     return 0;
 }

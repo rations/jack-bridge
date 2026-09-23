@@ -94,8 +94,9 @@ MXEQ_MODEL_OBJS = src/mxeq/alsamixer.o src/mxeq/devices.o src/mxeq/recorder.o \
 MXEQ_VIEW_OBJS = src/mxeq/panel.o src/mxeq/app.o
 
 # The BlueZ client. Its own directory because it is the one part of mxeq that talks to a bus, and
-# the one part that has no drawing and no ALSA in it.
-BLUEZ_OBJS = src/bluez/bluez.o
+# the one part that has no drawing and no ALSA in it. bus.cpp is the ONLY file in the tree that
+# includes <dbus/dbus.h>.
+BLUEZ_OBJS = src/bluez/bus.o src/bluez/agent.o src/bluez/bluez.o
 
 # The offline layout audit. It links the GFX objects, mxeq's panel and respath -- AND NOTHING ELSE.
 # No X11, no ALSA, no dbus: if this list ever has to grow, something has reached across the line the
@@ -191,11 +192,9 @@ $(BRIDGE_TARGET): $(BRIDGE_SRCS) | $(BIN_DIR)
 #
 # WHAT GOES WHEN: this rule and jack-graph/Makefile go with Phase 4.
 #
-# THE GTK mxeq IS GONE as of this phase, and with it MOTR_*, GLIB_API_LEVEL and src/mxeq.c.
-# src/gui_bt.c and src/bt_agent.c are NO LONGER BUILT but are still in the tree on purpose: they are
-# the GDBus original the libdbus-1 client in src/bluez/ is being written from, member by member, and
-# reading them beside the port is the whole reason the plan says that port must not be guessed at.
-# They go when Phase 3 lands and src/bluez/bluez.cpp stops being a placeholder.
+# THE GTK mxeq IS GONE, and with it MOTR_*, GLIB_API_LEVEL, src/mxeq.c, src/gui_bt.c and
+# src/bt_agent.c. There is no GLib left in this tree at all; the BlueZ client is src/bluez/ on
+# libdbus-1.
 GRAPH_DIR    = jack-graph
 GRAPH_TARGET = $(BIN_DIR)/jack-graph
 

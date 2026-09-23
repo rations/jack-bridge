@@ -192,14 +192,21 @@ public:
         return Rect(0, 0, mLogicalW, mLogicalH);
     }
 
-    // Wait on `fd` as well as the X connection, calling `onReady` when it is readable. The token
+    // Wait on `fd` as well as the X connection, calling `onReady` when it is ready. The token
     // returned removes it again.
+    //
+    // `wantWrite` puts the descriptor in select()'s WRITE set instead of the read set, and exists
+    // for exactly one caller: libdbus asks for a write watch when its outgoing queue will not
+    // drain in one go. A write watch is ready almost all the time, so registering one that nobody
+    // disables spins this loop at 100% CPU -- which is safe here ONLY BECAUSE libdbus disables the
+    // watch as soon as the queue empties and the client removes it again on that toggle. Do not
+    // add a write watch for anything that does not disable itself.
     //
     // Handlers are dispatched from a COPY of the list, because a handler may add or remove
     // descriptors -- which the mixer's does, every time the output device changes and the mixer
     // is reopened onto a different card, and which libdbus's watch functions do during
     // authentication.
-    int addFd(int fd, std::function<void()> onReady);
+    int addFd(int fd, std::function<void()> onReady, bool wantWrite = false);
     void removeFd(int token);
 
     // Call `fn` every intervalMs. The token returned removes it again.
@@ -261,6 +268,7 @@ private:
     struct FdWatch {
         int token;
         int fd;
+        bool write; // in select()'s write set rather than its read set
         std::function<void()> onReady;
     };
     struct TimerEntry {

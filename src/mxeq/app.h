@@ -35,6 +35,18 @@ public:
     // cannot run without failed; a missing sound card or a stopped bluetoothd are NOT that.
     bool start();
 
+    // THE OTHER HALF OF start(), AND IT IS NOT OPTIONAL TIDYING. Several of the callbacks above
+    // point INTO main()'s locals -- the window, and the two token vectors that track which file
+    // descriptors are registered on it. Those locals are destroyed before this object is, because
+    // they are declared after it, so anything that fires a callback from ~App reaches freed
+    // memory. It does fire one: closing the D-Bus connection makes libdbus hand back every watch
+    // it owns, which is a watch-set change, which is onWatchesChanged.
+    //
+    // AddressSanitizer found exactly that as a heap-use-after-free on a clean window close. So
+    // main() calls this while its own locals are still alive: it severs the outward callbacks
+    // first and then closes the two things holding kernel resources.
+    void shutdown();
+
     Panel &panel()
     {
         return mPanel;

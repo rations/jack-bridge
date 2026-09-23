@@ -29,6 +29,26 @@ std::vector<ComboItem> rateItems()
 //------------------------------------------------------------------------
 App::App() = default;
 
+// SEVER FIRST, CLOSE SECOND. Both closes below fire callbacks -- snd_mixer_close() invalidates the
+// poll descriptors and says so, and dropping the D-Bus connection hands back every watch libdbus
+// owns -- and neither has anywhere valid to report to once main() is unwinding. app.h records the
+// AddressSanitizer report that this came from.
+void App::shutdown()
+{
+    onHeightChanged = nullptr;
+    onNeedsRepaint = nullptr;
+    onMixerDescriptorsChanged = nullptr;
+    mDevices.addTimer = nullptr;
+    mDevices.removeTimer = nullptr;
+    mBluez.onWatchesChanged = nullptr;
+    mPanel.onNeedsRepaint = nullptr;
+
+    // Unregisters the pairing agent while the connection is still up, which is what stops a fast
+    // restart meeting "Already Exists" from RegisterAgent.
+    mBluez.close();
+    mMixer.close();
+}
+
 void App::requestHeight()
 {
     if (onHeightChanged)
@@ -153,6 +173,13 @@ bool App::start()
     mBluez.onAgentPrompt = [this](const std::string &prompt) { message(prompt, false); };
 
     //--- panel events ---------------------------------------------------
+    // EVERY PAGE IS A DIFFERENT HEIGHT and the window follows the active one, so this is not
+    // optional plumbing: without it the window keeps whatever height the previous page needed and
+    // a taller page is simply cut off at the bottom -- which is what the GTK build's
+    // on_any_expander_toggled() existed to prevent, with six hand-tuned constants where this has
+    // one call.
+    mPanel.cb.pageChanged = [this](Panel::Page) { requestHeight(); };
+
     mPanel.cb.setVolume = [this](int element, int percent) {
         if (element >= 0 && element < static_cast<int>(mElements.size()))
             mMixer.setVolume(mElements[static_cast<size_t>(element)], percent);
@@ -263,7 +290,6 @@ bool App::start()
         // would otherwise greet every user with an error about it. The page says so itself.
         fprintf(stderr, "jack-bridge: Bluetooth is unavailable; continuing without it\n");
     }
-    mBtModel.setFavourite(Devices::loadBluetoothDeviceMac());
     for (const BluezDeviceProps &p : mBluez.knownDevices()) {
         BtDevice d;
         d.path = p.path;

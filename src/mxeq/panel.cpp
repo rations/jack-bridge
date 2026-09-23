@@ -162,6 +162,10 @@ void Panel::setPage(Page p)
     clearHover();
     layout();
     repaint();
+
+    // LAST, and after mPage has moved: the handler asks the panel how tall it is now.
+    if (cb.pageChanged)
+        cb.pageChanged(mPage);
 }
 
 //------------------------------------------------------------------------
@@ -1096,8 +1100,9 @@ void Panel::release(float x, float y, int button)
 
     switch (t) {
         case Target::Tab:
-            if (cb.pageChanged)
-                cb.pageChanged(static_cast<Page>(index));
+            // setPage fires cb.pageChanged itself, AFTER mPage has moved. Firing it here instead
+            // told the app the new page while the panel still held the old one, so the height it
+            // computed was one tab behind -- every page was drawn at its predecessor's height.
             setPage(static_cast<Page>(index));
             return;
 

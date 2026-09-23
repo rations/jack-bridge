@@ -82,6 +82,9 @@ public:
     // Connects to the system bus, finds the adapter, registers the agent and subscribes to the four
     // signals. Returns false having warned: no bus, or no adapter. NOT FATAL TO THE CALLER -- mxeq
     // must start and stay up with bluetoothd stopped, with the Bluetooth page inert.
+    // A false return means the Bluetooth page will be inert AS THINGS STAND, not for ever: the
+    // connection stays open if the bus was reachable, and an adapter plugged in later arrives on
+    // InterfacesAdded and brings the page to life through onAdapterChanged.
     bool open();
     void close();
 
@@ -89,14 +92,23 @@ public:
     // True when there is an adapter to talk to. The Bluetooth page's controls are gated on this.
     bool adapterReady() const;
 
-    // The descriptors libdbus wants waited on, and the callback to run when one is readable. The
-    // set CHANGES AT RUNTIME -- libdbus adds a second watch during authentication -- so the app
-    // re-reads this whenever onWatchesChanged fires rather than registering once.
+    // The descriptors libdbus wants waited on. The set CHANGES AT RUNTIME -- libdbus adds a watch
+    // during authentication, and toggles watches on and off as its outgoing queue fills and drains
+    // -- so the app re-reads this whenever onWatchesChanged fires rather than registering once.
+    //
+    // A descriptor can be wanted for WRITING as well as reading; bus.h explains when and why that
+    // is safe against spinning the event loop.
     std::function<void()> onWatchesChanged;
-    std::vector<int> watchDescriptors() const;
-    // Called when any watched descriptor is readable. Dispatches until DBUS_DISPATCH_COMPLETE.
-    void handleWatches();
-    // libdbus's own timeouts, in milliseconds, soonest first. Empty when it wants none.
+    struct Watch {
+        int fd;
+        bool write;
+    };
+    std::vector<Watch> watchDescriptors() const;
+    // One watched descriptor became ready. Dispatches until DBUS_DISPATCH_COMPLETE, because one
+    // read can carry several messages.
+    void handleWatch(int fd, bool writable);
+    // libdbus's own timeouts. Called on a fixed tick; this is the half of the loop integration
+    // that makes a call which times out with no further traffic on the socket actually complete.
     void handleTimeouts();
 
     //--- adapter --------------------------------------------------------
@@ -112,13 +124,33 @@ public:
     void stopDiscovery();
 
     //--- devices --------------------------------------------------------
-    // The pre-populated list, from ObjectManager.GetManagedObjects. Called once at open().
+    // The list BlueZ already knows about, from ObjectManager.GetManagedObjects.
+    //
+    // CALLED AT open() AND AGAIN ON EVERY StartDiscovery, which is not redundant: it is the other
+    // half of rule 1 above. BlueZ emits InterfacesAdded only for devices it did not already have
+    // cached, so on a machine that has paired before, a Scan produces no signals at all for the
+    // devices the user most wants to see. gui_bt.c calls gui_bt_populate_existing_devices() from
+    // inside gui_bt_start_discovery() for exactly that reason; startDiscovery() below does the
+    // same by reporting each of these through onDevice.
     std::vector<BluezDeviceProps> knownDevices();
 
     // All asynchronous, all reporting through onOperation. The GTK build made these async precisely
     // so the UI never blocks on D-Bus: pairing can take ten seconds and Connect can take longer.
+    // The timeouts are the GTK build's own -- 20 s for Pair and Connect, 15 s for Trusted.
+    //
+    // pair() STOPS DISCOVERY FIRST, best-effort and ignoring the result (gui_bt.c:670-697). An
+    // adapter that is still scanning pairs unreliably, and a failure here is not a reason not to
+    // try the pairing.
     void pair(const std::string &path);
     void setTrusted(const std::string &path, bool trusted);
+
+    // connect() IS TWO CALLS, NOT ONE. It tries Device1.ConnectProfile with the A2DP Sink UUID
+    // 0000110b-0000-1000-8000-00805f9b34fb first and falls back to the generic Device1.Connect
+    // once if that fails (gui_bt.c:715-805). That ordering is the whole point of this program:
+    // asking for the audio sink profile by name is what gets a headset onto A2DP rather than onto
+    // whatever profile BlueZ would otherwise pick, and bluealsa:playback_* only appears for A2DP.
+    // The fallback exists because a device with no A2DP sink -- and some that report it late --
+    // answers ConnectProfile with an error and connects fine to a plain Connect.
     void connect(const std::string &path);
 
     // Synchronous, because both are quick and the caller acts on the answer immediately.

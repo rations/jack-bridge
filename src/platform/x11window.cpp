@@ -475,12 +475,12 @@ void X11Window::resize(float logicalW, float logicalH)
 }
 
 //------------------------------------------------------------------------
-int X11Window::addFd(int fd, std::function<void()> onReady)
+int X11Window::addFd(int fd, std::function<void()> onReady, bool wantWrite)
 {
     if (fd < 0)
         return -1;
     const int token = mNextToken++;
-    mFds.push_back({token, fd, std::move(onReady)});
+    mFds.push_back({token, fd, wantWrite, std::move(onReady)});
     return token;
 }
 
@@ -782,13 +782,15 @@ void X11Window::run(const Callbacks &cb)
             continue;
 
         fd_set r;
+        fd_set wr;
         FD_ZERO(&r);
+        FD_ZERO(&wr);
         FD_SET(xfd, &r);
         int maxFd = xfd;
         for (const FdWatch &w : mFds) {
             if (w.fd < 0 || w.fd >= FD_SETSIZE)
                 continue;
-            FD_SET(w.fd, &r);
+            FD_SET(w.fd, w.write ? &wr : &r);
             if (w.fd > maxFd)
                 maxFd = w.fd;
         }
@@ -819,7 +821,7 @@ void X11Window::run(const Callbacks &cb)
             timeout = &tv;
         }
 
-        const int n = select(maxFd + 1, &r, nullptr, nullptr, timeout);
+        const int n = select(maxFd + 1, &r, &wr, nullptr, timeout);
         if (n < 0 && errno != EINTR) {
             fprintf(stderr, "jack-bridge: select on the X connection failed; closing\n");
             mRunning = false;
@@ -834,7 +836,9 @@ void X11Window::run(const Callbacks &cb)
         // the iterator underneath this loop.
         const std::vector<FdWatch> ready = mFds;
         for (const FdWatch &w : ready) {
-            if (w.fd < 0 || w.fd >= FD_SETSIZE || !FD_ISSET(w.fd, &r))
+            if (w.fd < 0 || w.fd >= FD_SETSIZE)
+                continue;
+            if (!FD_ISSET(w.fd, w.write ? &wr : &r))
                 continue;
             // Still registered? A previous handler in this same pass may have removed it.
             bool live = false;
