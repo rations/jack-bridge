@@ -25,5 +25,9 @@ CODE-REVIEW.md
 /jack-graph/jack-graph
 # The offline layout audit is a developer tool, built from tools/uirender.cpp and never shipped.
 /tools/uirender
+
+# The on-screen input harness, built from tools/xin.c. Also a developer tool, also never shipped,
+# and it needs a running X server to be worth building -- so it is not part of `all` either.
+/tools/xin
 *.log
 *.tar.gz

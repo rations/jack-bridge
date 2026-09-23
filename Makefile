@@ -7,6 +7,7 @@
 #   jack-connection-manager   the auto-routing daemon (no GUI, no toolkit, never had one)
 #   pulse-jack-bridge         the Steam PulseAudio bridge (likewise)
 #   tools/uirender            the offline layout audit -- no X server, no sound card
+#   tools/xin                 the XTest input harness (`make xin`, not built by `all`)
 #
 # X11 + Cairo + FreeType and nothing else. NO GTK, NO GDK, NO PANGO, NO GOBJECT, NO GIO, NO GLIB.
 # C++17 for everything that draws; the two daemons stay plain C11 and their flags are untouched.
@@ -42,6 +43,7 @@ SHAREDIR    ?= $(PREFIX)/share/jack-bridge
 # x11 1.8.12, dbus-1 1.16.2, alsa 1.2.14, jack 1.9.22.
 GFX_PKGS  = cairo cairo-ft freetype2
 X11_PKGS  = cairo-xlib x11
+XTEST_PKGS = x11 xtst                 # tools/xin only: synthetic input, never a binary
 DBUS_PKGS = dbus-1
 ALSA_PKGS = alsa
 JACK_PKGS = jack
@@ -50,6 +52,8 @@ GFX_CFLAGS  := $(shell $(PKG_CONFIG) --cflags $(GFX_PKGS))
 GFX_LIBS    := $(shell $(PKG_CONFIG) --libs   $(GFX_PKGS))
 X11_CFLAGS  := $(shell $(PKG_CONFIG) --cflags $(X11_PKGS))
 X11_LIBS    := $(shell $(PKG_CONFIG) --libs   $(X11_PKGS))
+XTEST_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(XTEST_PKGS))
+XTEST_LIBS   := $(shell $(PKG_CONFIG) --libs   $(XTEST_PKGS))
 DBUS_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(DBUS_PKGS))
 DBUS_LIBS   := $(shell $(PKG_CONFIG) --libs   $(DBUS_PKGS))
 ALSA_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(ALSA_PKGS))
@@ -123,7 +127,7 @@ UIRENDER_OBJS = $(GFX_OBJS) src/mxeq/panel.o \
                 jack-graph/src/Node.o jack-graph/src/Connection.o jack-graph/src/ClientBox.o \
                 src/platform/respath.o tools/uirender.o
 
-.PHONY: all clean toolkit manager bridge mxeq uirender graph install uninstall
+.PHONY: all clean toolkit manager bridge mxeq uirender xin graph install uninstall
 
 # `toolkit` is the shared layer on its own, and it is what keeps this tree green between the phases
 # of the port.
@@ -197,6 +201,21 @@ uirender: $(UIRENDER_TARGET)
 $(UIRENDER_TARGET): $(UIRENDER_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDHARDEN) -o $@ $(UIRENDER_OBJS) $(GFX_LIBS)
 
+# --- the on-screen input harness ----------------------------------------------------------------
+# The other half of the same job: uirender proves a string fits its slot with no X server, xin
+# proves the window in front of you answers a pointer. Plain C11, X11 and Xtst only, and NOT part
+# of `all` -- it needs a running X server to be worth building and it is never installed.
+#
+# It raises its target before clicking, because XTest aims at the pointer and the server delivers
+# to whatever is topmost there. See its header comment: a click that lands on the editor instead of
+# the panel reads exactly like a broken hit test.
+XIN_TARGET = tools/xin
+XIN_CFLAGS = -O1 -g -Wall -Wextra -std=c11 $(XTEST_CFLAGS)
+
+xin: $(XIN_TARGET)
+$(XIN_TARGET): tools/xin.c
+	$(CC) $(XIN_CFLAGS) -o $@ tools/xin.c $(XTEST_LIBS)
+
 # --- the two daemons: never linked a toolkit, flags unchanged ----------------------------------
 MANAGER_TARGET = $(BIN_DIR)/jack-connection-manager
 MANAGER_SRCS   = src/jack_connection_manager.c
@@ -245,4 +264,5 @@ clean:
 	rm -f $(GFX_OBJS) $(PLAT_OBJS) $(MXEQ_MODEL_OBJS) $(MXEQ_VIEW_OBJS) $(BLUEZ_OBJS) \
 	      src/mxeq/main.o $(GRAPH_MODEL_OBJS) $(GRAPH_VIEW_OBJS) jack-graph/src/main.o \
 	      tools/uirender.o $(DEPS)
-	rm -f $(MANAGER_TARGET) $(BRIDGE_TARGET) $(MXEQ_TARGET) $(GRAPH_TARGET) $(UIRENDER_TARGET)
+	rm -f $(MANAGER_TARGET) $(BRIDGE_TARGET) $(MXEQ_TARGET) $(GRAPH_TARGET) $(UIRENDER_TARGET) \
+	      $(XIN_TARGET)

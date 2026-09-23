@@ -95,6 +95,9 @@ private:
     std::shared_ptr<Node> inputPortAt(double x, double y);
     ClientBox *boxAt(double x, double y);
 
+    // The box with this client name, or nullptr if the last refresh did not bring it back.
+    ClientBox *boxFor(const std::string &client);
+
     // Window space to canvas space, and the inverse of what draw() sets up.
     double canvasX(float windowX) const
     {
@@ -131,7 +134,13 @@ private:
     bool mPanning = false;
     bool mMovingBox = false;
     std::shared_ptr<Node> mDragSource;
-    ClientBox *mMovingBoxPtr = nullptr;
+    // THE BOX BEING MOVED IS HELD BY NAME, NOT BY POINTER. A port refresh can land in the middle of
+    // a drag -- JACK decides when, not the user -- and it rebuilds mClientBoxes from scratch, so any
+    // pointer into that vector is stale the moment it does. Holding the name means a refresh mid-drag
+    // is invisible to the user: removeAll() saves the box's CURRENT position, layout(true) puts the
+    // rebuilt box back there, and the next motion resolves the name to the new box and carries on.
+    // The gtkmm build held a pointer and wrote through it after the vector was cleared.
+    std::string mMovingBoxClient;
     double mDragCurrentX = 0.0;
     double mDragCurrentY = 0.0;
     float mPanStartX = 0.0f;

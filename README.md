@@ -350,24 +350,76 @@ Per-binary minimal compile commands (useful for producing a single utility if yo
 - bluealsad (daemon)
   - The daemon links multiple internal sources and should be built with the Autotools workflow (no supported single-file gcc command). Use the example configure+make sequence above.
 
-### Building GUI and bridge
+### Building the GUIs, the daemon and the bridge
+
+Both GUIs are drawn by hand with X11, Cairo and FreeType. **There is no GTK, GDK,
+GLib, GObject, GIO or Pango anywhere in this project**, and no widget toolkit at
+all; the two fonts in `resources/fonts/` are the only fonts the windows have, and
+the installer copies them to `/usr/local/share/jack-bridge/fonts`.
+
+1. **Install build dependencies:**
+
+```bash
+sudo apt install -y build-essential pkg-config \
+  libcairo2-dev libfreetype-dev libx11-dev \
+  libasound2-dev libdbus-1-dev libjack-jackd2-dev
+```
+
+2. **Build everything:**
 
 ```bash
 cd ~/jack-bridge
-make clean && make        # builds mxeq + jack-connection-manager
-make bridge               # builds pulse-jack-bridge (Steam audio bridge)
+make clean && make
 ```
 
-The Makefile builds `mxeq` (GUI), `jack-connection-manager` (event-driven daemon), and `pulse-jack-bridge` (Steam audio bridge). Build dependency for the bridge: `libjack-jackd2-dev` (already required by jack-bridge).
+One Makefile builds all five: `mxeq` and `jack-graph` into `contrib/bin/`,
+`jack-connection-manager`, `pulse-jack-bridge`, and `tools/uirender`. Individual
+targets are `make mxeq`, `make graph`, `make manager`, `make bridge` and
+`make uirender`; `make xin` builds the on-screen input harness, which `all`
+deliberately leaves out. jack-graph has no Makefile of its own — one build for both
+binaries, so the shared graphics layer compiles once.
 
-### Building jack-graph
+`mxeq` deliberately does **not** link libjack, so it never appears as a client in
+the JACK graph; every JACK question it asks is a `jack_lsp` subprocess.
+`ldd contrib/bin/mxeq` is the check.
+
+### Checking the layout before you commit
+
+`tools/uirender` composes both real panels offline — no X server, no sound card,
+no Bluetooth adapter — writes a PNG of every page at three scales, and exits
+non-zero if any label overflows the slot it lands in or uses a character the
+bundled fonts have no glyph for. A label that does not fit is not a crash: it is
+silently truncated, so the first person to see it is a user on different fonts.
 
 ```bash
-cd jack-graph
-make
+make uirender && ./tools/uirender --out /tmp/ui
 ```
 
-Copy the resulting binary to `contrib/bin/jack-graph` before running the installer.
+Run it after any change that moves a rectangle.
+
+### Driving the real windows
+
+`tools/xin` is the other half of that check: `uirender` proves a string fits its
+slot with no X server, and `xin` proves the window in front of you answers a
+pointer. It is a small XTest driver — click, drag, wheel, keys, resize and a
+polite `WM_DELETE_WINDOW` close — and it is not built by `make`, because it needs
+a running X server to be worth building.
+
+```bash
+make xin
+./tools/xin list                       # every window, with its WM_CLASS
+./tools/xin drag jack-graph 170 360 520 620    # move a client box
+./tools/xin wheel jack-graph 600 400 up 3      # zoom in three notches
+```
+
+Coordinates are window-relative and unscaled — the same numbers `geometry.h`
+uses, so a rect `uirender` prints can be clicked directly. It **raises its target
+first**, because XTest aims at the pointer and the server delivers to whatever is
+topmost there; a click that lands on the editor instead of the panel looks
+exactly like a broken hit test. Pass `-R` when the stacking is what you are
+testing.
+
+Run it after any change to hit-testing, dragging or the event loop.
 
 ## Uninstall
 
@@ -379,7 +431,7 @@ sudo sh contrib/uninstall.sh
 
 The uninstaller removes:
 - All init scripts and service registrations
-- Installed binaries (mxeq, BlueALSA tools)
+- Installed binaries (mxeq, jack-graph, BlueALSA tools) and their bundled fonts
 - Configuration files (/etc/asound.conf, /etc/jack-bridge/)
 - Desktop launcher
 - Polkit rules and D-Bus policies

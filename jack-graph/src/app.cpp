@@ -276,7 +276,22 @@ void App::updateStatus()
         status += "JACK: not connected";
     }
 
-    status += " | Server: " + mServer.get_status();
+    // THE SERVER'S STATE IS OUR OWN CONNECTION WHENEVER WE HAVE ONE, and asking JACK instead is a
+    // feedback loop. JackServerControl::is_running() answers by opening a client called
+    // "status_check" and closing it again -- and this window watches CLIENT registrations, so that
+    // open-and-close fires our own callback, which schedules a port refresh, which ends by calling
+    // this function, which asks again. The graph rebuilt itself about nine times a second on an
+    // idle server, and since every rebuild empties the canvas, a box drag could not outlive one
+    // pass: that is what "the box is not moving" was. The gtkmm build had the same line and the
+    // same loop -- it got away with the drag only because remove_all_nodes() left m_moving_box
+    // pointing into freed storage and kept writing through it. settingspanel.cpp already carries
+    // this rule, for this reason, on its own 1 Hz tick.
+    //
+    // A CONNECTED CLIENT IS THE PROOF. That is what being connected to a JACK server means, and it
+    // costs nothing. Only with no client is there anything left to ask -- and with no client there
+    // is nothing of ours for the probe's registration to fire, so asking then cannot loop.
+    status += " | Server: ";
+    status += mJackConnected ? "Running" : mServer.get_status();
 
     if (mAlsaConnected)
         status += " | ALSA MIDI: connected";

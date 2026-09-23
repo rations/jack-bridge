@@ -61,8 +61,13 @@ void pairStereoPorts(std::vector<std::shared_ptr<Node>> &ports)
 constexpr float kBoxRadius = 6.0f;
 constexpr float kPortRadius = 6.0f;
 constexpr float kPortBgRadius = 3.0f;
-constexpr float kHeaderTextSize = 11.0f;
-constexpr float kPortTextSize = 9.0f;
+// TEXT SIZES, AT THE FAMILY'S FLOOR. These were 11 and 9, which is what Pango's 9pt and 7.5pt
+// measured out to in the gtkmm build -- and nothing else in this project draws below 12. A graph is
+// read at arm's length while patching, so the two sizes here are the shared body and small sizes
+// rather than a pair of numbers of their own: a client name is body text and a port name is the
+// small text beside it.
+constexpr float kHeaderTextSize = geo::kBodySize;  // 13
+constexpr float kPortTextSize = geo::kSmallSize;   // 12
 constexpr float kLayoutMargin = 20.0f;
 constexpr float kBoxRowGap = 10.0f;
 constexpr float kBoxColGap = 250.0f;
@@ -101,12 +106,13 @@ void GraphPanel::removeAll()
     mConnections.clear();
     mClientBoxes.clear();
 
-    // NOT A DANGLING POINTER WAITING TO HAPPEN. mMovingBoxPtr points into mClientBoxes, which has
-    // just been emptied; a refresh landing mid-drag would otherwise leave the next motion event
-    // writing through it. GraphCanvas got away with this because GTK delivered the refresh from a
-    // timer that could not interleave with a drag; there is no such guarantee here.
-    mMovingBox = false;
-    mMovingBoxPtr = nullptr;
+    // A DRAG IN FLIGHT SURVIVES THIS, and is meant to. The loop above has just saved the dragged
+    // box's CURRENT position, layout(true) puts the rebuilt box back on it, and the next motion
+    // resolves mMovingBoxClient to that box -- so a refresh arriving mid-drag is invisible to the
+    // hand holding the mouse. This used to cancel the drag instead, to stop a ClientBox* dangling
+    // past the clear() above; holding the name removes the pointer and with it the reason to
+    // cancel. Cancelling made a box unmovable on any server that refreshes often, which was every
+    // server for as long as App::updateStatus() caused a refresh of its own.
 
     repaint();
 }
@@ -472,6 +478,15 @@ ClientBox *GraphPanel::boxAt(double x, double y)
     return nullptr;
 }
 
+ClientBox *GraphPanel::boxFor(const std::string &client)
+{
+    for (ClientBox &box : mClientBoxes) {
+        if (box.client_name == client)
+            return &box;
+    }
+    return nullptr;
+}
+
 //------------------------------------------------------------------------
 bool GraphPanel::press(float wx, float wy, int button)
 {
@@ -495,7 +510,7 @@ bool GraphPanel::press(float wx, float wy, int button)
 
         if (ClientBox *box = boxAt(x, y)) {
             mMovingBox = true;
-            mMovingBoxPtr = box;
+            mMovingBoxClient = box->client_name;
             mBoxOffsetX = x - box->x;
             mBoxOffsetY = y - box->y;
             return true;
@@ -560,7 +575,7 @@ bool GraphPanel::release(float wx, float wy, int button)
 
     if (mMovingBox) {
         mMovingBox = false;
-        mMovingBoxPtr = nullptr;
+        mMovingBoxClient.clear();
         return true;
     }
 
@@ -581,12 +596,21 @@ bool GraphPanel::motion(float wx, float wy)
         return true;
     }
 
-    if (mMovingBox && mMovingBoxPtr) {
-        mMovingBoxPtr->x = canvasX(wx) - mBoxOffsetX;
-        mMovingBoxPtr->y = canvasY(wy) - mBoxOffsetY;
+    if (mMovingBox) {
+        // RESOLVED ON EVERY MOTION, not once at press: see mMovingBoxClient in the header. A client
+        // that left the graph during its own drag has nothing left to move, so the drag ends quietly
+        // rather than inventing a box to put somewhere.
+        ClientBox *box = boxFor(mMovingBoxClient);
+        if (!box) {
+            mMovingBox = false;
+            mMovingBoxClient.clear();
+            return false;
+        }
+        box->x = canvasX(wx) - mBoxOffsetX;
+        box->y = canvasY(wy) - mBoxOffsetY;
         // The ports move with the box, and so do the cables, because a Connection reads its
         // endpoints out of the Nodes rather than caching them.
-        positionPorts(mMovingBoxPtr);
+        positionPorts(box);
         repaint();
         return true;
     }
