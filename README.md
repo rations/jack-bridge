@@ -353,9 +353,17 @@ Per-binary minimal compile commands (useful for producing a single utility if yo
 ### Building the GUIs, the daemon and the bridge
 
 Both GUIs are drawn by hand with X11, Cairo and FreeType. **There is no GTK, GDK,
-GLib, GObject, GIO or Pango anywhere in this project**, and no widget toolkit at
-all; the two fonts in `resources/fonts/` are the only fonts the windows have, and
-the installer copies them to `/usr/local/share/jack-bridge/fonts`.
+GLib, GObject, GIO or Pango in either GUI or in anything else built from this
+project's own source**, and no widget toolkit at all. (The bundled BlueALSA
+daemon above is upstream code and does use GLib; so does bluez itself.) The two
+fonts in `resources/fonts/` are the only fonts the windows have, and the
+installer copies them to `/usr/local/share/jack-bridge/fonts`.
+
+**Build on the oldest release you install to.** glibc is backward compatible but
+not forward: built on Devuan 6, `mxeq` and `jack-graph` need `GLIBC_2.38` and will
+not start on Devuan 5 (glibc 2.36), while a Devuan 5 build runs on 5, 6 and 7.
+`make clean` first — objects compiled on another release would otherwise be
+relinked as they are.
 
 1. **Install build dependencies:**
 

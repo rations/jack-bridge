@@ -59,6 +59,8 @@ BIN_BLUEALSA_APLAY="/usr/local/bin/bluealsa-aplay"
 BIN_BLUEALSA_RFCOMM="/usr/local/bin/bluealsa-rfcomm"
 BIN_JACK_CONNECTION_MANAGER="/usr/local/bin/jack-connection-manager"
 BIN_JACK_GRAPH="/usr/local/bin/jack-graph"
+# The Steam bridge. install.sh has installed it since the bridge existed; this list never had it.
+BIN_PULSE_JACK_BRIDGE="/usr/local/bin/pulse-jack-bridge"
 APULSE_FIREFOX="/usr/bin/apulse-firefox"
 APULSE_CHROMIUM="/usr/bin/apulse-chromium"
 ASOUND_CONF="/etc/asound.conf"
@@ -120,7 +122,7 @@ if [ -d "$USR_LIB" ]; then
 fi
 
 # Remove GUI and BlueALSA binaries
-for f in "$BIN_MXEQ" "$BIN_BLUEALSAD" "$BIN_BLUEALSActl" "$BIN_BLUEALSA_APLAY" "$BIN_BLUEALSA_RFCOMM" "$BIN_JACK_CONNECTION_MANAGER" "$BIN_JACK_GRAPH"; do
+for f in "$BIN_MXEQ" "$BIN_BLUEALSAD" "$BIN_BLUEALSActl" "$BIN_BLUEALSA_APLAY" "$BIN_BLUEALSA_RFCOMM" "$BIN_JACK_CONNECTION_MANAGER" "$BIN_JACK_GRAPH" "$BIN_PULSE_JACK_BRIDGE"; do
   if [ -f "$f" ]; then
     rm -f "$f"
     log "  Removed $f"

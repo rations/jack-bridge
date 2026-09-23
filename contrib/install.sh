@@ -19,44 +19,113 @@ INIT_DIR="${PREFIX_ROOT}etc/init.d"
 DEFAULTS_DIR="${PREFIX_ROOT}etc/default"
 BIN_DIR="${PREFIX_ROOT}usr/bin"
 
-# Detect Devuan version for package compatibility
-DEVUAN_VERSION=""
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    if [ "$ID" = "devuan" ]; then
-        DEVUAN_VERSION=$(echo "$VERSION_ID" | cut -d. -f1)
-    fi
-fi
+# ---------------------------------------------------------------------------------------------
+# PACKAGES: ASK APT WHICH NAMES EXIST, INSTEAD OF GUESSING FROM THE RELEASE NUMBER.
+#
+# This used to read VERSION_ID and pick one of two hard-coded lists: 6 or above got the new
+# names, and ANYTHING ELSE -- including a release it could not read -- got daedalus's. Freia, a
+# testing release, fell through to the daedalus list and `apt install` failed on a name freia
+# does not have. Adding freia would only move the problem to the next release.
+#
+# The names really do differ between releases, for two reasons, and neither is about Devuan's
+# version number:
+#   - the 64-bit time_t transition renamed libraries with time_t in their ABI (libasound2 ->
+#     libasound2t64, libspandsp2 -> libspandsp2t64, libts0 -> libts0t64);
+#   - jackd2 1.9.22 split its command-line tools, jack_lsp and jack_connect among them, into
+#     jack-example-tools. Daedalus's jackd2 still ships them itself and has no such package;
+#     excalibur and freia need it, and jackd2 there only Recommends it, so a machine set not to
+#     install recommends lost jack_lsp -- which jack-route-select, jack-autoconnect, two init
+#     scripts and mxeq all run.
+#
+# So each entry below is a SLOT: alternatives separated by '|', newest name first, and the first
+# one the configured repositories offer is installed. `apt-cache policy` gives a real package a
+# Candidate version, a virtual one "(none)" (libasound2 on excalibur, which libasound2t64 only
+# Provides) and an unknown one nothing at all, so only a real version counts. A slot with no
+# candidate is an error named here, rather than apt aborting the whole install on one word.
+#
+# The GUIs' own libraries are listed explicitly: mxeq and jack-graph are drawn with Cairo and
+# FreeType on plain X11 and link libdbus-1 for Bluetooth. There is no GTK, gtkmm, GLib or Pango
+# in either any more, so libgtk-3-0 and libgtkmm-3.0-1v5 are gone from this list. (GLib is still
+# on the system: the prebuilt bluealsad is upstream BlueALSA, which uses it, and so does bluez.)
+REQUIRED_SLOTS="jackd2 alsa-utils libasound2-plugins apulse logrotate
+    libcairo2 libfreetype6 libx11-6 libdbus-1-3
+    bluez bluez-tools dbus polkitd|policykit-1 pkexec|policykit-1 imagemagick
+    libasound2-plugin-bluez libbluetooth3 libsbc1 libspandsp2t64|libspandsp2 libb2-1 libts0t64|libts0"
+# Installed where the repositories have them, skipped where they do not -- see above.
+OPTIONAL_SLOTS="jack-example-tools"
 
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
-# We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
-if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
-    # Devuan 6 uses polkitd and t64 package names
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
-else
-    # Devuan 5 and other Debian-like systems
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libgtk-3-0 libgtkmm-3.0-1v5 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
-fi
+# We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses; libbluetooth3,
+# libsbc1 and libspandsp are what that prebuilt daemon links.
+
+# True when apt can install this exact name: it has a real candidate version.
+pkg_available() {
+    _cand=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ { print $2; exit }')
+    [ -n "$_cand" ] && [ "$_cand" != "(none)" ]
+}
+
+# The first name in a '|'-separated slot that pkg_available accepts, or nothing.
+resolve_slot() {
+    _old_ifs=$IFS
+    IFS='|'
+    for _name in $1; do
+        IFS=$_old_ifs
+        if pkg_available "$_name"; then
+            echo "$_name"
+            return 0
+        fi
+        IFS='|'
+    done
+    IFS=$_old_ifs
+    return 1
+}
 
 echo "Installing jack-bridge contrib files"
 
-# Non-interactive package installation for Debian-like systems (will prompt for sudo password)
+# Non-interactive package installation for Debian-like systems
 if command -v apt >/dev/null 2>&1; then
     # Hold packages that jackd2 pulls in but are not needed
     echo "Holding unnecessary packages that jackd2 pulls as dependencies..."
-    sudo apt-mark hold qjackctl 2>/dev/null || true
+    apt-mark hold qjackctl 2>/dev/null || true
 
-    echo "Detected apt. Installing required packages: $REQUIRED_PACKAGES"
+    # BEFORE resolving: the answer comes from the package lists, and on a fresh machine they may
+    # be empty or stale.
     if ! apt update; then
-        echo "Warning: apt update failed; continuing to install may still work."
+        echo "Warning: apt update failed; resolving package names from the lists already present."
     fi
+
+    REQUIRED_PACKAGES=""
+    MISSING_SLOTS=""
+    for slot in $REQUIRED_SLOTS; do
+        if pkg=$(resolve_slot "$slot"); then
+            REQUIRED_PACKAGES="$REQUIRED_PACKAGES $pkg"
+        else
+            MISSING_SLOTS="$MISSING_SLOTS $slot"
+        fi
+    done
+    for slot in $OPTIONAL_SLOTS; do
+        if pkg=$(resolve_slot "$slot"); then
+            REQUIRED_PACKAGES="$REQUIRED_PACKAGES $pkg"
+        fi
+    done
+
+    if [ -n "$MISSING_SLOTS" ]; then
+        echo "ERROR: no installable package in the configured repositories for:$MISSING_SLOTS"
+        echo "       ('a|b' means either name would do.) Check /etc/apt/sources.list and run"
+        echo "       'apt update', then run this installer again."
+        exit 1
+    fi
+
+    echo "Installing required packages:$REQUIRED_PACKAGES"
     if ! apt install -y $REQUIRED_PACKAGES; then
         echo "Package installation failed or was interrupted. Required packages must be installed for jack-bridge to function."
-        echo "Retry: sudo apt install -y $REQUIRED_PACKAGES"
+        echo "Retry: sudo apt install -y$REQUIRED_PACKAGES"
         exit 1
     fi
 else
-    echo "apt not found. Please ensure these packages are installed: $REQUIRED_PACKAGES"
+    echo "apt not found. Please ensure these packages (or their equivalents) are installed:"
+    echo "  $REQUIRED_SLOTS $OPTIONAL_SLOTS" | tr -s ' \n' ' '
+    echo
 fi
 
 # Cleanup obsolete artifacts from previous versions (authoritative removal)
@@ -209,9 +278,13 @@ fi
 # Install jack-graph binary (JACK/ALSA port connection manager)
 # One binary for every supported release, built on the oldest distro in use
 # (Devuan 5 / glibc 2.36). glibc is backward compatible, so that build also runs
-# on Devuan 6; the reverse is not true, which is what the separate
-# jack-graph-devuan-five-version used to work around. Build it with
-# `make graph` from the repository root on a Devuan 5 machine and copy it here.
+# on Devuan 6 and 7; the reverse is not true, which is what the separate
+# jack-graph-devuan-five-version used to work around.
+#
+# THE SAME IS TRUE OF mxeq, and of everything else in contrib/bin: built on Devuan 6
+# (glibc 2.41) both GUIs require GLIBC_2.38 and will not start on Devuan 5. Build the
+# whole set with `make clean && make` from the repository root on a Devuan 5 machine
+# -- the clean matters, because objects compiled here would otherwise be relinked.
 JACK_GRAPH_SRC="contrib/bin/jack-graph"
 
 if [ -f "$JACK_GRAPH_SRC" ]; then
