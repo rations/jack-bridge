@@ -25,17 +25,31 @@ if [ -f /etc/os-release ]; then
     . /etc/os-release
     if [ "$ID" = "devuan" ]; then
         DEVUAN_VERSION=$(echo "$VERSION_ID" | cut -d. -f1)
+        # A testing release (freia) has no numeric VERSION_ID, so the -ge test below failed
+        # and it was given the Devuan 5 list, which does not install there. Testing is always
+        # newer than the last stable release and uses the Devuan 6 package names.
+        case "$DEVUAN_VERSION" in
+            ''|*[!0-9]*) DEVUAN_VERSION=6 ;;
+        esac
     fi
 fi
 
+# The GUIs (mxeq, jack-graph) are drawn with Cairo and FreeType on plain X11 and link libdbus-1
+# for Bluetooth; they no longer use GTK or gtkmm, so libcairo2 libfreetype6 libx11-6 libdbus-1-3
+# replace libgtk-3-0 and libgtkmm-3.0-1v5 in both lists. Same names on Devuan 5 and 6.
+#
+# jack-example-tools (Devuan 6 and newer only): jackd2 moved jack_lsp and jack_connect into it
+# and only Recommends it, and jack-route-select, jack-autoconnect, two init scripts and mxeq all
+# run them. On Devuan 5 they are still part of jackd2 and the package does not exist.
+#
 # Note: We do NOT install bluez-alsa-utils because we use our prebuilt BlueALSA daemon in contrib/bin/
 # We only need libasound2-plugin-bluez for the ALSA plugin that alsa_out uses
 if [ "$DEVUAN_VERSION" -ge 6 ] 2>/dev/null; then
     # Devuan 6 uses polkitd and t64 package names
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libgtk-3-0t64 libgtkmm-3.0-1v5 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
+    REQUIRED_PACKAGES="jackd2 jack-example-tools alsa-utils libasound2-plugins apulse logrotate libcairo2 libfreetype6 libx11-6 libdbus-1-3 bluez bluez-tools dbus polkitd pkexec imagemagick libasound2-plugin-bluez libbluetooth3  libspandsp2t64 libsbc1 libb2-1 libts0t64"
 else
     # Devuan 5 and other Debian-like systems
-    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libgtk-3-0 libgtkmm-3.0-1v5 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
+    REQUIRED_PACKAGES="jackd2 alsa-utils libasound2-plugins apulse logrotate libcairo2 libfreetype6 libx11-6 libdbus-1-3 bluez bluez-tools dbus policykit-1 imagemagick libasound2-plugin-bluez libb2-1 libts0"
 fi
 
 echo "Installing jack-bridge contrib files"
@@ -209,9 +223,14 @@ fi
 # Install jack-graph binary (JACK/ALSA port connection manager)
 # One binary for every supported release, built on the oldest distro in use
 # (Devuan 5 / glibc 2.36). glibc is backward compatible, so that build also runs
-# on Devuan 6; the reverse is not true, which is what the separate
-# jack-graph-devuan-five-version used to work around. Build it with
-# `cd jack-graph && make` on a Devuan 5 machine and copy it here.
+# on Devuan 6 and 7; the reverse is not true, which is what the separate
+# jack-graph-devuan-five-version used to work around.
+#
+# This installer builds nothing: it copies the prebuilt binaries in contrib/bin, which
+# ship in the release tarball. THE SAME RULE APPLIES TO mxeq: a GUI built on Devuan 6
+# (glibc 2.41) requires GLIBC_2.38 and will not start on Devuan 5, so the mxeq and
+# jack-graph that go into contrib/bin for a release must be built on Devuan 5. The
+# other binaries in contrib/bin already run on Devuan 5 (they need GLIBC_2.34 or older).
 JACK_GRAPH_SRC="contrib/bin/jack-graph"
 
 if [ -f "$JACK_GRAPH_SRC" ]; then
@@ -221,7 +240,7 @@ if [ -f "$JACK_GRAPH_SRC" ]; then
     echo "  ✓ Installed jack-graph to /usr/local/bin/jack-graph"
 else
     echo "WARNING: jack-graph binary not found at $JACK_GRAPH_SRC"
-    echo "         Build with: cd jack-graph && make"
+    echo "         Build with: make graph   (from the repository root)"
 fi
 
 # Install jack-graph desktop file
@@ -250,6 +269,29 @@ pcm.current_input {
 EOF
 chmod 644 "${ASOUND_D_DIR}/current_input.conf"
 echo "Installed default ${ASOUND_D_DIR}/current_input.conf (pcm.current_input -> input_card0)"
+
+# Install the bundled fonts BEFORE either GUI.
+#
+# BOTH BINARIES DRAW THEIR OWN TEXT with FreeType and neither uses fontconfig, so these two faces
+# are not a theming preference -- they are the only fonts the windows have. The compiled-in
+# JACKBRIDGE_RESOURCE_DIR_DEFAULT is where they are looked for first (the Makefile's SHAREDIR), and
+# tools/uirender audits every label against these exact files. Without them a binary falls back to
+# a system face, which FontStack warns about, and the layout on screen is no longer the layout the
+# audit passed.
+FONT_SRC_DIR="resources/fonts"
+FONT_DST_DIR="/usr/local/share/jack-bridge/fonts"
+if [ -d "$FONT_SRC_DIR" ]; then
+    echo "Installing the bundled fonts to ${FONT_DST_DIR}..."
+    mkdir -p "$FONT_DST_DIR"
+    # The licence files travel with the faces: both are redistributed under their own terms.
+    for f in "$FONT_SRC_DIR"/*; do
+        [ -f "$f" ] || continue
+        install -m 0644 "$f" "$FONT_DST_DIR/" || true
+    done
+    echo "  ✓ Installed $(ls -1 "$FONT_SRC_DIR" | wc -l) file(s) to ${FONT_DST_DIR}"
+else
+    echo "WARNING: $FONT_SRC_DIR not found; mxeq and jack-graph will fall back to a system font."
+fi
 
 # Install bundled Alsa Sound Connect GUI from repo contrib/ paths
 # The mxeq binary and desktop file are expected to be committed into the repo at:

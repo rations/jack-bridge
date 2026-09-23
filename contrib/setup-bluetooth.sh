@@ -9,7 +9,6 @@
 # - install D-Bus policy file if present in repo (usr/share/dbus-1/system.d/org.bluealsa.conf)
 # - install polkit rule for BlueZ if present (contrib/etc/polkit-1/rules.d/90-jack-bridge-bluetooth.rules)
 # - add TARGET_USER (or first audio-group user) to 'audio' (and 'bluetooth' if present) groups
-# - create C GUI stub files: src/bt_agent.c, src/gui_bt.c, src/bt_bridge.c if they don't exist
 #
 # Notes:
 # - Autobridge has been removed. Routing is handled via JACK using
@@ -113,39 +112,5 @@ else
     printf "No target user determined; skipping group adds\n"
 fi
 
-# Create GUI C module stubs if missing
-mkdir -p src
-
-create_stub() {
-    path="$1"
-    if [ -f "$path" ]; then
-        printf "Stub %s already exists - skipping\n" "$path"
-        return
-    fi
-    cat > "$path" <<'EOF'
-/*
- * PATH: PLACEHOLDER
- * Minimal stub for GUI Bluetooth integration. Implement D-Bus Agent and GUI hooks here.
- * This file is created by contrib/setup-bluetooth.sh and should be extended in C.
- */
-
-#include <stdio.h>
-
-/* Replace with real headers (glib/gio/gtk) when implementing */
-int bt_stub_main(void) {
-    printf("This is a placeholder for " "PLACEHOLDER" "\n");
-    return 0;
-}
-EOF
-    # Replace placeholder tag with actual path name inside file
-    sed -i "s|PLACEHOLDER|$path|g" "$path" || true
-    chmod 0644 "$path"
-    printf "Created stub %s\n" "$path"
-}
-
-create_stub "src/bt_agent.c"
-create_stub "src/gui_bt.c"
-create_stub "src/bt_bridge.c"
-
-printf "Provisioning and stubs creation complete.\n"
-printf "Next: implement D-Bus Agent and GUI integration in the created stubs, and run this script at package install time if desired.\n"
+printf "Provisioning complete.\n"
+printf "The BlueZ client is built into mxeq (src/bluez/); this script only provisions what it needs at runtime.\n"

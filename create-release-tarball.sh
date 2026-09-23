@@ -34,14 +34,34 @@ cp -r 50-jack.conf "$TEMP_DIR/jack-bridge-${VERSION}/"
 # Installation system
 cp -r contrib/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 
-# Source code (needed for building)
+# Source code (needed for building). Both GUIs build from the ONE root Makefile now -- jack-graph
+# has no Makefile of its own -- so its sources travel with src/.
 cp -r src/ "$TEMP_DIR/jack-bridge-${VERSION}/"
+cp -r jack-graph/ "$TEMP_DIR/jack-bridge-${VERSION}/"
+
+# The bundled fonts. NOT OPTIONAL and not a theme: mxeq and jack-graph draw every glyph themselves
+# through FreeType and neither goes through fontconfig, so without these two faces both windows
+# fall back to whatever the system has and the layout stops being the one tools/uirender audits.
+# install.sh copies this directory to /usr/local/share/jack-bridge/fonts, which is the path
+# compiled into both binaries.
+cp -r resources/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 
 # Additional files needed by installer
 cp -r usr/ "$TEMP_DIR/jack-bridge-${VERSION}/"
 
 # Build system
 cp Makefile "$TEMP_DIR/jack-bridge-${VERSION}/"
+
+# NO BUILD LEFTOVERS. The release's binaries are the prebuilt ones in contrib/bin, which is what
+# install.sh installs -- it builds nothing. `cp -r src/` and `cp -r jack-graph/` would otherwise
+# also carry every object and dependency file the last local build left, which are not part of a
+# release. (mxeq and jack-graph in contrib/bin must come from a Devuan 5 build; see install.sh.)
+find "$TEMP_DIR/jack-bridge-${VERSION}" \( -name '*.o' -o -name '*.d' \) -type f -delete
+
+# The last gtkmm build of jack-graph, from when Devuan 5 needed its own binary. install.sh stopped
+# installing it once jack-graph was built on the oldest release, and there is no GTK anywhere in
+# either GUI now -- shipping it would put 600 KB of dead gtkmm binary in every tarball.
+rm -f "$TEMP_DIR/jack-bridge-${VERSION}/contrib/bin/jack-graph-devuan-five-version"
 
 echo "Excluded development files:"
 echo "  - plans/ (developer documentation)"
